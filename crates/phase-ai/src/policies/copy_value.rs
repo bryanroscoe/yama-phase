@@ -3,9 +3,13 @@ use engine::ai_support::{
     project_copy_mana_spent_for_x,
 };
 use engine::game::game_object::GameObject;
-use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, ContinuousModification, CopyRecipient, Effect, PtValue, QuantityExpr,
+    TargetRef, TriggerCondition, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -70,9 +74,165 @@ impl CopyValuePolicy {
                     .any(|e| copy_effect_strips_legendary(e));
                 score_copy_token_target(ctx.state, ctx.ai_player, source_id, *target_id, strips)
             }
+            (
+                WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. },
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target_id)),
+                },
+            ) if ctx.effects().iter().any(|e| is_self_copy_effect(e)) => {
+                let source_id = ctx.source_object().map(|source| source.id);
+                let strips = ctx
+                    .effects()
+                    .iter()
+                    .any(|e| copy_effect_strips_legendary(e));
+                score_become_copy_target(ctx.state, ctx.ai_player, source_id, *target_id, strips)
+            }
             _ => 0.0,
         }
     }
+}
+
+/// CR 707.2: "~ becomes a copy of target <permanent>": the ability's source is
+/// the one that changes ([`CopyRecipient::Source`]); the target is only read.
+pub(crate) fn is_self_copy_effect(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::BecomeCopy {
+            recipient: CopyRecipient::Source,
+            ..
+        }
+    )
+}
+
+/// CR 707.2: a permanent that "becomes a copy of target <permanent>" takes the
+/// target's copiable values and leaves the target untouched, so a target is
+/// worth what a copy of it is worth, whoever controls it. Creatures are valued
+/// as for token copies. A noncreature's copy is valued by the payoff of a state
+/// trigger the copy satisfies at once ([`zero_counter_state_trigger_payoff`]);
+/// without one it scores 0, as before.
+fn score_become_copy_target(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: Option<ObjectId>,
+    target_id: ObjectId,
+    strips_legendary: bool,
+) -> f64 {
+    let Some(target) = state.objects.get(&target_id) else {
+        return -10.0;
+    };
+    let payoff = source_id
+        .and_then(|id| state.objects.get(&id))
+        .map_or(0.0, |source| {
+            zero_counter_state_trigger_payoff(source, target)
+        });
+    if payoff > 0.0 {
+        // CR 704.5j: copying one's own legend still forces the legend rule, but
+        // here the copy is the one to keep (it carries the payoff), so the cost
+        // is the original the AI puts into its graveyard, not a wasted copy.
+        let lost_original = if target.controller == ai_player
+            && target.card_types.supertypes.contains(&Supertype::Legendary)
+            && !strips_legendary
+        {
+            evaluate_legend_keep_permanent(state, target_id, target)
+        } else {
+            0.0
+        };
+        return payoff
+            - lost_original
+            - copy_target_penalties(state, ai_player, source_id, target, true);
+    }
+    score_copy_token_target(state, ai_player, source_id, target_id, strips_legendary)
+}
+
+/// CR 603.8 + CR 707.2 + CR 614.12: the value of the creature tokens made by
+/// `target`'s "when ~ has no <kind> counters on it" state triggers, for a
+/// `holder` of its copiable values that carries none of those counters.
+///
+/// Counters aren't copiable values, and a permanent that becomes a copy
+/// without entering the battlefield never gets the target's "enters with N
+/// counters" replacement, so such a trigger fires as soon as the copy exists:
+/// Thespian's Stage becoming a copy of Dark Depths has no ice counters, so it
+/// is sacrificed for Marit Lage, a 20/20 flying indestructible token. With
+/// `holder == target` this reads whether a permanent's own payoff is live
+/// (the copy to keep at the legend rule). Returns 0 when nothing applies.
+pub(crate) fn zero_counter_state_trigger_payoff(holder: &GameObject, target: &GameObject) -> f64 {
+    let payoff: f64 = target
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .filter(|trigger| {
+            state_trigger_counter_kind(trigger)
+                .is_some_and(|kind| holder.counters.get(kind).copied().unwrap_or(0) == 0)
+        })
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .map(created_creature_token_value)
+        .sum();
+    payoff.min(30.0)
+}
+
+/// The counter kind of a "When ~ has no <kind> counters on it" state trigger
+/// (CR 603.8), whose condition is "at most zero counters of that kind".
+fn state_trigger_counter_kind(trigger: &TriggerDefinition) -> Option<&CounterType> {
+    if trigger.mode != TriggerMode::StateCondition {
+        return None;
+    }
+    let mut condition = trigger.condition.as_ref()?;
+    while let TriggerCondition::EventTime { condition: inner } = condition {
+        condition = inner;
+    }
+    match condition {
+        TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(kind),
+            maximum: Some(0),
+            ..
+        } => Some(kind),
+        _ => None,
+    }
+}
+
+/// A rough value for the creature tokens an ability creates: half the fixed
+/// power plus toughness, and a little for each evasion or protection keyword,
+/// per token. Tokens with dynamic stats count 1 each.
+fn created_creature_token_value(ability: &AbilityDefinition) -> f64 {
+    crate::cast_facts::collect_definition_effects(ability)
+        .into_iter()
+        .map(|effect| match effect {
+            Effect::Token {
+                power,
+                toughness,
+                types,
+                keywords,
+                count,
+                ..
+            } if types.iter().any(|t| t.eq_ignore_ascii_case("creature")) => {
+                let stats = match (power, toughness) {
+                    (PtValue::Fixed(p), PtValue::Fixed(t)) => f64::from((p + t).max(0)) / 2.0,
+                    _ => 1.0,
+                };
+                let keyword_bonus = keywords
+                    .iter()
+                    .filter(|k| {
+                        matches!(
+                            k,
+                            Keyword::Flying
+                                | Keyword::Trample
+                                | Keyword::Indestructible
+                                | Keyword::Hexproof
+                                | Keyword::Menace
+                                | Keyword::Haste
+                        )
+                    })
+                    .count() as f64
+                    * 1.5;
+                let n = match count {
+                    QuantityExpr::Fixed { value } => f64::from((*value).max(0)),
+                    _ => 1.0,
+                };
+                n * (stats + keyword_bonus)
+            }
+            _ => 0.0,
+        })
+        .sum()
 }
 
 /// CR 704.5j: Prefer keeping commanders and non-token originals over ephemeral
@@ -105,7 +265,10 @@ fn evaluate_legend_keep_permanent(state: &GameState, keep: ObjectId, object: &Ga
     }
 
     if object.card_types.core_types.contains(&CoreType::Land) {
-        return 3.0;
+        // Keep the copy whose "no counters" state trigger is live (Thespian's
+        // Stage as a copy of Dark Depths) over the original that still has
+        // its counters; otherwise lands tie.
+        return 3.0 + zero_counter_state_trigger_payoff(object, object);
     }
 
     (object.mana_cost.mana_value() as f64).min(6.0)

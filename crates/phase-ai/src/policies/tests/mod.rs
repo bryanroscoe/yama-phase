@@ -13,6 +13,7 @@ pub mod enchantments_payoff;
 pub mod energy_payoff;
 pub mod equipment_payoff;
 pub mod graveyard_types;
+pub mod land_copy_value;
 pub mod lifegain_payoff;
 pub mod mill_payoff;
 pub mod mulligan_input_lint;

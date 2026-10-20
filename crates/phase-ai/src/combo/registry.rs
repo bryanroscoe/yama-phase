@@ -51,6 +51,7 @@ impl Default for ComboRegistry {
                 heliod_ballista_line(),
                 thoracle_consultation_line(),
                 kiki_felidar_line(),
+                stage_depths_line(),
             ],
             detector: Box::new(StructuralComboDetector),
         }
@@ -294,6 +295,41 @@ fn kiki_felidar_line() -> ComboLine {
     }
 }
 
+/// Thespian's Stage + Dark Depths: "{2}, {T}: This land becomes a copy of
+/// target land, except it has this ability." The copy of Dark Depths has no
+/// ice counters (counters aren't copied, and it never entered with ten), so
+/// its state trigger at once sacrifices it for Marit Lage, a legendary 20/20
+/// flying indestructible token (CR 707.2 + CR 603.8; keep the copy at the
+/// legend rule, CR 704.5j).
+///
+/// Not a win by itself, unlike the lines above, and Commander decks run it
+/// outside cEDH (Tricky Terrain). It is registered for the tutor scorer
+/// (`tutor::score_search_choice_selection`), which, at every difficulty, adds
+/// a bonus to the missing piece of a near-reachable line: with one piece on
+/// the battlefield, Expedition Map and Sylvan Scrying fetch the other. The
+/// target choice itself is scored structurally by `copy_value`
+/// (`zero_counter_state_trigger_payoff`), not by this line. Thespian's Stage's
+/// copy ability is `abilities[1]` (`abilities[0]` is its `{T}: Add {C}`).
+fn stage_depths_line() -> ComboLine {
+    ComboLine {
+        id: ComboLineId(3),
+        name: "Thespian's Stage + Dark Depths",
+        pieces: vec![
+            ComboPiece::OnBattlefield(CardPredicate::NameEquals("Thespian's Stage")),
+            ComboPiece::OnBattlefield(CardPredicate::NameEquals("Dark Depths")),
+        ],
+        mana_cost: ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        },
+        action_sequence: vec![ComboStep::Activate {
+            predicate: CardPredicate::NameEquals("Thespian's Stage"),
+            ability_index: 1,
+        }],
+        win_kind: WinKind::LethalDamage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,7 +344,7 @@ mod tests {
     #[test]
     fn registry_exposes_expected_lines() {
         let reg = ComboRegistry::default();
-        assert_eq!(reg.lines().len(), 3);
+        assert_eq!(reg.lines().len(), 4);
         assert_eq!(reg.lines()[0].id, ComboLineId(0));
         assert_eq!(
             reg.lines()[0].name,
@@ -324,6 +360,8 @@ mod tests {
             reg.lines()[2].name,
             "Kiki-Jiki, Mirror Breaker + Felidar Guardian"
         );
+        assert_eq!(reg.lines()[3].id, ComboLineId(3));
+        assert_eq!(reg.lines()[3].name, "Thespian's Stage + Dark Depths");
     }
 
     #[test]
