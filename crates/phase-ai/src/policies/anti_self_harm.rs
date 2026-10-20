@@ -45,10 +45,10 @@ use super::copy_value::{
     copy_effect_strips_legendary, copy_target_penalties, score_legend_rule_keep,
 };
 use super::effect_classify::{
-    aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
-    exact_pending_player_impact, extract_target_filter, is_spell_beneficial, lethal_to_creature,
-    targeted_object_impact, targeted_player_impact, targets_creatures, targets_creatures_only,
-    EffectPolarity, PLAYER_IMPACT_PREFERENCE_BAND,
+    aggregate_player_impact, aura_polarity, effect_polarity, effect_polarity_for_source,
+    effect_targets_object, exact_pending_player_impact, extract_target_filter, is_spell_beneficial,
+    lethal_to_creature, targeted_object_impact, targeted_player_impact, targets_creatures,
+    targets_creatures_only, EffectPolarity, PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
@@ -773,7 +773,9 @@ fn slot_polarity(ctx: &PolicyContext<'_>, targeted_impact: Option<f64>) -> Effec
 
     ctx.effects()
         .first()
-        .map_or(EffectPolarity::Contextual, |effect| effect_polarity(effect))
+        .map_or(EffectPolarity::Contextual, |effect| {
+            effect_polarity_for_source(effect, ctx.source_object())
+        })
 }
 
 /// [`slot_polarity`] resolved to "beneficial for whoever fills this slot",
