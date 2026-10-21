@@ -64,6 +64,41 @@ impl TacticalPolicy for SweeperTimingPolicy {
 
         let opposing_creatures = count_opposing_creatures(ctx.state, ctx.ai_player);
 
+        // Free-for-all: the duel threshold counts one opponent's board. Summed
+        // over several opponents it is reached by round three or four, when each
+        // has a creature or two, and a wipe then resets every board, the caster's
+        // included (deck-lab traces, 2026-10-20: 1.6 wipes a game, 37% of the
+        // creatures they killed were the caster's own). Apply the threshold to
+        // the most developed opponent instead, and call a wipe that costs the
+        // caster as many creatures as it costs that opponent premature.
+        let opponents = players::opponents(ctx.state, ctx.ai_player);
+        if opponents.len() >= 2 {
+            let leader = opponents
+                .iter()
+                .map(|&opp| count_creatures_of(ctx.state, opp))
+                .max()
+                .unwrap_or(0);
+            let own = count_creatures_of(ctx.state, ctx.ai_player);
+            let timely = leader >= SWEEPER_TIMELY_THRESHOLD && own < leader;
+            let reason = if timely {
+                "sweeper_timely"
+            } else {
+                "sweeper_premature"
+            };
+            let delta = if timely {
+                DELTA_TIMELY
+            } else {
+                DELTA_PREMATURE
+            };
+            return PolicyVerdict::score(
+                delta,
+                PolicyReason::new(reason)
+                    .with_fact("opposing_creatures", opposing_creatures as i64)
+                    .with_fact("leading_opponent_creatures", leader as i64)
+                    .with_fact("own_creatures", own as i64),
+            );
+        }
+
         if opposing_creatures >= SWEEPER_TIMELY_THRESHOLD {
             PolicyVerdict::Score {
                 delta: DELTA_TIMELY,
@@ -96,6 +131,18 @@ fn candidate_is_sweeper(ctx: &PolicyContext<'_>) -> bool {
         return false;
     };
     is_sweeper_parts(&facts.object.abilities)
+}
+
+/// Creature permanents controlled by `player`.
+fn count_creatures_of(state: &GameState, player: PlayerId) -> u32 {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| {
+            obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .count() as u32
 }
 
 /// Count the number of creature permanents controlled by opponents of `player`.
@@ -268,6 +315,75 @@ mod tests {
         assert!(SweeperTimingPolicy
             .activation(&features, &state, AI)
             .is_some());
+    }
+
+    fn make_creature_for(state: &mut GameState, owner: PlayerId, idx: u64) -> ObjectId {
+        let oid = create_object(
+            state,
+            CardId(9000 + idx),
+            owner,
+            format!("Creature {idx}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&oid).unwrap();
+        obj.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: Vec::new(),
+        };
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        oid
+    }
+
+    fn multiplayer_verdict(per_opponent: [u64; 3], own: u64) -> (f64, String) {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 4, 42);
+        let mut idx = 0;
+        for (seat, &n) in per_opponent.iter().enumerate() {
+            for _ in 0..n {
+                make_creature_for(&mut state, PlayerId(seat as u8 + 1), idx);
+                idx += 1;
+            }
+        }
+        for _ in 0..own {
+            make_creature_for(&mut state, AI, idx);
+            idx += 1;
+        }
+        let sweeper_id = make_sweeper_spell(&mut state, 0);
+        let candidate = cast_candidate(sweeper_id, CardId(6000));
+        let decision = priority_decision();
+        let (context, config) = context_with_features(control_features_with_sweepers(3, 0.8));
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        match SweeperTimingPolicy.verdict(&ctx) {
+            PolicyVerdict::Score { delta, reason } => (delta, reason.kind.to_string()),
+            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
+        }
+    }
+
+    #[test]
+    fn free_for_all_threshold_applies_to_the_leading_opponent() {
+        // One creature each across three opponents meets the duel threshold in
+        // total, but no single opponent has a board worth a wipe.
+        assert_eq!(multiplayer_verdict([1, 1, 1], 0).1, "sweeper_premature");
+        // One opponent with three creatures against an empty board: timely.
+        let (delta, kind) = multiplayer_verdict([3, 1, 0], 0);
+        assert_eq!(kind, "sweeper_timely");
+        assert!(delta > 0.0);
+    }
+
+    #[test]
+    fn free_for_all_wipe_that_costs_the_caster_as_much_is_premature() {
+        assert_eq!(multiplayer_verdict([3, 2, 2], 3).1, "sweeper_premature");
+        assert_eq!(multiplayer_verdict([4, 2, 2], 3).1, "sweeper_timely");
     }
 
     #[test]
