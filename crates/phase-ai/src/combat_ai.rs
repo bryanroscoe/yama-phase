@@ -1144,6 +1144,12 @@ fn expanded_multiplayer_choice(
         let mut open_damage = 0;
         let mut commander_finish = false;
         let mut complete = true;
+        // Every attacker that may legally attack this defender, with the blockers
+        // that could legally (and, under a minimum-blocker floor, sufficiently)
+        // block it, and the attackers the single-block verdict below declined.
+        // Read by the whole-attack assignment estimate after the loop.
+        let mut eligible_by_attacker: Vec<(ObjectId, Vec<ObjectId>)> = Vec::new();
+        let mut declined: Vec<ObjectId> = Vec::new();
 
         for &attacker_id in input.candidates {
             #[cfg(test)]
@@ -1241,7 +1247,9 @@ fn expanded_multiplayer_choice(
             } else {
                 true
             };
+            eligible_by_attacker.push((attacker_id, damage_blockers.to_vec()));
             if !should_attack && !input.mandatory.contains(&attacker_id) {
+                declined.push(attacker_id);
                 continue;
             }
             attackers.push(attacker_id);
@@ -1284,11 +1292,47 @@ fn expanded_multiplayer_choice(
             0.25 * f64::from(damage.max(0).min(defender_life))
                 * (0.5 + threat_level(state, player, defender))
         };
-        let finishes = blocked_damage >= defender_life && defender_life > 0 || commander_finish;
+        let estimate_finishes =
+            blocked_damage >= defender_life && defender_life > 0 || commander_finish;
         let open_pressure = pressure(open_damage);
-        let pre_finish_utility =
+        let estimate_utility =
             (opposing_losses - own_losses + pressure(blocked_damage)).min(open_pressure);
+        // CR 509.1a: each creature blocks at most one attacker, so the per-attacker
+        // estimate above (every attacker met by every eligible blocker at once) is a
+        // floor, not a forecast: three attackers into one untapped blocker still put
+        // two through. Re-score the attack as a whole against the block this
+        // defender would actually declare, and add declined attackers whose blocks
+        // the defender can't afford. Falls back to the estimate above when the
+        // whole-attack work would exceed its bound.
+        let whole = whole_attack_proposal(
+            state,
+            player,
+            defender,
+            &attackers,
+            &declined,
+            &eligible_by_attacker,
+            &values,
+            &pressure,
+        );
+        let (pre_finish_utility, finishes) = whole
+            .as_ref()
+            .map_or((estimate_utility, estimate_finishes), |w| {
+                (w.pre_finish_utility, w.finishes)
+            });
         let utility = pre_finish_utility + if finishes { 2.0 } else { 0.0 };
+        #[cfg(test)]
+        let (blocked_damage, opposing_losses, own_losses, open_pressure) = match &whole {
+            Some(w) => (
+                w.damage,
+                w.opposing_losses,
+                w.own_losses,
+                pressure(w.open_damage),
+            ),
+            None => (blocked_damage, opposing_losses, own_losses, open_pressure),
+        };
+        if let Some(w) = whole {
+            attackers = w.attackers;
+        }
         #[cfg(test)]
         EXPANDED_PROPOSAL_ACCOUNTING.with(|accounting| {
             accounting.borrow_mut().push(ProposalAccounting {
@@ -1352,6 +1396,265 @@ fn expanded_multiplayer_choice(
         defender: selected.defender,
         attackers: Some(selected.attackers),
     })
+}
+
+/// Work ceiling for the whole-attack re-scoring of one defender's proposal,
+/// counted in attacker-blocker pairs handed to the block model.
+const WHOLE_ATTACK_WORK_LIMIT: usize = 4096;
+
+/// A defender's proposal re-scored as one attack against one block declaration.
+/// The damage and loss fields are read by the test-only proposal accounting.
+#[cfg_attr(not(test), allow(dead_code))]
+struct WholeAttack {
+    attackers: Vec<ObjectId>,
+    /// Combat damage to the defender under the modeled block (trample excess included).
+    damage: i32,
+    /// Damage if nothing were blocked.
+    open_damage: i32,
+    opposing_losses: f64,
+    own_losses: f64,
+    pre_finish_utility: f64,
+    finishes: bool,
+}
+
+/// Score `attack` as a whole: the defender answers it with the block the AI's own
+/// blocker heuristic would declare (one blocker per attacker unless it gang-blocks,
+/// chumping only when its objective calls for it), restricted to the blockers the
+/// comparison found legal (minimum-blocker floors included). Returns `None` when
+/// the attack set is empty.
+#[allow(clippy::too_many_arguments)]
+fn score_whole_attack(
+    state: &GameState,
+    _player: PlayerId,
+    defender: PlayerId,
+    attack: &[ObjectId],
+    eligible_by_attacker: &[(ObjectId, Vec<ObjectId>)],
+    values: &HashMap<ObjectId, CombatValue>,
+    pressure: &dyn Fn(i32) -> f64,
+    work: &mut usize,
+) -> Option<WholeAttack> {
+    if attack.is_empty() {
+        return None;
+    }
+    // CR 509.1a: the legal blocks, keyed blocker -> attackers, for the block model.
+    let mut valid_block_targets: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+    for (attacker_id, blockers) in eligible_by_attacker {
+        if !attack.contains(attacker_id) {
+            continue;
+        }
+        for &blocker in blockers {
+            *work += 1;
+            valid_block_targets
+                .entry(blocker)
+                .or_default()
+                .push(*attacker_id);
+        }
+    }
+    // The defender is modeled with a neutral profile: its real difficulty and
+    // archetype are not the attacker's to know.
+    let blocks = if valid_block_targets.is_empty() {
+        Vec::new()
+    } else {
+        choose_blockers_with_profile(
+            state,
+            defender,
+            attack,
+            &AiProfile::default(),
+            Some(&valid_block_targets),
+        )
+    };
+    let value_of = |id: ObjectId| -> f64 {
+        values
+            .get(&id)
+            .map(|v| v.raw.max(0.0) / 5.0)
+            .unwrap_or_else(|| evaluate_creature(state, id).max(0.0) / 5.0)
+    };
+    let defender_life = state.players[defender.0 as usize].life.max(0);
+    let mut damage = 0;
+    let mut open_damage = 0;
+    let mut own_losses = 0.0;
+    let mut opposing_losses = 0.0;
+    let mut commander_finish = false;
+    let mut killed_blockers: HashSet<ObjectId> = HashSet::new();
+    for &attacker_id in attack {
+        let open = engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[]);
+        open_damage += open;
+        let blockers: Vec<ObjectId> = blocks
+            .iter()
+            .filter(|(_, a)| *a == attacker_id)
+            .map(|(b, _)| *b)
+            .collect();
+        let through = if blockers.is_empty() {
+            open
+        } else {
+            engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &blockers)
+        };
+        damage += through;
+        if commander_attack_finishes(state, defender, attacker_id, through) {
+            commander_finish = true;
+        }
+        let Some(attacker) = state.objects.get(&attacker_id) else {
+            continue;
+        };
+        match blockers.as_slice() {
+            [] => {}
+            [blocker_id] => {
+                if let Some(blocker) = state.objects.get(blocker_id) {
+                    let (attacker_dies, blocker_survives) =
+                        evaluate_block_outcome(blocker, attacker);
+                    if attacker_dies {
+                        own_losses += value_of(attacker_id);
+                    }
+                    if !blocker_survives && killed_blockers.insert(*blocker_id) {
+                        opposing_losses += value_of(*blocker_id);
+                    }
+                }
+            }
+            gang => {
+                // A gang block: the attacker dies to the gang's combined damage
+                // (or any deathtouch), and kills what its power reaches, smallest
+                // first. A coarse model for a rare case.
+                let stats: Vec<(ObjectId, i32, i32, bool)> = gang
+                    .iter()
+                    .filter_map(|id| {
+                        let b = state.objects.get(id)?;
+                        Some((
+                            *id,
+                            b.power.unwrap_or(0).max(0),
+                            b.toughness.unwrap_or(0) - i32::try_from(b.damage_marked).unwrap_or(0),
+                            b.has_keyword(&Keyword::Deathtouch),
+                        ))
+                    })
+                    .collect();
+                let gang_power: i32 = stats.iter().map(|s| s.1).sum();
+                let attacker_toughness = attacker.toughness.unwrap_or(0)
+                    - i32::try_from(attacker.damage_marked).unwrap_or(0);
+                if !attacker.has_keyword(&Keyword::Indestructible)
+                    && (gang_power >= attacker_toughness || stats.iter().any(|s| s.3 && s.1 > 0))
+                {
+                    own_losses += value_of(attacker_id);
+                }
+                let mut remaining = attacker.power.unwrap_or(0).max(0);
+                let deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
+                let mut by_toughness = stats.clone();
+                by_toughness.sort_by_key(|s| s.2);
+                for (id, _, toughness, _) in by_toughness {
+                    let needed = if deathtouch { 1 } else { toughness.max(1) };
+                    if remaining < needed {
+                        break;
+                    }
+                    remaining -= needed;
+                    if killed_blockers.insert(id) {
+                        opposing_losses += value_of(id);
+                    }
+                }
+            }
+        }
+    }
+    let finishes = damage >= defender_life && defender_life > 0 || commander_finish;
+    let pre_finish_utility =
+        (opposing_losses - own_losses + pressure(damage)).min(pressure(open_damage));
+    Some(WholeAttack {
+        attackers: attack.to_vec(),
+        damage,
+        open_damage,
+        opposing_losses,
+        own_losses,
+        pre_finish_utility,
+        finishes,
+    })
+}
+
+/// Re-score one defender's proposal as a whole attack (see [`score_whole_attack`])
+/// and consider adding the declined attackers, largest unblocked damage first:
+/// the attack with all of them is scored, then every prefix of that order, and
+/// the best is kept (ties keep the earlier, smaller attack). Prefixes, not
+/// one-at-a-time additions, because overwhelming a defender's blockers takes a
+/// critical mass: one more attacker into a wall is worth nothing until there are
+/// more attackers than blockers. Declined commanders are never added (CR 903.8:
+/// the single-block verdict already keeps a commander out of any block it
+/// doesn't survive). Past the work bound the best attack scored so far stands.
+/// `None` when nothing is attacking either way.
+#[allow(clippy::too_many_arguments)]
+fn whole_attack_proposal(
+    state: &GameState,
+    player: PlayerId,
+    defender: PlayerId,
+    chosen: &[ObjectId],
+    declined: &[ObjectId],
+    eligible_by_attacker: &[(ObjectId, Vec<ObjectId>)],
+    values: &HashMap<ObjectId, CombatValue>,
+    pressure: &dyn Fn(i32) -> f64,
+) -> Option<WholeAttack> {
+    let mut work = 0usize;
+    let total = |w: &WholeAttack| w.pre_finish_utility + if w.finishes { 2.0 } else { 0.0 };
+    let mut best = score_whole_attack(
+        state,
+        player,
+        defender,
+        chosen,
+        eligible_by_attacker,
+        values,
+        pressure,
+        &mut work,
+    );
+    let mut order: Vec<(ObjectId, i32)> = declined
+        .iter()
+        .filter(|id| !state.objects.get(id).is_some_and(|o| o.is_commander))
+        .map(|&id| {
+            (
+                id,
+                engine::game::combat_damage::combat_damage_to_defender(state, id, &[]),
+            )
+        })
+        .filter(|&(_, open)| open > 0)
+        .collect();
+    order.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if order.is_empty() {
+        return best;
+    }
+    // The all-in attack first, so a large board's critical mass is weighed even
+    // when the work bound cuts the prefix sweep short.
+    let mut all_in: Vec<ObjectId> = chosen.to_vec();
+    all_in.extend(order.iter().map(|&(id, _)| id));
+    let all_in_score = score_whole_attack(
+        state,
+        player,
+        defender,
+        &all_in,
+        eligible_by_attacker,
+        values,
+        pressure,
+        &mut work,
+    );
+    let mut trial: Vec<ObjectId> = chosen.to_vec();
+    for &(candidate, _) in &order[..order.len() - 1] {
+        if work >= WHOLE_ATTACK_WORK_LIMIT {
+            break;
+        }
+        trial.push(candidate);
+        let Some(scored) = score_whole_attack(
+            state,
+            player,
+            defender,
+            &trial,
+            eligible_by_attacker,
+            values,
+            pressure,
+            &mut work,
+        ) else {
+            continue;
+        };
+        if total(&scored) > best.as_ref().map_or(0.0, total) {
+            best = Some(scored);
+        }
+    }
+    if let Some(scored) = all_in_score {
+        if total(&scored) > best.as_ref().map_or(0.0, total) {
+            best = Some(scored);
+        }
+    }
+    best
 }
 
 fn commander_attack_finishes(
@@ -4938,23 +5241,27 @@ mod tests {
             .find(|proposal| proposal.defender == PlayerId(2))
             .expect("the open defender has a complete proposal");
         assert_eq!(p1.own_losses, 0.0);
-        assert_eq!(
-            p1.opposing_losses,
-            evaluate_creature(&state, blocker) / 5.0,
+        // CR 509.1a: the lone untapped 2/2 blocks at most one attacker, so its value
+        // is credited at most once and at least four 5/5s connect. (Before the
+        // whole-attack model, every attacker was assumed blocked by it at once,
+        // so P1 was scored as taking no damage at all.)
+        assert!(
+            p1.opposing_losses <= evaluate_creature(&state, blocker) / 5.0,
             "five hypothetical blocks by one ObjectId may earn its value only once"
+        );
+        assert!(
+            p1.blocked_damage >= 20,
+            "one blocker stops at most one of five attackers, got {}",
+            p1.blocked_damage
         );
         assert!(
             p1.pre_finish_utility <= p1.open_pressure,
             "optional block credit is bounded by the defender declining every block"
         );
-        let fictional_repeated_credit =
-            (p1.opposing_losses * attackers.len() as f64).min(p1.open_pressure);
-        assert!(
-            p1.pre_finish_utility < p2.utility && p2.utility < fictional_repeated_credit,
-            "the open defender is between the deduplicated and fictional repeated-credit proposals"
-        );
-        assert_eq!(choice.defender, PlayerId(2));
+        assert_eq!(p2.blocked_damage, 25, "the open defender takes everything");
+        assert!(p1.utility > 0.0 && p2.utility > 0.0);
         assert_eq!(choice.attackers.as_deref(), Some(attackers.as_slice()));
+        let expected_defender = choice.defender;
 
         state.phase = engine::types::phase::Phase::DeclareAttackers;
         state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
@@ -4968,10 +5275,108 @@ mod tests {
             engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
                 if attacks.len() == attackers.len()
                     && attacks.iter().all(|(id, target)| attackers.contains(id)
-                        && *target == AttackTarget::Player(PlayerId(2)))
+                        && *target == AttackTarget::Player(expected_defender))
         ));
         engine::game::engine::apply_as_current(&mut state, action)
             .expect("the deduplicated public selection is engine legal");
+    }
+
+    #[test]
+    fn free_for_all_attackers_outnumbering_a_wall_attack_through_it() {
+        // CR 509.1a: one untapped creature blocks one attacker. Each opponent holds
+        // a single 2/4 wall that a lone 3/3 just bounces off, so the single-block
+        // verdict declines every 3/3; together, all but one connect.
+        let mut state = setup_multiplayer(3);
+        let bears: Vec<_> = (0..3)
+            .map(|_| add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]))
+            .collect();
+        add_creature(&mut state, PlayerId(1), "Wall", 2, 4, vec![]);
+        add_creature(&mut state, PlayerId(2), "Wall", 2, 4, vec![]);
+        reset_expanded_comparison_counters();
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        assert_eq!(
+            attacks.len(),
+            3,
+            "outnumbered walls can't stop the attack: {attacks:?}"
+        );
+        assert!(attacks.iter().all(|(id, _)| bears.contains(id)));
+        let target = attacks[0].1;
+        assert!(
+            attacks.iter().all(|(_, t)| *t == target),
+            "the comparison keeps one defender per combat"
+        );
+        let proposal = expanded_proposal_accounting()
+            .into_iter()
+            .find(|p| AttackTarget::Player(p.defender) == target)
+            .expect("the chosen defender's proposal is recorded");
+        assert_eq!(
+            proposal.blocked_damage, 6,
+            "the wall stops one bear, two connect"
+        );
+        assert_eq!(proposal.own_losses, 0.0);
+    }
+
+    #[test]
+    fn free_for_all_whole_attack_weighs_the_all_in_attack_on_a_large_board() {
+        // Forty 3/3s against opponents holding thirty-five 0/4 walls each (no
+        // power, so no crackback): only an attack with more bears than walls
+        // connects, and the prefix sweep runs out of work long before it gets
+        // there. The all-in attack is scored first, so it still wins.
+        let mut state = setup_multiplayer(3);
+        for _ in 0..40 {
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        }
+        for opp in [PlayerId(1), PlayerId(2)] {
+            for _ in 0..35 {
+                add_creature(&mut state, opp, "Wall", 0, 4, vec![]);
+            }
+        }
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        assert_eq!(attacks.len(), 40, "five bears get through an all-in attack");
+    }
+
+    #[test]
+    fn free_for_all_whole_attack_never_adds_a_declined_commander() {
+        // CR 903.8: the single-block verdict keeps a commander out of any block it
+        // doesn't win; the whole-attack additions respect that.
+        let mut state = setup_multiplayer(3);
+        let bears: Vec<_> = (0..2)
+            .map(|_| add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]))
+            .collect();
+        let commander = add_creature(&mut state, PlayerId(0), "Commander", 3, 3, vec![]);
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        add_creature(&mut state, PlayerId(1), "Wall", 2, 4, vec![]);
+        add_creature(&mut state, PlayerId(2), "Wall", 2, 4, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        assert!(
+            attacks.iter().all(|(id, _)| *id != commander),
+            "{attacks:?}"
+        );
+        assert_eq!(attacks.len(), 2);
+        assert!(attacks.iter().all(|(id, _)| bears.contains(id)));
+    }
+
+    #[test]
+    fn free_for_all_whole_attack_declines_when_blockers_match_attackers() {
+        // Two bears into an opponent with two walls (and the other opponent the
+        // same): every bear is stopped, nothing connects, so nothing attacks.
+        let mut state = setup_multiplayer(3);
+        for _ in 0..2 {
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        }
+        for opp in [PlayerId(1), PlayerId(2)] {
+            for _ in 0..2 {
+                add_creature(&mut state, opp, "Wall", 2, 4, vec![]);
+            }
+        }
+
+        assert!(choose_attackers_with_targets(&state, PlayerId(0)).is_empty());
     }
 
     #[test]
