@@ -116,6 +116,7 @@ mod block_capacities_blocker_prompt;
 mod block_trigger_cardinality;
 mod blocked_history_primitive;
 mod blocked_status_filter;
+mod blood_moon_urborg_layer4_dependency;
 mod bolas_citadel_regression;
 mod bombur_gentle_dreamer_conditional_untap;
 mod boneyard_parley_pile_separation;
