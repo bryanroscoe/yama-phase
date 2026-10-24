@@ -1205,6 +1205,16 @@ fn finish_payment_terminal(
         .filter(|candidate| candidate.metadata.tactical_class == TacticalClass::Mana)
         .collect();
     for candidate in mana {
+        // The allowance is shared with every node below this one, so a sibling
+        // must re-check it: the entry check alone let a node whose earlier child
+        // spent the last application decrement past zero. In a build without
+        // overflow checks that wrapped the counter to `usize::MAX` and left the
+        // search unbounded — an exhaustive walk of every order in which the
+        // payer's mana sources can be tapped, with a full candidate enumeration
+        // at each node (seen: one AI decision running for over 20 minutes).
+        if budget.payment_applications_remaining == 0 {
+            return None;
+        }
         let frozen = FrozenCandidate::capture(state, &candidate)?;
         let mut next = state.clone();
         budget.payment_applications_remaining -= 1;
@@ -1326,6 +1336,72 @@ mod tests {
             assert!(decision.terminal_branch_budget().is_some());
         }
         assert!(decision.terminal_branch_budget().is_none());
+    }
+
+    /// The payment search's application allowance is a hard bound. The fixture
+    /// is a manual payment for {R}{R} with three untapped Mountains and one
+    /// application left: the first tap spends it without completing the cast,
+    /// so the next sibling tap must stop the search. Before the in-loop
+    /// re-check, that sibling decremented the exhausted counter — a panic under
+    /// overflow checks (this test), and in release a wrap to `usize::MAX` that
+    /// made the search exhaustive (a lab game stuck in one AI decision for over
+    /// 20 minutes, walking every tapping order of its mana sources).
+    #[test]
+    fn payment_search_stops_at_its_application_allowance() {
+        use super::finish_payment_terminal;
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let owner = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(owner, ManaColor::Red);
+        }
+        let spell = scenario
+            .add_spell_to_hand(owner, "Twin Flames Probe", false)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("a manual cast reaches mana payment");
+        let mut state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "fixture precondition: the cast must wait for manual payment; got {:?}",
+            state.waiting_for
+        );
+        let cast = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&state.objects[&spell]),
+            state.objects[&spell].zone,
+        );
+
+        let mut budget = ProspectiveBudget {
+            payment_applications_remaining: 1,
+            ..Default::default()
+        };
+        let terminal = finish_payment_terminal(&mut state, owner, cast, &mut budget);
+
+        assert!(
+            terminal.is_none(),
+            "one application cannot pay {{R}}{{R}}, so the search must give up"
+        );
+        assert_eq!(
+            budget.payment_applications_remaining, 0,
+            "the allowance must end exhausted, never wrapped past zero"
+        );
     }
 
     #[test]
