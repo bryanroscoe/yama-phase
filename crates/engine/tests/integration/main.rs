@@ -2031,3 +2031,4 @@ mod lazotep_quarry_x_ability_with_tap;
 mod planar_nexus_every_nonbasic_land_type;
 mod jace_multiverse_architect_attack_restriction;
 mod zaffai_thunder_conductor_magecraft;
+mod windgraces_judgment_one_per_opponent;

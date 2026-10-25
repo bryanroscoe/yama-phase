@@ -41908,6 +41908,31 @@ fn strip_trailing_coin_heads_quantifier(text: &str) -> Option<&str> {
 /// [`parse_effect_chain_ir_body`] so every one of its return paths passes
 /// through the per-opponent choice tail rule
 /// ([`per_opponent_choice::enforce_per_opponent_choice_tail`]).
+/// The "any number of target … controlled by different players" wording of a
+/// "For any number of opponents, <verb> target <thing> that player controls"
+/// instruction, or `None` for any other text. See `parse_effect_chain_ir_body`.
+fn for_any_number_of_opponents_equivalent(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let (_, (_, verb, _, thing, _, tail)) = (
+        tag::<_, _, OracleError<'_>>("for any number of opponents, "),
+        take_until(" target "),
+        tag(" target "),
+        take_until(" that player controls"),
+        tag(" that player controls"),
+        (opt(tag(".")), eof),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    let start = "for any number of opponents, ".len();
+    let verb = &text[start..start + verb.len()];
+    let thing_start = start + verb.len() + " target ".len();
+    let thing = &text[thing_start..thing_start + thing.len()];
+    let period = if tail.0.is_some() { "." } else { "" };
+    Some(format!(
+        "{verb} any number of target {thing} an opponent controls controlled by different players{period}"
+    ))
+}
+
 pub(crate) fn parse_effect_chain_ir(
     text: &str,
     kind: AbilityKind,
@@ -41923,6 +41948,17 @@ fn parse_effect_chain_ir_body(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    // CR 115.1 + CR 601.2c + CR 608.2c: "For any number of opponents,
+    // <instruction> target <permanent> that player controls" (Windgrace's
+    // Judgment) chooses any number of opponents and, for each, one target that
+    // opponent controls. That is any number of targets opponents control, no
+    // two controlled by the same player: parse that equivalent wording, which
+    // the "any number of target" and "controlled by different players" grammar
+    // already lowers (an unbounded multi-target with
+    // `TargetSelectionConstraint::DifferentObjectControllers`).
+    if let Some(equivalent) = for_any_number_of_opponents_equivalent(text) {
+        return parse_effect_chain_ir_body(&equivalent, kind, ctx);
+    }
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
