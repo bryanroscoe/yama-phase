@@ -1458,6 +1458,7 @@ mod stensian_sanguinist_prepare;
 mod strategic_betrayal_6505;
 mod strefan_maurer_progenitor;
 mod strider_ranger_of_the_north;
+mod study_hall_costed_any_color_land;
 mod subject_anchored_optional_announcer;
 mod subtype_list_seams;
 mod summer_bloom_5979;
