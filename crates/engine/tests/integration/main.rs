@@ -2026,3 +2026,4 @@ mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod tifa_additional_combat;
 mod any_one_color_multi_mana_castability;
+mod hashep_oasis_sacrifices_itself;
