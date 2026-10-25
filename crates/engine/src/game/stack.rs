@@ -11395,6 +11395,7 @@ mod tests {
                 enter_with_counters: vec![],
                 tapped: false,
                 enters_attacking: false,
+                entry_attack_player: None,
                 sacrifice_at: None,
                 source_id: ObjectId(1),
                 controller: PlayerId(0),

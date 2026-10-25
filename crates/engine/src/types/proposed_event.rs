@@ -381,6 +381,12 @@ pub struct TokenSpec {
     /// CR 508.4: Token enters the battlefield attacking (not declared as
     /// attacker).
     pub enters_attacking: bool,
+    /// CR 508.4 + CR 608.2c: the player an attacking token enters attacking,
+    /// when the instruction names one ("for each opponent, create … attacking
+    /// that player": Adeline, Resplendent Cathar). `None` leaves the defender
+    /// to `combat::enter_attacking`'s derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_attack_player: Option<PlayerId>,
     /// CR 603.7: When set, the token is sacrificed at the end of the given
     /// duration (e.g., Mobilize tokens sacrificed at end of combat).
     pub sacrifice_at: Option<Duration>,

@@ -71,6 +71,38 @@ use super::lower::{
     timed_clause_sub_chain,
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
+
+/// CR 508.4 + CR 608.2c: the player population of a "for each <players>,
+/// create <tokens> … attacking that player" instruction, when `effect` is the
+/// attacking token creation, `qty` the per-player repeat count and `fragment`
+/// names the attacked player as "that player" or "that opponent". `None` for
+/// every other repeated clause, which keeps its count or loop.
+fn attacking_token_player_iteration(
+    effect: &Effect,
+    qty: &QuantityExpr,
+    fragment: &str,
+) -> Option<crate::types::ability::PlayerFilter> {
+    let Effect::Token {
+        enters_attacking: true,
+        attach_to: None,
+        owner: TargetFilter::Controller,
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    let QuantityExpr::Ref {
+        qty: crate::types::ability::QuantityRef::PlayerCount { filter },
+    } = qty
+    else {
+        return None;
+    };
+    let lower = fragment.to_lowercase();
+    let names_that_player = ["attacking that player", "attacking that opponent"]
+        .iter()
+        .any(|phrase| crate::parser::oracle_nom::primitives::scan_contains(&lower, phrase));
+    names_that_player.then(|| filter.clone())
+}
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
@@ -3305,6 +3337,23 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     sub.repeat_for = Some(qty.clone());
                 } else {
                     def.repeat_for = Some(qty.clone());
+                }
+            } else if let Some(players) = attacking_token_player_iteration(
+                def.effect.as_ref(),
+                qty,
+                clause_ir.source.fragment().unwrap_or_default(),
+            ) {
+                // CR 508.4 + CR 608.2c: "for each opponent, create … that's
+                // tapped and attacking that player" (Adeline, Resplendent
+                // Cathar). "That player" is each opponent in turn, so iterate
+                // the players rather than folding them into one count; each
+                // batch enters attacking its own player (the token spec reads
+                // the iteration's player). The tokens are still the ability
+                // controller's: the iteration rebinds the acting player, so
+                // the owner is the controller from before it.
+                def.player_scope = Some(players);
+                if let Effect::Token { owner, .. } = def.effect.as_mut() {
+                    *owner = TargetFilter::OriginalController;
                 }
             } else if ir.clauses.len() == 1
                 && clause_ir.parsed.sub_ability.is_none()

@@ -841,11 +841,33 @@ fn build_token_spec(
         enter_with_counters,
         tapped,
         enters_attacking,
+        entry_attack_player: entry_attack_player(state, ability, enters_attacking),
         sacrifice_at: ability.duration.clone(),
         source_id: ability.source_id,
         controller: ability.controller,
         attach_to,
     }
+}
+
+/// CR 508.4 + CR 608.2c: the player a token made during a per-player
+/// iteration enters attacking. "For each opponent, create a 1/1 … that's
+/// tapped and attacking that player" (Adeline, Resplendent Cathar) iterates
+/// the opponents, and "that player" is the one of the current iteration: an
+/// attacking token made for an opponent of its creator attacks that opponent.
+/// Outside such an iteration, or when the iterated player is the creator
+/// itself, `None`.
+fn entry_attack_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    enters_attacking: bool,
+) -> Option<PlayerId> {
+    if !enters_attacking {
+        return None;
+    }
+    let creator = ability.original_controller.unwrap_or(ability.controller);
+    ability
+        .scoped_player
+        .filter(|player| crate::game::players::opponents(state, creator).contains(player))
 }
 
 /// CR 702.6a + CR 111.4: Extract only unconditional intrinsic Equip activated
@@ -1076,9 +1098,24 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                 .expect("resolved token creation must have a live journal cause");
         }
 
-        // CR 508.4: Token enters attacking — not declared as attacker.
+        // CR 508.4: Token enters attacking — not declared as attacker. An
+        // instruction that names the player ("attacking that player") seats it
+        // against that player; otherwise the defender is derived.
         if spec.enters_attacking {
-            crate::game::combat::enter_attacking(state, obj_id, spec.source_id, spec.controller);
+            match spec.entry_attack_player {
+                Some(player) => crate::game::combat::enter_attacking_at_target(
+                    state,
+                    obj_id,
+                    player,
+                    crate::game::combat::AttackTarget::Player(player),
+                ),
+                None => crate::game::combat::enter_attacking(
+                    state,
+                    obj_id,
+                    spec.source_id,
+                    spec.controller,
+                ),
+            }
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
@@ -3074,6 +3111,7 @@ pub(crate) fn copy_probe_spec_for(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        entry_attack_player: None,
         sacrifice_at,
         source_id,
         controller,
@@ -6825,6 +6863,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -6905,6 +6944,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -6975,6 +7015,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7054,6 +7095,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7245,6 +7287,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7807,6 +7850,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -7873,6 +7917,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -7942,6 +7987,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: ObjectId(101),
             controller: PlayerId(0),
@@ -8018,6 +8064,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: ObjectId(102),
             controller: PlayerId(0),
@@ -8073,6 +8120,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            entry_attack_player: None,
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),

@@ -12814,6 +12814,7 @@ fn token_description_to_spec(
         enter_with_counters: Vec::new(),
         tapped: token.tapped,
         enters_attacking: false,
+        entry_attack_player: None,
         sacrifice_at: None,
         // Placeholder: overwritten at apply time with the replacement source's identity.
         source_id: crate::types::identifiers::ObjectId(0),

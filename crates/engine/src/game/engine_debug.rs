@@ -635,6 +635,7 @@ pub fn apply_debug_action(
                 enter_with_counters,
                 tapped: false,
                 enters_attacking: false,
+                entry_attack_player: None,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: owner,

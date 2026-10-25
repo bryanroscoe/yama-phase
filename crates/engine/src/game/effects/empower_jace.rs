@@ -116,6 +116,7 @@ fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        entry_attack_player: None,
         attach_to: TokenHostRequest::NotRequested,
         sacrifice_at: None,
         source_id,

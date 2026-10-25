@@ -105,3 +105,41 @@ fn adeline_attack_tokens_enter_tapped_and_attacking() {
         );
     }
 }
+
+/// CR 508.4 + CR 608.2c: "for each opponent, create … attacking that
+/// player". With two opponents, one Human attacks each of them, rather than
+/// both attacking the player Adeline attacked.
+#[test]
+fn adeline_makes_one_attacking_human_for_each_opponent() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let adeline = scenario
+        .add_creature_from_oracle(P0, "Adeline, Resplendent Cathar", 3, 3, ADELINE_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(adeline, AttackTarget::Player(P1))])
+        .expect("declare Adeline attacking P1");
+    resolve_attack_trigger(&mut runner);
+
+    let tokens = human_tokens(&runner);
+    assert_eq!(tokens.len(), 2, "one Human per opponent");
+    let combat = runner.state().combat.as_ref().expect("combat must be live");
+    let mut attacked: Vec<u8> = combat
+        .attackers
+        .iter()
+        .filter(|a| tokens.contains(&a.object_id))
+        .map(|a| a.defending_player.0)
+        .collect();
+    attacked.sort();
+    assert_eq!(attacked, vec![1, 2], "each Human attacks its own opponent");
+    for token in tokens {
+        assert_eq!(
+            runner.state().objects[&token].controller,
+            P0,
+            "the Humans are Adeline's controller's"
+        );
+    }
+}

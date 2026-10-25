@@ -387,6 +387,7 @@ fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        entry_attack_player: None,
         sacrifice_at: None,
         source_id: board.source,
         controller: P0,

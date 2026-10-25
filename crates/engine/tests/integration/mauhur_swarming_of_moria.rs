@@ -136,6 +136,7 @@ fn squirrel_spec() -> TokenSpec {
         enter_with_counters: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        entry_attack_player: None,
         sacrifice_at: None,
         source_id: ObjectId(0),
         controller: P0,
