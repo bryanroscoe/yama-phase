@@ -3662,6 +3662,24 @@ fn def_tree_co_scoped_parent_target_iteration_count(
     def: &AbilityDefinition,
     pop: &PlayerFilter,
 ) -> usize {
+    // CR 508.4 + CR 608.2c: the other printed shape of a per-player iteration:
+    // tokens made for the ability's controller once for each player of `pop`,
+    // each batch entering attacking that player ("for each opponent, create …
+    // that's tapped and attacking that player", Adeline, Resplendent Cathar).
+    // The attacked player is the iteration's referent, so no `ParentTarget`
+    // consumer follows.
+    if def.player_scope.as_ref() == Some(pop)
+        && matches!(
+            &*def.effect,
+            Effect::Token {
+                enters_attacking: true,
+                owner: TargetFilter::OriginalController,
+                ..
+            }
+        )
+    {
+        return 1 + iteration_count_below(def, pop, def.sub_ability.as_deref());
+    }
     match co_scoped_parent_target_consumer(def, pop) {
         // CR 608.2c: one printed iteration = this introducer + its co-scoped consumer.
         // The consumer is spent on this pair and never heads a second one, so the
