@@ -2030,3 +2030,4 @@ mod hashep_oasis_sacrifices_itself;
 mod lazotep_quarry_x_ability_with_tap;
 mod planar_nexus_every_nonbasic_land_type;
 mod jace_multiverse_architect_attack_restriction;
+mod zaffai_thunder_conductor_magecraft;

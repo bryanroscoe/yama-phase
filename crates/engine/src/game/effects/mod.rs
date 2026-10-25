@@ -3731,6 +3731,19 @@ fn try_materialize_reflexive_trigger_inner(
     if !creates_reflexive_trigger && !reflexive.targets.is_empty() {
         return Ok(None);
     }
+    // CR 603.3d + CR 608.2c: an instruction that is no "when you do" reflexive
+    // trigger had its targets chosen with the ability it belongs to. When a
+    // later instruction of the chain already holds them (Zaffai, Thunder
+    // Conductor: "… create a 4/4 … Elemental … Zaffai deals 10 damage to an
+    // opponent chosen at random", where the token node declares no target and
+    // the damage node holds the opponent), the node resolves in place. Building
+    // the chain's slots here re-asked for that target as a new triggered
+    // ability, and resolving it did the same again, for ever.
+    if !creates_reflexive_trigger
+        && !crate::game::ability_utils::declared_targets_in_chain(reflexive).is_empty()
+    {
+        return Ok(None);
+    }
 
     // CR 608.2c + CR 603.12: The reflexive triggered ability is put on the
     // stack during the parent ability's resolution, so target legality must see
