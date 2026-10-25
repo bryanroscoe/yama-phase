@@ -10701,6 +10701,19 @@ pub(super) fn parse_exile_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
+    // CR 406.2 + CR 402.1: "exile all the cards from your hand" (Hex Magic,
+    // Serum Powder) is "exile all cards from your hand": the article names the
+    // whole population, not an earlier set ("the cards" alone is anaphoric, so
+    // the generic path read it as the parent's target and moved nothing).
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("exile all the cards ").parse(lower) {
+        if (after.starts_with("from ") || after.starts_with("in ")) && text.len() == lower.len() {
+            let head = "exile all ".len();
+            let skip = "the ".len();
+            let text = format!("{}{}", &text[..head], &text[head + skip..]);
+            let lower = format!("{}{}", &lower[..head], &lower[head + skip..]);
+            return parse_exile_ast(&text, &lower, ctx);
+        }
+    }
     if let Some((tail, ast)) = try_parse_exile_all_but_edge(lower, ctx) {
         if terminal_punctuation_only(tail) {
             return Some(ast);
@@ -19441,6 +19454,27 @@ mod tests {
         assert!(filter.properties.contains(&FilterProp::ManaValueParity {
             parity: ParitySource::LastNamedChoice,
         }));
+    }
+
+    /// Hex Magic: "Exile all the cards from your hand, then draw that many
+    /// cards." The article doesn't make "the cards" anaphoric here.
+    #[test]
+    fn parse_exile_all_the_cards_from_your_hand_is_the_whole_hand() {
+        let mut ctx = ParseContext::default();
+        let with_article = parse_exile_ast(
+            "Exile all the cards from your hand",
+            "exile all the cards from your hand",
+            &mut ctx,
+        );
+        let mut ctx = ParseContext::default();
+        let without = parse_exile_ast(
+            "Exile all cards from your hand",
+            "exile all cards from your hand",
+            &mut ctx,
+        );
+        assert!(with_article.is_some());
+        assert_eq!(format!("{with_article:?}"), format!("{without:?}"));
+        assert!(!format!("{with_article:?}").contains("ParentTarget"));
     }
 
     #[test]
