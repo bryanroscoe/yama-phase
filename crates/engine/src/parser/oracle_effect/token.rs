@@ -1637,7 +1637,10 @@ fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
     if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
         clause = head;
     }
-    for marker in [" where ", " equal to ", " attached ", " named "] {
+    // A relative clause after the keyword list ("with flying that attack that
+    // opponent this turn if able", Furygale Flocking) describes the tokens'
+    // behaviour, not more keywords: cut it off so the keywords still parse.
+    for marker in [" where ", " equal to ", " attached ", " named ", " that "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
     clause
@@ -2803,6 +2806,15 @@ mod tests {
     #[test]
     fn keyword_clause_no_where() {
         let kws = parse_token_keyword_clause("with flying");
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// Furygale Flocking: "… Elemental creature tokens with flying that attack
+    /// that opponent this turn if able." The relative clause is not a keyword.
+    #[test]
+    fn keyword_clause_stops_at_a_relative_clause() {
+        let kws =
+            parse_token_keyword_clause("with flying that attack that opponent this turn if able");
         assert_eq!(kws, vec![Keyword::Flying]);
     }
 
