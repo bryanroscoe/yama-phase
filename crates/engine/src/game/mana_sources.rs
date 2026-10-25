@@ -667,6 +667,9 @@ fn manual_selection_for_option(
         // inert while `output` is deferred and canonicalizes all planner rows.
         selection.mana_type = ManaType::Colorless;
         selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+        // An "N mana of any one color" row per color carries its own atomic
+        // [c; N] combination for the planner; the deferred choice names none.
+        selection.atomic_combination = None;
     }
     Some(selection)
 }
@@ -3490,6 +3493,34 @@ fn emit_source_rows(
                 .map(|(mana_type, _)| SourceRow {
                     mana_type,
                     atomic_combination: None,
+                    restrictions: concrete_restrictions.clone(),
+                })
+                .collect()
+        }
+        // CR 106.1 + CR 605.3b: "Add N mana of any one color" with N above one
+        // (the "{T}: Add two mana of any one color" Resonating Lute grants to
+        // lands) makes every unit in one activation. Emit one atomic row per
+        // color, as the fixed multi-mana productions above do, so the planner
+        // counts all N; a plain row per color plans one mana per source, and
+        // a spell that needs the extra mana is never offered.
+        ManaProduction::AnyOneColor { color_options, .. } => {
+            let resolved =
+                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+            let units =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, &resolved)
+                    .len();
+            let mut types: Vec<ManaType> = Vec::new();
+            for color in color_options {
+                let mana_type = mana_color_to_type(color);
+                if !types.contains(&mana_type) {
+                    types.push(mana_type);
+                }
+            }
+            types
+                .into_iter()
+                .map(|mana_type| SourceRow {
+                    mana_type,
+                    atomic_combination: (units > 1).then(|| vec![mana_type; units]),
                     restrictions: concrete_restrictions.clone(),
                 })
                 .collect()
