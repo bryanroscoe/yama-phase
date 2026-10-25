@@ -1120,6 +1120,9 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         // designation predicates above and `ControlsCommander` below. No combat,
         // damage, or pending-cast history.
         | ParsedCondition::HasMaxSpeed
+        // CR 725.1: the monarch designation, read off state like the
+        // designations above.
+        | ParsedCondition::IsMonarch
         // CR 903.3 / CR 903.3d: a controller-scoped battlefield scan for a commander
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.
