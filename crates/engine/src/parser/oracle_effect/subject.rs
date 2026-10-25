@@ -6761,7 +6761,9 @@ fn build_restriction_clause(
         // Exhaustive on the subject filter's kind, with NO wildcard, so a new
         // `TargetFilter` variant forces an explicit fixed-vs-live adjudication
         // here rather than silently joining whichever side it was listed under.
-        let subject_set_is_fixed = match &affected {
+        // `true` for a fixed set and for a live `Typed` population, which the
+        // runtime installs differently (see the `Typed` arm).
+        let subject_installs = match &affected {
             // CR 608.2c: an anaphorically- or specifically-fixed subject names
             // a set the preceding instruction determined; CR 611.2c's FIRST
             // sentence then applies, because an ability grant IS a
@@ -6788,19 +6790,19 @@ fn build_restriction_clause(
             | TargetFilter::SelfRef
             | TargetFilter::SpecificObject { .. } => true,
 
-            // DEFERRED — broadcast subject, whose affected set must stay LIVE.
-            // CR 611.2c's SECOND sentence: an effect that grants no ability
-            // "modifies the rules of the game, so it can affect objects that
-            // weren't affected when that continuous effect began", which is
-            // exactly what Chronomantic Escape's printed ruling says. The grant
-            // shape above would FREEZE the set and ship a rules-incorrect fix.
-            // The engine's mechanism for this axis exists — the
-            // `MustAttackAwayFromSource` branch of `register_transient_effect`
-            // keeps the filter intact on ONE transient effect — but extending
-            // it to `CantAttack` is `game/effects/effect.rs` work for a
-            // different issue. Cards: Chronomantic Escape, Web of Inertia; both
-            // keep their `Effect::Unimplemented` and stay honestly uncovered.
-            TargetFilter::Typed(_) => false,
+            // Broadcast subject, whose affected set must stay LIVE. CR 611.2c's
+            // SECOND sentence: an effect that grants no ability "modifies the
+            // rules of the game, so it can affect objects that weren't affected
+            // when that continuous effect began", which is exactly what
+            // Chronomantic Escape's printed ruling says. The emitted shape is
+            // the same grant; `game/effects/effect.rs::register_transient_effect`
+            // recognizes a bare attack-restriction grant over a `Typed`
+            // population and installs ONE transient effect with the filter
+            // intact (lowering a resolution-scoped player such as Jace,
+            // Multiverse Architect's "creatures THEY control" to that player),
+            // so the layer pass re-derives the creatures every time instead of
+            // freezing them at resolution.
+            TargetFilter::Typed(_) => true,
 
             // DEFERRED — player-scoped subject. "…they can't attack you this
             // combat" restricts a PLAYER (CR 508.1c), not objects, and an
@@ -6872,7 +6874,7 @@ fn build_restriction_clause(
             | TargetFilter::Owner
             | TargetFilter::AllPlayers => false,
         };
-        if subject_set_is_fixed {
+        if subject_installs {
             // CR 613.1f: the grant is an ability-adding effect, applied in
             // layer 6. CR 611.2a/611.2b: the outer definition carries the
             // peeled duration, so a "for as long as it has a vow counter on it"

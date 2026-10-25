@@ -5044,6 +5044,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
     match filter {
         ATF::Player => "a player",
         ATF::Planeswalker => "a planeswalker",
+        // CR 205.3j: one planeswalker type; the label stays static, the type
+        // is in the parsed definition beside it.
+        ATF::PlaneswalkerOfType { .. } => "a planeswalker of that type",
         ATF::PlayerOrPlaneswalker => "a player or planeswalker",
         ATF::Battle => "a battle",
         // CR 108.3 vs CR 109.4: the OWNER (who started the game with the card),
@@ -14994,6 +14997,9 @@ mod tests {
         let labels: std::collections::HashSet<&'static str> = [
             AttackTargetFilter::Player,
             AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::PlaneswalkerOfType {
+                subtype: "Jace".to_string(),
+            },
             AttackTargetFilter::PlayerOrPlaneswalker,
             AttackTargetFilter::Battle,
             AttackTargetFilter::Owner,
@@ -15006,7 +15012,7 @@ mod tests {
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
