@@ -2027,3 +2027,4 @@ mod strago_cast_this_way_rider;
 mod tifa_additional_combat;
 mod any_one_color_multi_mana_castability;
 mod hashep_oasis_sacrifices_itself;
+mod lazotep_quarry_x_ability_with_tap;
