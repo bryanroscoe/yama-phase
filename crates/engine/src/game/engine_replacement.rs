@@ -2352,7 +2352,14 @@ pub(super) fn handle_copy_target_choice(
                 context: context.clone(),
             }];
             if let Some(waiting_for) =
-                finish_copy_target_choice_entry(state, source_id, events, post_actions, false)?
+                finish_copy_target_choice_entry(
+                    state,
+                    source_id,
+                    events,
+                    post_actions,
+                    false,
+                    None,
+                )?
             {
                 if state.active_counter_additions().is_none() {
                     crate::game::meld::finish_deferred_meld_entry(state, context, events);
@@ -2488,6 +2495,7 @@ pub(super) fn handle_copy_target_choice(
             events,
             counter_pause_post_actions,
             true,
+            None,
         )? {
             return Ok(waiting_for);
         }
@@ -2531,6 +2539,15 @@ pub(super) fn handle_copy_target_choice(
         });
     }
 
+    // CR 306.5b + CR 310.4b: the intrinsic loyalty or defense counters this
+    // permanent was given as it moved, read from its own characteristics
+    // before the copy (`finish_copy_target_choice_entry` tops them up to the
+    // copied values).
+    let pre_copy_intrinsic = state
+        .objects
+        .get(&source_id)
+        .map(|obj| crate::game::printed_cards::intrinsic_etb_counters(obj, None))
+        .unwrap_or_default();
     let ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
             build_resolved_from_def_with_targets(
@@ -2572,9 +2589,14 @@ pub(super) fn handle_copy_target_choice(
             .expect("matching spell-resolution frame was checked above");
         apply_pending_spell_resolution(state, &ctx, events);
     }
-    if let Some(waiting_for) =
-        finish_copy_target_choice_entry(state, source_id, events, Vec::new(), true)?
-    {
+    if let Some(waiting_for) = finish_copy_target_choice_entry(
+        state,
+        source_id,
+        events,
+        Vec::new(),
+        true,
+        Some(&pre_copy_intrinsic),
+    )? {
         return Ok(waiting_for);
     }
     state.waiting_for = WaitingFor::Priority {
@@ -2584,19 +2606,50 @@ pub(super) fn handle_copy_target_choice(
     Ok(state.waiting_for.clone())
 }
 
+/// `pre_copy_intrinsic` is the intrinsic loyalty and defense counters the
+/// permanent was given as it moved, from its pre-copy characteristics, when
+/// the caller seeded them that way (a resolving permanent spell); `None` where
+/// the entry path seeds them itself (tokens and melds).
 fn finish_copy_target_choice_entry(
     state: &mut GameState,
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
     replay_entry_events: bool,
+    pre_copy_intrinsic: Option<&[(CounterType, u32)]>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
-    let enter_modifiers =
+    let mut enter_modifiers =
         super::replacement::current_self_enter_replacement_modifiers(state, source_id);
+    // CR 306.5b + CR 310.4b + CR 614.12: a planeswalker enters with loyalty
+    // counters equal to its printed loyalty (a battle, defense counters), and
+    // whether it is a planeswalker, and with what loyalty, is decided with the
+    // "enters as a copy" replacement already applied (CR 614.12, CR 707.9).
+    // The move seeded these counters from the pre-copy characteristics, so add
+    // what the copied values call for beyond them: Spark Double copying Jace,
+    // Multiverse Architect enters with four plus its own extra one, not one.
+    if let Some(pre) = pre_copy_intrinsic {
+        let post = state
+            .objects
+            .get(&source_id)
+            .map(|obj| crate::game::printed_cards::intrinsic_etb_counters(obj, None))
+            .unwrap_or_default();
+        let missing: Vec<(CounterType, u32)> = post
+            .into_iter()
+            .filter_map(|(counter_type, count)| {
+                let seeded: u32 = pre
+                    .iter()
+                    .filter(|(seeded_type, _)| *seeded_type == counter_type)
+                    .map(|(_, n)| *n)
+                    .sum();
+                (count > seeded).then(|| (counter_type, count - seeded))
+            })
+            .collect();
+        enter_modifiers.counters.splice(0..0, missing);
+    }
     if let Some(tapped) = enter_modifiers.enter_tapped {
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.tapped = tapped;
@@ -8105,6 +8158,7 @@ mod tests {
             &mut events,
             vec![continuation],
             false,
+            None,
         )
         .expect("the host pause is not an error");
 

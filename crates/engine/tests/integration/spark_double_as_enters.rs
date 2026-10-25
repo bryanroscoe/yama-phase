@@ -89,3 +89,62 @@ fn spark_double_copying_painters_servant_keeps_its_counter_and_prompts_for_color
         WaitingFor::Priority { .. }
     ));
 }
+
+/// Jace, Multiverse Architect's verbatim Oracle text (MTGJSON), printed loyalty 4.
+const JACE: &str = "At the beginning of combat on each opponent's turn, they may pay {2}. If they don't, creatures they control can't attack Jaces you control this turn.\n[+1]: Draw two cards, then put a card from your hand on the bottom of your library.\n[\u{2212}3]: Exile another target planeswalker or creature you control. Reveal cards from the top of your library until you reveal a creature or planeswalker card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.\nJace, Multiverse Architect can be your commander.";
+
+/// CR 306.5b + CR 614.12 + CR 707.9: whether a permanent is a planeswalker,
+/// and so how many loyalty counters it enters with, is decided with the
+/// "enters as a copy" replacement already applied. Spark Double copying a
+/// planeswalker therefore enters with the copied printed loyalty plus its own
+/// additional counter (the card's ruling: "it enters with loyalty counters
+/// equal to the copied planeswalker's printed loyalty plus one"), and the
+/// copy isn't legendary, so the legend rule leaves both on the battlefield.
+#[test]
+fn spark_double_copying_a_planeswalker_enters_with_its_loyalty_plus_one() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jace = scenario
+        .add_planeswalker_from_oracle(P0, "Jace, Multiverse Architect", "Jace", 4, JACE)
+        .id();
+    let spark = scenario
+        .add_creature_to_hand_from_oracle(P0, "Spark Double", 0, 0, SPARK_DOUBLE)
+        .id();
+    let mut runner = scenario.build();
+    // The builder places the planeswalker with its counters but no printed
+    // loyalty (a face built from Oracle text alone carries none); real card
+    // data has it, and the copy reads it (CR 707.2).
+    if let Some(obj) = runner.state_mut().objects.get_mut(&jace) {
+        obj.printed_loyalty = Some(engine::types::card::PrintedLoyalty::Fixed(4));
+        obj.base_printed_loyalty = obj.printed_loyalty;
+    }
+    let card_id = runner.state().objects[&spark].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spark,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Spark Double");
+    runner.advance_until_stack_empty();
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Spark Double's copy replacement");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(jace)),
+        })
+        .expect("copy Jace");
+    runner.advance_until_stack_empty();
+
+    let copy = &runner.state().objects[&spark];
+    assert_eq!(copy.zone, Zone::Battlefield, "the copy stays: it isn't legendary");
+    assert_eq!(
+        copy.counters.get(&CounterType::Loyalty).copied(),
+        Some(5),
+        "four copied loyalty plus Spark Double's one"
+    );
+    assert_eq!(runner.state().objects[&jace].zone, Zone::Battlefield);
+}
