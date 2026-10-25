@@ -2186,6 +2186,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             // with the other this-turn zone-change counts.
             parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn,
             parse_number_of_times_you_chose_a_mode,
+            parse_number_of_times_it_was_cast_from_the_command_zone,
         )),
         parse_tokens_created_this_turn_tail,
         parse_distinct_colors_among_tail,
@@ -6548,6 +6549,21 @@ fn parse_number_of_sacrificed_this_turn(input: &str) -> OracleResult<'_, Quantit
             filter,
         },
     ))
+}
+
+/// CR 903.8: "times it's been cast from the command zone this game", where
+/// "it" is the commander the sentence names (Study Hall's "When you spend this
+/// mana to cast your commander, scry X, where X is the number of times it's
+/// been cast from the command zone this game"; Opal Palace's counters read the
+/// same count). Like the "times you've cast your commander" form, the resolver
+/// counts the controller's command-zone casts.
+fn parse_number_of_times_it_was_cast_from_the_command_zone(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("times it").parse(input)?;
+    let (rest, _) = alt((tag("'s"), tag(" has"))).parse(rest)?;
+    let (rest, _) = tag(" been cast from the command zone this game").parse(rest)?;
+    Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
 }
 
 fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -13310,6 +13326,18 @@ mod tests {
                 controller: ControllerRef::ScopedPlayer,
             }
         );
+    }
+
+    #[test]
+    fn test_parse_number_of_times_it_was_cast_from_the_command_zone() {
+        for text in [
+            "the number of times it's been cast from the command zone this game",
+            "the number of times it has been cast from the command zone this game",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount, "{text}");
+            assert_eq!(rest, "");
+        }
     }
 
     #[test]
