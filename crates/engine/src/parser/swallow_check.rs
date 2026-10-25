@@ -3680,6 +3680,18 @@ fn def_tree_co_scoped_parent_target_iteration_count(
     {
         return 1 + iteration_count_below(def, pop, def.sub_ability.as_deref());
     }
+    // CR 115.1 + CR 601.2c: "for each opponent, … up to one target … from that
+    // player's graveyard" parsed as any number of targets from opponents'
+    // graveyards, no two controlled by the same player (Sepulchral Primordial):
+    // one target per opponent is the iteration.
+    if *pop == PlayerFilter::Opponent
+        && def.multi_target.as_ref().is_some_and(|spec| spec.max.is_none())
+        && def.target_constraints.contains(
+            &crate::types::game_state::TargetSelectionConstraint::DifferentObjectControllers,
+        )
+    {
+        return 1 + iteration_count_below(def, pop, def.sub_ability.as_deref());
+    }
     match co_scoped_parent_target_consumer(def, pop) {
         // CR 608.2c: one printed iteration = this introducer + its co-scoped consumer.
         // The consumer is spent on this pair and never heads a second one, so the
