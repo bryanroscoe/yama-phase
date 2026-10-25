@@ -161,6 +161,7 @@ impl ContinuousModification {
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddAllNonbasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType => Layer::Type,

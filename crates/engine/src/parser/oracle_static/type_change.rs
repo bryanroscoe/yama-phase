@@ -3210,6 +3210,34 @@ pub(crate) fn parse_all_creature_types_grant(
     )
 }
 
+/// CR 205.3i + CR 604.3 + CR 613.1d: Parse "~ is every nonbasic land type"
+/// (Planar Nexus) — the land-type sibling of the self-reference arm of
+/// [`parse_all_creature_types_grant`]. The ability defines the object's own
+/// subtypes, is printed on the object it affects and is unconditional, so it
+/// is a characteristic-defining ability and functions in all zones (CR 604.3):
+/// Planar Nexus is a Desert in the library as well as on the battlefield.
+///
+/// Only the self-reference subject is claimed; no printed card grants every
+/// nonbasic land type to other objects.
+pub(crate) fn parse_self_every_nonbasic_land_type(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let ((), _) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("~ is every nonbasic land type").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, ()))
+    })?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddAllNonbasicLandTypes])
+            .cda()
+            .description(text.to_string()),
+    )
+}
+
 /// CR 205.3 + CR 613.1d: Map the subject of an "{is|are} every creature
 /// type" static into a TargetFilter restricting which battlefield objects
 /// receive the grant. Sibling of `parse_land_type_change_subject` for the

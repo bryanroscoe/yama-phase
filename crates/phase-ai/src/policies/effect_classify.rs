@@ -2114,6 +2114,7 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         // away. Setting a land's type (Blood Moon) is a different modification.
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::AddSubtype { .. } => EffectPolarity::Beneficial,

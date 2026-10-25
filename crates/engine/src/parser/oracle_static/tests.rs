@@ -20726,6 +20726,26 @@ fn self_ref_every_creature_type_is_cda() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
 }
 
+// --- CR 205.3i + CR 604.3: "~ is every nonbasic land type" ---
+
+#[test]
+fn self_ref_every_nonbasic_land_type_is_cda() {
+    // Planar Nexus. Like the creature-type form above, the self-reference
+    // grant defines the land's own subtypes, so it is a CDA (all zones).
+    let def = parse_static_line("~ is every nonbasic land type.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def.characteristic_defining);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddAllNonbasicLandTypes]
+    );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    // Negative: a trailing clause is outside the grant and must not be dropped.
+    assert!(parse_static_line("~ is every nonbasic land type and is a creature.")
+        .is_none_or(|def| def.modifications
+            != vec![ContinuousModification::AddAllNonbasicLandTypes]));
+}
+
 #[test]
 fn creatures_you_control_every_creature_type_maskwood_nexus() {
     // CR 702.73a + CR 205.3: Maskwood Nexus first sentence. Filter-subject

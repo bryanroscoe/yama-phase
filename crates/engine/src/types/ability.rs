@@ -35293,6 +35293,12 @@ pub enum ContinuousModification {
     /// their mana abilities, additive. Distinct from AddAllBasicLandTypes
     /// (CR 305.6, 5 basic types). Omo, Queen of Vesuva. Layer 4.
     AddAllLandTypes,
+    /// CR 205.3i: grants every NONBASIC land type (the land subtypes other than
+    /// the five basic land types of CR 305.6), additive. A nonbasic land type
+    /// carries no intrinsic mana ability (CR 305.6 grants those only to the
+    /// basic types), so unlike `AddAllLandTypes` this adds no mana abilities.
+    /// Planar Nexus ("This land is every nonbasic land type"). Layer 4.
+    AddAllNonbasicLandTypes,
     /// Adds the source object's chosen subtype (creature type or basic land type).
     /// Resolved at layer evaluation time from the source's `chosen_attributes`.
     AddChosenSubtype {

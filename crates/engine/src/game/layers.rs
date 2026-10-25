@@ -5626,7 +5626,8 @@ fn modification_characteristic_writes_at(
         }
         ContinuousModification::SetCardTypes { .. }
         | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes => land_type_line_writes(true),
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes => land_type_line_writes(true),
         ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. } => CharacteristicKinds::CARD_TYPES,
@@ -9773,6 +9774,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddAllNonbasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType
@@ -11450,6 +11452,7 @@ fn apply_continuous_effect_filtered(
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddAllNonbasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::AddChosenColor { .. }) => {
                 let applied = apply_type_or_color_modification(
@@ -11888,6 +11891,18 @@ pub(crate) fn apply_type_or_color_modification(
         // automatically via `apply_intrinsic_basic_land_mana_abilities`.
         ContinuousModification::AddAllLandTypes => {
             for subtype in crate::types::card_type::LAND_SUBTYPES {
+                if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                    obj.card_types.subtypes.push((*subtype).to_string());
+                }
+            }
+        }
+        // CR 205.3i: every land subtype except the five basic land types
+        // (CR 305.6). Additive, and no intrinsic mana ability comes with it.
+        ContinuousModification::AddAllNonbasicLandTypes => {
+            for subtype in crate::types::card_type::LAND_SUBTYPES
+                .iter()
+                .filter(|subtype| subtype.parse::<BasicLandType>().is_err())
+            {
                 if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                     obj.card_types.subtypes.push((*subtype).to_string());
                 }
