@@ -104,7 +104,7 @@ pub fn reconstruct_initial_state(
         (Some(deck_data), Some(db)) => {
             let payload = resolve_deck_list(db, deck_data);
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
-            state.all_card_names = db.card_names().into();
+            state.all_card_names = db.shared_card_names();
             // CR 707.2 + CR 202.3: a replayed Momir game draws its random
             // creatures from the whole corpus at resolution time, so the
             // reconstructed state needs the same draw source a live game gets.

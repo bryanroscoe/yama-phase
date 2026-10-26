@@ -8757,6 +8757,15 @@ pub enum PlayerScope {
     /// `chosen_attributes` so a CDA P/T can track e.g. the chosen player's hand
     /// or graveyard size (Entropic Specter, Sewer Nemesis).
     SourceChosenPlayer,
+    /// CR 608.2c + CR 109.4: The player chosen by the Nth `Effect::Choose`
+    /// (`ChoiceType::Player` / `ChoiceType::Opponent`) earlier in this resolving
+    /// ability chain (`index` is 0-based), read from
+    /// `ResolvedAbility.chosen_players[index]`. The player-scalar-axis analogue
+    /// of `ControllerRef::ChosenPlayer { index }` and
+    /// `PlayerFilter::ChosenPlayer { index }`: "choose an opponent. If that
+    /// player has more cards in hand than you, draw cards equal to the
+    /// difference" (Sandstone Oracle). Resolution-scoped, like those siblings.
+    ChosenPlayer { index: u8 },
     /// CR 513.1 + CR 611.2a + CR 603.7b: turn-AGNOSTIC deadline — the referenced
     /// step's NEXT occurrence regardless of whose turn ("the next end step", e.g.
     /// Niko, Light of Hope), as opposed to `Controller` ("your next end step",
@@ -10531,11 +10540,19 @@ pub enum QuantityRef {
     /// by War Room's "pay life equal to the number of colors in your
     /// commanders' color identity" activation cost.
     ColorsInCommandersColorIdentity,
-    /// CR 903.8: Number of times the controller has cast their commander(s)
-    /// from the command zone this game. Used by commander storm effects such
-    /// as "copy it for each time you've cast your commander from the command
-    /// zone this game."
-    CommanderCastFromCommandZoneCount,
+    /// CR 903.8: Number of times `player` has cast their commander(s) from the
+    /// command zone this game. Used by commander storm effects such as "copy it
+    /// for each time you've cast your commander from the command zone this
+    /// game" (`Controller`) and by "for each time they've cast a commander from
+    /// the command zone this game" (Commander's Insight, `Target`). The count
+    /// sums every commander the player owns (CR 903.3 allows two with partner).
+    CommanderCastFromCommandZoneCount {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
     /// Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
     /// or in the command zone" pattern. The resolver selects the first matching commander
@@ -10797,7 +10814,7 @@ impl QuantityRef {
             | QuantityRef::ConvokedCreatureCount
             | QuantityRef::TimesCostPaidThisResolution
             | QuantityRef::ColorsInCommandersColorIdentity
-            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderCastFromCommandZoneCount { .. }
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::VoteCount { .. } => false,
         }
@@ -10904,7 +10921,7 @@ impl QuantityRef {
             | QuantityRef::TimesCostPaidThisResolution
             | QuantityRef::ManaSpentToCast { .. }
             | QuantityRef::ColorsInCommandersColorIdentity
-            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderCastFromCommandZoneCount { .. }
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::DistinctColorsAmong { .. }
             | QuantityRef::DistinctCounterKindsAmong { .. }
@@ -12818,6 +12835,7 @@ impl StaticMode {
             | PlayerScope::AllPlayers { .. }
             | PlayerScope::ParentObjectTargetController
             | PlayerScope::SourceChosenPlayer
+            | PlayerScope::ChosenPlayer { .. }
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
         }
@@ -16509,6 +16527,12 @@ pub enum EachDamageRecipient {
     /// ("each creature deals 1 damage to its controller"). A per-source recipient
     /// computed at resolution — surfaces no player-selectable target slot.
     EachController,
+    /// CR 120.1 + CR 120.3: each source deals damage to itself ("each creature
+    /// deals damage to itself equal to its power" — Wave of Reckoning). A
+    /// per-source recipient computed at resolution; the source is both the
+    /// source and the recipient of its own damage, so it surfaces no
+    /// selectable target slot.
+    Itself,
     /// CR 120.1 + CR 608.2c: in an exactly two-object targeted batch, each
     /// source deals to the other source ("each of those creatures ... to the
     /// other"). Zero or one surviving/chosen object has no "other" and deals
@@ -23090,6 +23114,9 @@ impl TargetFilter {
                 filters.iter().find_map(|f| f.extract_in_zone())
             }
             TargetFilter::Not { filter } => filter.extract_in_zone(),
+            // CR 608.2c: a tracked set narrowed by a filter lives where that
+            // filter says ("a creature card put into a graveyard this way").
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.extract_in_zone(),
             TargetFilter::ExiledBySource => Some(crate::types::zones::Zone::Exile),
             // CR 109.2: a stack-spell/stack-ability filter denotes an object on
             // the stack by construction — mirrors the `ExiledBySource` arm above
@@ -23141,6 +23168,7 @@ impl TargetFilter {
                 }
             }
             TargetFilter::Not { filter } => filter.collect_zones(out),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.collect_zones(out),
             TargetFilter::ExiledBySource if !out.contains(&crate::types::zones::Zone::Exile) => {
                 out.push(crate::types::zones::Zone::Exile);
             }
@@ -24331,13 +24359,15 @@ impl Effect {
             // "up to two" sources slot is driven by the ability's `multi_target`
             // spec, the recipient is one mandatory slot), not by `target_filter()`.
             | Effect::EachDealsDamageEqualToPower { .. }
-            // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
-            // resolver; `OtherBatchSource` reuses the preceding declared object
-            // slots. Neither surfaces another selectable slot. Exhaustive match
-            // ensures future recipient variants are explicitly decided here.
+            // CR 109.4 + CR 120.3a: `EachController` and `Itself` resolve
+            // per-source at the resolver; `OtherBatchSource` reuses the
+            // preceding declared object slots. None surfaces another selectable
+            // slot. Exhaustive match ensures future recipient variants are
+            // explicitly decided here.
             | Effect::EachSourceDealsDamage {
                 recipient:
                     EachDamageRecipient::EachController
+                        | EachDamageRecipient::Itself
                         | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
@@ -24806,7 +24836,9 @@ impl Effect {
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage {
                 recipient:
-                    EachDamageRecipient::EachController | EachDamageRecipient::OtherBatchSource { .. },
+                    EachDamageRecipient::EachController
+                    | EachDamageRecipient::Itself
+                    | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
             | Effect::ExchangeLifeTotals { .. }
@@ -29073,10 +29105,13 @@ impl TargetReadOrigin {
 /// condition/effect may presuppose the preceding sibling's effect actually ran
 /// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
 /// `GainControl` produced a target), so it is skipped alongside a failed
-/// predecessor. The sole narrow exception is a direct dependent
-/// `SequentialSibling` whose condition is `AbilityUseCountThisTurn`: ordinal
-/// clauses are evaluated in their written order under CR 608.2c even after an
-/// earlier ordinal is false. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// predecessor. Two narrow exceptions are evaluated in their written order
+/// under CR 608.2c even after an earlier gate is false: a direct dependent
+/// `SequentialSibling` whose condition is `AbilityUseCountThisTurn` (ordinal
+/// clauses), and one whose condition reads only the game state from the
+/// source's point of view and nothing an earlier instruction produced
+/// (Sunset Revelry's "If an opponent has more ... than you" sentences).
+/// `ReplicatedOrBranch` marks a sibling produced by per-item
 /// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
 /// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
 /// keyword, so it must be evaluated regardless of any other branch's outcome.

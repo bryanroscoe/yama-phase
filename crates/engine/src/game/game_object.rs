@@ -2819,13 +2819,29 @@ impl GameObject {
         to: Zone,
     ) -> crate::types::game_state::ZoneChangeRecord {
         crate::types::game_state::ZoneChangeRecord {
+            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
+            ..self.snapshot_for_trigger_source_context(object_id, from, to)
+        }
+    }
+
+    /// [`Self::snapshot_for_zone_change`] without the record-level copy of the
+    /// trigger list, for a caller that reads only the record's trigger source
+    /// context (whose `trigger_entries` carries the same list) and then drops
+    /// the record. The record's own `trigger_definitions` is left empty.
+    pub(crate) fn snapshot_for_trigger_source_context(
+        &self,
+        object_id: ObjectId,
+        from: Option<Zone>,
+        to: Zone,
+    ) -> crate::types::game_state::ZoneChangeRecord {
+        crate::types::game_state::ZoneChangeRecord {
             object_id,
             name: self.name.clone(),
             core_types: self.card_types.core_types.clone(),
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
-            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
+            trigger_definitions: Vec::new(),
             trigger_source_context: Some(TriggerSourceContext {
                 identity: ObjectIdentityBinding::new(
                     ObjectIncarnationRef::from_object(self),
@@ -3823,6 +3839,22 @@ impl GameObject {
     /// though it doesn't exist for almost all rules queries).
     pub fn is_phased_out(&self) -> bool {
         self.phase_status.is_phased_out()
+    }
+
+    /// CR 113.6 + CR 113.6b + CR 604.3: Whether this object, outside the
+    /// battlefield and the command zone, may generate continuous effects from
+    /// where it is: it is phased in and carries a static that opts into a
+    /// non-battlefield zone or a characteristic-defining ability (which
+    /// functions in every zone). Battlefield and command-zone sources are
+    /// indexed separately; `false` here is exact, while each static's own zone
+    /// gate still decides whether it functions.
+    pub fn may_source_statics_off_battlefield(&self) -> bool {
+        !matches!(self.zone, Zone::Battlefield | Zone::Command)
+            && !self.is_phased_out()
+            && self
+                .static_definitions
+                .iter_all()
+                .any(|def| !def.active_zones.is_empty() || def.characteristic_defining)
     }
 
     /// CR 702.26b: Only phased-out permanents on the battlefield are treated

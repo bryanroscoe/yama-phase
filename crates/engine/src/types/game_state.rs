@@ -2099,6 +2099,11 @@ pub struct BattlefieldEntryRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
+    /// CR 111.1: whether the entering object was a token, so look-back tallies
+    /// can tell "nontoken creatures you had enter the battlefield" (Gyome,
+    /// Master Chef) from token entries.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_token: bool,
 }
 
 #[cfg(feature = "test-support")]
@@ -2114,6 +2119,7 @@ impl Clone for BattlefieldEntryRecord {
             colors,
             keywords,
             controller,
+            is_token,
         } = self;
         Self {
             object_id: *object_id,
@@ -2124,6 +2130,7 @@ impl Clone for BattlefieldEntryRecord {
             colors: colors.clone(),
             keywords: keywords.clone(),
             controller: *controller,
+            is_token: *is_token,
         }
     }
 }

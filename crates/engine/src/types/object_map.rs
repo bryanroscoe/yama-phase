@@ -18,7 +18,7 @@
 
 use std::fmt;
 use std::ops::{Index, IndexMut};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -83,6 +83,12 @@ fn value_ref(object: &Arc<GameObject>) -> &GameObject {
 #[derive(Clone, Default)]
 pub struct ObjectMap {
     inner: Inner,
+    /// The ids, in the map's iteration order, of the objects
+    /// [`GameObject::may_source_statics_off_battlefield`] admits. Derived from
+    /// the objects alone, computed on first request and dropped by every
+    /// mutable access, so it always describes the objects currently stored.
+    /// Not part of game state: never serialized, compared or printed.
+    off_battlefield_static_sources: OnceLock<Arc<[ObjectId]>>,
 }
 
 impl ObjectMap {
@@ -103,6 +109,7 @@ impl ObjectMap {
 
     /// Removes every object from the map.
     pub fn clear(&mut self) {
+        self.drop_derived();
         self.inner.clear();
     }
 
@@ -130,6 +137,7 @@ impl ObjectMap {
     /// key even when the key is absent, so sweeps that usually change nothing
     /// should use [`update_where`](Self::update_where) instead.
     pub fn get_mut(&mut self, id: &ObjectId) -> Option<&mut GameObject> {
+        self.drop_derived();
         self.inner.get_mut(id).map(Arc::make_mut)
     }
 
@@ -138,6 +146,7 @@ impl ObjectMap {
     /// A replaced object that is still shared with a clone of this map is
     /// cloned to produce the owned return value.
     pub fn insert(&mut self, id: ObjectId, object: GameObject) -> Option<GameObject> {
+        self.drop_derived();
         self.inner
             .insert(id, Arc::new(object))
             .map(Arc::unwrap_or_clone)
@@ -148,6 +157,7 @@ impl ObjectMap {
     /// A removed object that is still shared with a clone of this map is
     /// cloned to produce the owned return value.
     pub fn remove(&mut self, id: &ObjectId) -> Option<GameObject> {
+        self.drop_derived();
         self.inner.remove(id).map(Arc::unwrap_or_clone)
     }
 
@@ -167,6 +177,7 @@ impl ObjectMap {
     /// from its clones. Use it only for sweeps that really write every object;
     /// otherwise prefer [`update_where`](Self::update_where).
     pub fn iter_mut(&mut self) -> ObjectIterMut<'_> {
+        self.drop_derived();
         self.inner.iter_mut().map(entry_mut)
     }
 
@@ -243,7 +254,35 @@ impl ObjectMap {
         for (_, object) in inner.iter_mut() {
             migrate(Arc::make_mut(object)).map_err(serde::de::Error::custom)?;
         }
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
+    }
+
+    /// Wraps a map with no derived data computed yet.
+    fn from_inner(inner: Inner) -> Self {
+        Self {
+            inner,
+            off_battlefield_static_sources: OnceLock::new(),
+        }
+    }
+
+    /// Forgets everything derived from the objects. Every mutable access calls
+    /// this before handing out mutable access, so a later read derives again
+    /// from what the objects then are.
+    fn drop_derived(&mut self) {
+        self.off_battlefield_static_sources = OnceLock::new();
+    }
+
+    /// The objects [`GameObject::may_source_statics_off_battlefield`] admits,
+    /// in the map's iteration order: the same ids, in the same order, as
+    /// filtering [`Self::iter`] with it, without walking every object again
+    /// until the map is next accessed mutably.
+    pub(crate) fn off_battlefield_static_source_ids(&self) -> Arc<[ObjectId]> {
+        Arc::clone(self.off_battlefield_static_sources.get_or_init(|| {
+            self.iter()
+                .filter(|(_, object)| object.may_source_statics_off_battlefield())
+                .map(|(id, _)| *id)
+                .collect()
+        }))
     }
 }
 
@@ -279,6 +318,7 @@ impl IndexMut<&ObjectId> for ObjectMap {
     /// it is shared. Panics, with the underlying map's message, when the id is
     /// absent; it never inserts.
     fn index_mut(&mut self, id: &ObjectId) -> &mut GameObject {
+        self.drop_derived();
         Arc::make_mut(&mut self.inner[id])
     }
 }
@@ -297,12 +337,11 @@ impl FromIterator<(ObjectId, GameObject)> for ObjectMap {
     /// Collects into the underlying map in the iterator's order, so the
     /// insertion sequence matches collecting into the bare map.
     fn from_iter<I: IntoIterator<Item = (ObjectId, GameObject)>>(iter: I) -> Self {
-        Self {
-            inner: iter
-                .into_iter()
+        Self::from_inner(
+            iter.into_iter()
                 .map(|(id, object)| (id, Arc::new(object)))
                 .collect(),
-        }
+        )
     }
 }
 
@@ -317,7 +356,7 @@ impl Serialize for ObjectMap {
 impl<'de> Deserialize<'de> for ObjectMap {
     /// Deserializes exactly as the underlying map does.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Inner::deserialize(deserializer).map(|inner| Self { inner })
+        Inner::deserialize(deserializer).map(Self::from_inner)
     }
 }
 
@@ -500,6 +539,250 @@ mod tests {
         *seed ^= *seed >> 7;
         *seed ^= *seed << 17;
         *seed
+    }
+
+    /// Mixed source eligibility, with enough keys to expose iteration order.
+    fn static_source_map() -> ObjectMap {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::types::ability::StaticDefinition;
+
+        (1..=96)
+            .map(|id| {
+                let mut obj = object(id);
+                obj.zone = Zone::Graveyard;
+                let mut definition =
+                    StaticDefinition::continuous().active_zones(vec![Zone::Graveyard]);
+                match id % 8 {
+                    0 => obj.zone = Zone::Battlefield,
+                    1 => {}
+                    2 => obj.zone = Zone::Hand,
+                    3 => {
+                        obj.zone = Zone::Exile;
+                        definition.active_zones.clear();
+                        definition.characteristic_defining = true;
+                    }
+                    4 => obj.zone = Zone::Command,
+                    5 => {
+                        obj.phase_status = PhaseStatus::PhasedOut {
+                            cause: PhaseOutCause::Directly,
+                        };
+                    }
+                    6 => return (ObjectId(id), obj),
+                    7 => definition.active_zones.clear(),
+                    _ => unreachable!(),
+                }
+                obj.static_definitions.push(definition);
+                (ObjectId(id), obj)
+            })
+            .collect()
+    }
+
+    /// The uncached source walk, including its exact ordering.
+    fn uncached_static_source_ids(map: &ObjectMap) -> Vec<ObjectId> {
+        map.iter()
+            .filter(|(_, obj)| obj.may_source_statics_off_battlefield())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    #[test]
+    fn off_battlefield_static_cache_primes_in_iteration_order() {
+        let map = static_source_map();
+        assert!(map.off_battlefield_static_sources.get().is_none());
+        let expected = uncached_static_source_ids(&map);
+        let mut sorted = expected.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            (1..=96)
+                .filter(|id| matches!(id % 8, 1..=3))
+                .map(ObjectId)
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(
+            expected, sorted,
+            "fixture must distinguish sorting from iteration"
+        );
+
+        let first = map.off_battlefield_static_source_ids();
+        assert_eq!(&*first, expected);
+        assert!(Arc::ptr_eq(
+            &first,
+            &map.off_battlefield_static_source_ids()
+        ));
+        assert!(Arc::ptr_eq(
+            &first,
+            map.off_battlefield_static_sources.get().unwrap()
+        ));
+
+        let empty = ObjectMap::new();
+        assert!(empty.off_battlefield_static_source_ids().is_empty());
+        assert!(empty.off_battlefield_static_sources.get().is_some());
+    }
+
+    #[test]
+    fn off_battlefield_static_cache_invalidates_on_every_mutation() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::types::ability::StaticDefinition;
+
+        let mutations: &[(&str, fn(&mut ObjectMap))] = &[
+            ("get_mut zone", |map| {
+                map.get_mut(&ObjectId(1)).unwrap().zone = Zone::Battlefield;
+            }),
+            ("get_mut phase status", |map| {
+                map.get_mut(&ObjectId(1)).unwrap().phase_status = PhaseStatus::PhasedOut {
+                    cause: PhaseOutCause::Directly,
+                };
+            }),
+            ("get_mut static definitions", |map| {
+                map.get_mut(&ObjectId(6))
+                    .unwrap()
+                    .static_definitions
+                    .push(StaticDefinition::continuous().active_zones(vec![Zone::Graveyard]));
+            }),
+            ("IndexMut", |map| map[&ObjectId(2)].zone = Zone::Command),
+            ("iter_mut", |map| {
+                for (id, obj) in map.iter_mut() {
+                    if *id == ObjectId(3) {
+                        obj.static_definitions.clear();
+                    }
+                }
+            }),
+            ("update_where", |map| {
+                map.update_where(
+                    |id, _| *id == ObjectId(7),
+                    |_, obj| {
+                        obj.static_definitions.push(
+                            StaticDefinition::continuous().active_zones(vec![Zone::Graveyard]),
+                        );
+                    },
+                );
+            }),
+            ("insert", |map| {
+                let mut obj = object(100);
+                obj.zone = Zone::Graveyard;
+                obj.static_definitions
+                    .push(StaticDefinition::continuous().active_zones(vec![Zone::Graveyard]));
+                assert!(map.insert(obj.id, obj).is_none());
+            }),
+            ("replace", |map| {
+                assert!(map.insert(ObjectId(1), object(1)).is_some());
+            }),
+            ("remove", |map| {
+                assert!(map.remove(&ObjectId(1)).is_some());
+            }),
+            ("clear", ObjectMap::clear),
+        ];
+        let original = static_source_map();
+        let primed = original.off_battlefield_static_source_ids();
+        for (label, mutate) in mutations {
+            let mut map = original.clone();
+            assert!(Arc::ptr_eq(
+                &primed,
+                &map.off_battlefield_static_source_ids()
+            ));
+            mutate(&mut map);
+            assert!(
+                map.off_battlefield_static_sources.get().is_none(),
+                "{label}"
+            );
+            let expected = uncached_static_source_ids(&map);
+            assert_ne!(&*primed, expected, "{label} must change source eligibility");
+            let rebuilt = map.off_battlefield_static_source_ids();
+            assert_eq!(&*rebuilt, expected, "{label}");
+            assert!(Arc::ptr_eq(
+                &rebuilt,
+                &map.off_battlefield_static_source_ids()
+            ));
+            assert!(Arc::ptr_eq(
+                &primed,
+                &original.off_battlefield_static_source_ids()
+            ));
+            assert_eq!(&*primed, uncached_static_source_ids(&original), "{label}");
+        }
+    }
+
+    #[test]
+    fn off_battlefield_static_cache_clones_invalidate_independently() {
+        let mut original = static_source_map();
+        let primed = original.off_battlefield_static_source_ids();
+        let mut clone = original.clone();
+        clone[&ObjectId(1)].zone = Zone::Battlefield;
+        let cloned_ids = clone.off_battlefield_static_source_ids();
+        assert!(!cloned_ids.contains(&ObjectId(1)));
+        assert!(primed.contains(&ObjectId(1)));
+        assert!(Arc::ptr_eq(
+            &primed,
+            &original.off_battlefield_static_source_ids()
+        ));
+
+        original[&ObjectId(2)].zone = Zone::Battlefield;
+        let original_ids = original.off_battlefield_static_source_ids();
+        assert!(!original_ids.contains(&ObjectId(2)));
+        assert!(original_ids.contains(&ObjectId(1)));
+        assert!(cloned_ids.contains(&ObjectId(2)));
+        assert!(Arc::ptr_eq(
+            &cloned_ids,
+            &clone.off_battlefield_static_source_ids()
+        ));
+        assert_eq!(&*cloned_ids, uncached_static_source_ids(&clone));
+        assert_eq!(&*original_ids, uncached_static_source_ids(&original));
+
+        // A selective sweep with no matches must leave the primed cache valid.
+        let before = original.clone();
+        original.update_where(|_, _| false, |_, _| panic!("no update expected"));
+        assert!(original.ptr_eq(&before));
+        assert!(Arc::ptr_eq(
+            &original_ids,
+            &original.off_battlefield_static_source_ids()
+        ));
+    }
+
+    #[test]
+    fn off_battlefield_static_cache_is_not_serialized_and_rebuilds_after_migration() {
+        use crate::game::game_object::PhaseStatus;
+        use crate::types::ability::StaticDefinition;
+
+        let map = static_source_map();
+        let wire = serde_json::to_string(&map).unwrap();
+        let mut sorted_before = Vec::new();
+        serialize_sorted(&map, &mut serde_json::Serializer::new(&mut sorted_before)).unwrap();
+        let primed = map.off_battlefield_static_source_ids();
+        assert_eq!(serde_json::to_string(&map).unwrap(), wire);
+        let mut sorted_after = Vec::new();
+        serialize_sorted(&map, &mut serde_json::Serializer::new(&mut sorted_after)).unwrap();
+        assert_eq!(sorted_after, sorted_before);
+
+        let decoded: ObjectMap = serde_json::from_str(&wire).unwrap();
+        assert!(decoded.off_battlefield_static_sources.get().is_none());
+        assert_eq!(&*decoded.off_battlefield_static_source_ids(), &*primed);
+        assert_eq!(
+            &*decoded.off_battlefield_static_source_ids(),
+            uncached_static_source_ids(&decoded)
+        );
+
+        let mut visited = Vec::new();
+        let migrated = ObjectMap::deserialize_with_migration(
+            &mut serde_json::Deserializer::from_str(&wire),
+            |obj| {
+                visited.push(obj.id);
+                obj.zone = Zone::Graveyard;
+                obj.phase_status = PhaseStatus::PhasedIn;
+                obj.static_definitions
+                    .push(StaticDefinition::continuous().active_zones(vec![Zone::Graveyard]));
+                Ok::<(), String>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, keys_of(&migrated));
+        assert!(migrated.off_battlefield_static_sources.get().is_none());
+        let migrated_ids = migrated.off_battlefield_static_source_ids();
+        assert_eq!(&*migrated_ids, keys_of(&migrated));
+        assert_ne!(
+            &*migrated_ids, &*primed,
+            "migration must change eligibility"
+        );
+        assert_eq!(&*migrated_ids, uncached_static_source_ids(&migrated));
     }
 
     /// A clone shares the root and every object allocation with its source.

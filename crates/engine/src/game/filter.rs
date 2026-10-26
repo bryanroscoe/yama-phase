@@ -2818,7 +2818,7 @@ fn quantity_ref_contains_filter_prop(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => false,
     }
@@ -3819,7 +3819,7 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => {}
     }

@@ -4472,6 +4472,7 @@ fn redact_battlefield_entry_record(record: &mut crate::types::game_state::Battle
         colors,
         keywords,
         controller: _,
+        is_token: _,
     } = record;
     *name = HIDDEN_CARD_NAME.to_string();
     core_types.clear();
@@ -4995,6 +4996,7 @@ mod tests {
                 colors: Vec::new(),
                 keywords: Vec::new(),
                 controller: owner,
+                is_token: false,
             });
         state
             .sacrificed_permanents_this_turn

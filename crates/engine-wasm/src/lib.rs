@@ -1870,7 +1870,7 @@ fn initialize_game_impl(
             let payload = resolve_deck_list(db, &deck_list);
 
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
-            state.all_card_names = db.card_names().into();
+            state.all_card_names = db.shared_card_names();
             // CR 707.2 + CR 202.3: resolvers that draw from the whole corpus
             // (the Momir Basic emblem) read the database through this handle.
             engine::game::install_card_db(&mut state, std::sync::Arc::clone(db));

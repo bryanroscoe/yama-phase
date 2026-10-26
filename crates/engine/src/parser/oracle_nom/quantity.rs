@@ -33,9 +33,9 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, AttachmentReferent, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
-    DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
+    DamageGroupKey, DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
+    PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
     ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1215,7 +1215,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         )),
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
-        parse_cards_exiled_with_source,
+        alt((
+            parse_cards_exiled_with_source,
+            parse_typed_cards_exiled_with_source,
+        )),
         parse_life_total_ref,
         // CR 700.8: party-size phrasings — must precede `parse_speed_ref`
         // and zone counts so the leading "your " possessive routes to the
@@ -1244,7 +1247,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_self_characteristic_ref,
             parse_attached_creature_pt_ref,
         )),
-        parse_damage_dealt_this_turn_ref,
+        alt((
+            parse_damage_dealt_this_turn_ref,
+            parse_event_damage_dealt_to_recipient_ref,
+        )),
         parse_life_lost_ref,
         parse_life_gained_ref,
         parse_starting_life_ref,
@@ -2186,7 +2192,9 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             // with the other this-turn zone-change counts.
             parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn,
             parse_number_of_times_you_chose_a_mode,
-            parse_number_of_times_it_was_cast_from_the_command_zone,
+            // CR 903.8: "times it's been cast from the command zone this game"
+            // (Study Hall's where-X) — the same grammar as the for-each form.
+            parse_commander_cast_count_times,
         )),
         parse_tokens_created_this_turn_tail,
         parse_distinct_colors_among_tail,
@@ -3581,7 +3589,18 @@ fn parse_turns_taken_this_game(input: &str) -> OracleResult<'_, QuantityRef> {
 /// `StaticCondition::QuantityComparison` to express thresholds over the source's
 /// linked-exile pile (Veteran Survivor: "three or more cards exiled with ~").
 fn parse_cards_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("cards exiled with ").parse(input)?;
+    let (rest, _) = tag("cards ").parse(input)?;
+    let (rest, _) = parse_exiled_with_source_tail(rest)?;
+    Ok((rest, QuantityRef::CardsExiledBySource))
+}
+
+/// CR 406.6 + CR 607.1: "[have been ]exiled with <~ | it | this <noun>>" — the
+/// linked-exile relation after the card noun. "Have been" is the perfect form of
+/// the same relation (Colfenor's Urn: "if three or more cards have been exiled
+/// with this artifact").
+fn parse_exiled_with_source_tail(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = opt(tag("have been ")).parse(input)?;
+    let (rest, _) = tag("exiled with ").parse(rest)?;
     let (rest, _) = alt((
         tag("~"),
         tag("it"),
@@ -3591,7 +3610,34 @@ fn parse_cards_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> 
         ),
     ))
     .parse(rest)?;
-    Ok((rest, QuantityRef::CardsExiledBySource))
+    Ok((rest, ()))
+}
+
+/// CR 406.6 + CR 607.1: "<type phrase> cards exiled with ~" — the source's
+/// linked-exile pile narrowed by a type phrase (Negative Zone Portal: "if there
+/// are four or more creature cards exiled with this artifact"). Counts the
+/// exiled objects matching both the phrase and `ExiledBySource`, the same shape
+/// the for-each form produces ("for each instant and sorcery card exiled with
+/// it", Murktide Regent).
+fn parse_typed_cards_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (after_noun, type_text) = alt((
+        terminated(take_until(" cards "), tag(" cards ")),
+        terminated(take_until(" card "), tag(" card ")),
+    ))
+    .parse(input)?;
+    let (rest, _) = parse_exiled_with_source_tail(after_noun)?;
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![filter, TargetFilter::ExiledBySource],
+            },
+        },
+    ))
 }
 
 /// Parse "opponents" / "opponents you have" after "the number of".
@@ -3963,6 +4009,15 @@ fn parse_self_characteristic_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag(" power"),
         ),
+        // CR 208.4: "its base power" (Curie, Emergent Intelligence: "draw cards
+        // equal to its base power") — the source's power before layer 7c-7d
+        // modifications.
+        value(
+            QuantityRef::BasePower {
+                scope: ObjectScope::Source,
+            },
+            tag(" base power"),
+        ),
         value(
             QuantityRef::Toughness {
                 scope: ObjectScope::Source,
@@ -4002,6 +4057,7 @@ pub(crate) fn parse_pronoun_characteristic_ref_with_scope(
     let (rest, _) = alt((tag("its"), tag("his"), tag("her"), tag("their"))).parse(input)?;
     alt((
         value(QuantityRef::Power { scope }, tag(" power")),
+        value(QuantityRef::BasePower { scope }, tag(" base power")),
         value(QuantityRef::Toughness { scope }, tag(" toughness")),
         value(
             QuantityRef::CountersOn {
@@ -4075,25 +4131,7 @@ fn parse_attached_creature_pt_ref(input: &str) -> OracleResult<'_, QuantityRef> 
 fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = opt(tag("the ")).parse(input)?;
     alt((
-        value(
-            QuantityRef::DamageDealtThisTurn {
-                source: Box::new(TargetFilter::Any),
-                target: Box::new(TargetFilter::And {
-                    filters: vec![
-                        TargetFilter::Player,
-                        TargetFilter::Typed(
-                            TypedFilter::default().controller(ControllerRef::Opponent),
-                        ),
-                    ],
-                }),
-                aggregate: AggregateFunction::Sum,
-                group_by: None,
-                damage_kind: DamageKindFilter::NoncombatOnly,
-
-                channel: DamageChannel::Total,
-            },
-            tag("total amount of noncombat damage dealt to your opponents this turn"),
-        ),
+        parse_damage_dealt_to_your_opponents_this_turn,
         value(
             QuantityRef::DamageDealtThisTurn {
                 source: Box::new(TargetFilter::Any),
@@ -4113,8 +4151,130 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
             },
             tag("damage dealt to target opponent this turn"),
         ),
+        // CR 120.9: "the greatest amount of damage dealt by a source to a
+        // permanent or player this turn" (Impact Resonance) — group the turn's
+        // damage records by source, sum each source's damage, take the largest.
+        value(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::SourceId),
+                damage_kind: DamageKindFilter::Any,
+
+                channel: DamageChannel::Total,
+            },
+            tag("greatest amount of damage dealt by a source to a permanent or player this turn"),
+        ),
+        parse_damage_dealt_to_object_by_controlled_sources,
     ))
     .parse(input)
+}
+
+/// CR 120.1 + CR 120.2a-b: "[total amount of ][noncombat ]damage dealt to your
+/// opponents this turn" — every source's damage this turn to the controller's
+/// opponents, summed (Chandra's Incinerator: "total amount of noncombat damage
+/// …"; Notorious Throng: "damage dealt to your opponents this turn"). The
+/// optional "noncombat" word is the damage-kind axis.
+fn parse_damage_dealt_to_your_opponents_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = opt(tag("total amount of ")).parse(input)?;
+    let (input, damage_kind) = opt(alt((
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
+        value(DamageKindFilter::CombatOnly, tag("combat ")),
+    )))
+    .parse(input)?;
+    let damage_kind = damage_kind.unwrap_or(DamageKindFilter::Any);
+    let (input, _) = tag("damage dealt to your opponents this turn").parse(input)?;
+    Ok((
+        input,
+        QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                ],
+            }),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind,
+            channel: DamageChannel::Total,
+        },
+    ))
+}
+
+/// CR 120.1 + CR 608.2i: "[the ]amount of damage dealt to <object> this turn by
+/// sources <player> controlled" (Grothama, All-Devouring: "each player draws
+/// cards equal to the amount of damage dealt to Grothama this turn by sources
+/// they controlled"). The source filter carries the controller axis, matched
+/// against each damage record's look-back source snapshot; "they" is the
+/// per-player iteration anaphor (`ScopedPlayer`) and "you" the controller.
+fn parse_damage_dealt_to_object_by_controlled_sources(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = opt(tag("amount of ")).parse(input)?;
+    let (input, _) = tag("damage dealt to ").parse(input)?;
+    let (input, target) =
+        value(TargetFilter::SelfRef, alt((tag("~"), tag("this creature")))).parse(input)?;
+    let (input, _) = tag(" this turn by sources ").parse(input)?;
+    let (input, controller) = alt((
+        value(ControllerRef::ScopedPlayer, tag("they controlled")),
+        value(ControllerRef::You, tag("you controlled")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Typed(
+                TypedFilter::default().controller(controller),
+            )),
+            target: Box::new(target),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: DamageKindFilter::Any,
+            channel: DamageChannel::Total,
+        },
+    ))
+}
+
+/// CR 120.1 + CR 603.2c + CR 608.2h: "[the ]amount of damage <source> dealt to
+/// <recipient>" in a damage-trigger body names the damage of the triggering
+/// event (Venerable Warsinger: "where X is the amount of damage this creature
+/// dealt to that player"; Quartzwood Crasher: "… those creatures dealt to that
+/// player"; Mask of the Schemer: "… it dealt to that player"), and the
+/// counting form "1 damage dealt to <recipient>" (Anowon, the Ruin Thief:
+/// "mills a card for each 1 damage dealt to them") is the same amount. Both
+/// resolve to the trigger's `EventContextAmount`, exactly like "that much
+/// damage".
+fn parse_event_damage_dealt_to_recipient_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = alt((
+        value(
+            (),
+            (
+                opt(tag("the ")),
+                tag("amount of damage "),
+                alt((
+                    tag("~ "),
+                    tag("this creature "),
+                    tag("that creature "),
+                    tag("those creatures "),
+                    tag("it "),
+                    tag("they "),
+                )),
+            ),
+        ),
+        value((), tag("1 damage ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("dealt to ").parse(input)?;
+    let (input, _) = alt((
+        tag("that player"),
+        tag("them"),
+        tag("that creature"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    Ok((input, QuantityRef::EventContextAmount))
 }
 
 /// CR 119.3 + CR 608.2c: "life they|that player <verb> [this turn]" — the
@@ -4155,7 +4315,13 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
                     aggregate: AggregateFunction::Sum,
                 },
             },
-            tag("the total amount of life your opponents have lost this turn"),
+            // CR 119.3: "have lost" and the simple past "lost" (Florian,
+            // Voldaren Scion) name the same this-turn total.
+            (
+                tag("the total amount of life your opponents "),
+                opt(tag("have ")),
+                tag("lost this turn"),
+            ),
         ),
         value(
             QuantityRef::LifeLostThisTurn {
@@ -4579,7 +4745,7 @@ fn parse_cost_paid_object_chosen_revealed_ref(input: &str) -> OracleResult<'_, Q
         // The leading `alt` only emits Power/Toughness; ManaValue and
         // ManaSymbolCount are unreachable here.
         ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
-            return Err(oracle_err(input))
+            return Err(oracle_err(input));
         }
     };
     Ok((rest, qty))
@@ -5213,6 +5379,28 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     )
 }
 
+/// CR 608.2c: "<type> card among those cards" — the members of the set the
+/// preceding instruction acted on ("exile the top four cards of your library …
+/// put a +1/+1 counter on it for each creature card among those cards", Journey
+/// to the Lost City) that match the type phrase. The demonstrative names the
+/// chain's tracked set, so this is a `FilteredTrackedSetSize` with no
+/// producing-action restriction.
+fn parse_for_each_type_among_those_cards(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, type_text) =
+        terminated(take_until(" among those cards"), tag(" among those cards")).parse(input)?;
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(filter),
+            caused_by: None,
+        },
+    ))
+}
+
 /// Parse "for each differently named <type>" patterns.
 /// Used for patterns like "for each differently named dungeon you've completed".
 /// CR 201.2: Distinct-by-name population count.
@@ -5440,6 +5628,7 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
             alt((
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
+                parse_for_each_type_among_those_cards,
             )),
             parse_foretold_cards_owned_in_exile,
             parse_zone_card_count,
@@ -5498,8 +5687,12 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
         // CR 122.1: "counter(s) on [self-ref]" — any counter type on the source
         // permanent (Gavel of the Righteous: "for each counter on this Equipment").
         // Placed before `parse_for_each_controlled_type` so the bare "counter" token
-        // does not commit to a type-phrase fallback.
-        parse_for_each_counters_on_source,
+        // does not commit to a type-phrase fallback. The "among <objects>" sibling
+        // totals counters across a population (Ascendant Acolyte).
+        alt((
+            parse_for_each_counters_on_source,
+            parse_for_each_counters_among_objects,
+        )),
         // CR 305.6: "for each basic land type among lands you/they control" —
         // domain scaling (Jodah's Codex, Wandering Treefolk, Radha's Firebrand,
         // Scion of Draco). Reuses the shared bare-domain-suffix combinator and
@@ -5566,6 +5759,35 @@ fn parse_for_each_counters_on_source(input: &str) -> OracleResult<'_, QuantityRe
         QuantityRef::CountersOn {
             scope,
             counter_type,
+        },
+    ))
+}
+
+/// CR 122.1: "[<kind>] counter among <objects>" in a "for each" context — the
+/// total of those counters across every matching object, not the number of
+/// objects ("for each +1/+1 counter among other creatures you control",
+/// Ascendant Acolyte). A population the type grammar can't name ("counter
+/// among players and permanents") fails, so it never counts every object.
+fn parse_for_each_counters_among_objects(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, counter_type) = alt((
+        parse_typed_counter_type_for_each_source,
+        value(None, parse_generic_counter_match),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        "",
+        QuantityRef::CountersOnObjects {
+            counter_type,
+            filter,
         },
     ))
 }
@@ -5712,19 +5934,34 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, EnteredControlBinding)> {
-    pair(
-        take_until(" that entered"),
-        preceded(
-            pair(tag(" that entered"), opt(tag(" the battlefield"))),
-            alt((
+    alt((
+        pair(
+            take_until(" that entered"),
+            preceded(
+                pair(tag(" that entered"), opt(tag(" the battlefield"))),
+                alt((
+                    map(
+                        parse_entry_event_controller,
+                        EnteredControlBinding::EntryEvent,
+                    ),
+                    value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
+                )),
+            ),
+        ),
+        // CR 608.2i: "<type> you had enter the battlefield under your control
+        // this turn" (Gyome, Master Chef) — the causative form of the same
+        // entry-event reading; the controller is the entry event's.
+        pair(
+            take_until(" you had enter"),
+            preceded(
+                pair(tag(" you had enter"), opt(tag(" the battlefield"))),
                 map(
                     parse_entry_event_controller,
                     EnteredControlBinding::EntryEvent,
                 ),
-                value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
-            )),
+            ),
         ),
-    )
+    ))
     .parse(input)
 }
 
@@ -5968,7 +6205,10 @@ fn parse_counter_added_this_turn_condition_active(input: &str) -> OracleResult<'
 
 fn parse_counter_added_this_turn_condition_passive(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = parse_article(input)?;
-    let (rest, counters) = parse_typed_counter_match(rest)?;
+    // CR 122.1: a typed counter, or any counter ("if a counter was put on ~
+    // this turn", Wakka, Devoted Guardian).
+    let (rest, counters) =
+        alt((parse_typed_counter_match, parse_generic_counter_match)).parse(rest)?;
     let (rest, _) = tag(" was put on ").parse(rest)?;
     let (rest, target) = parse_counter_added_target(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -6388,16 +6628,56 @@ fn parse_foretold_cards_owned_in_exile(input: &str) -> OracleResult<'_, Quantity
 }
 
 fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_commander_cast_count_times(input)
+}
+
+/// CR 903.8: "time[s] <subject> cast <commander> from the command zone this
+/// game" — the command-zone cast count behind commander tax, read by "for each
+/// time …" and "the number of times …". The subject axis fixes whose casts are
+/// counted:
+/// - "you've cast your/a commander" → the controller (Skull Storm);
+/// - "they've cast their/a commander" → the clause's target player, the
+///   third-person anaphor convention shared with "life they lost this turn"
+///   (Commander's Insight: "Target player draws X cards plus an additional card
+///   for each time they've cast a commander …"); a per-player loop rebinds it;
+/// - "it's been cast" → the commander itself (Study Hall, Myth Unbound, Opal
+///   Palace), read as its controller's command-zone casts. The resolver sums
+///   every commander the player owns, so this is exact for a single commander
+///   and counts both partners' casts in a partner deck.
+pub(crate) fn parse_commander_cast_count_times(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("time").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
-    let (rest, _) = alt((tag("you've"), tag("youve"))).parse(rest)?;
-    // CR 903.8: "a commander" / "your commander" both count the controller's
-    // command-zone casts; the resolver sums over every commander the player owns.
-    let (rest, _) = tag(" cast ").parse(rest)?;
-    let (rest, _) = alt((tag("your"), tag("a"))).parse(rest)?;
-    let (rest, _) = tag(" commander from the command zone this game").parse(rest)?;
-    Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
+    let (rest, player) = alt((
+        value(
+            PlayerScope::Controller,
+            (
+                alt((tag("you've"), tag("youve"))),
+                tag(" cast "),
+                alt((tag("your"), tag("a"))),
+                tag(" commander"),
+            ),
+        ),
+        value(
+            PlayerScope::Target,
+            (
+                alt((tag("they've"), tag("theyve"))),
+                tag(" cast "),
+                alt((tag("their"), tag("a"))),
+                tag(" commander"),
+            ),
+        ),
+        value(
+            PlayerScope::Controller,
+            (alt((tag("it's been"), tag("it has been"))), tag(" cast")),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" from the command zone this game").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CommanderCastFromCommandZoneCount { player },
+    ))
 }
 
 /// CR 400.7 + CR 700.4: Parse a trailing "that died [under your control] this
@@ -6549,21 +6829,6 @@ fn parse_number_of_sacrificed_this_turn(input: &str) -> OracleResult<'_, Quantit
             filter,
         },
     ))
-}
-
-/// CR 903.8: "times it's been cast from the command zone this game", where
-/// "it" is the commander the sentence names (Study Hall's "When you spend this
-/// mana to cast your commander, scry X, where X is the number of times it's
-/// been cast from the command zone this game"; Opal Palace's counters read the
-/// same count). Like the "times you've cast your commander" form, the resolver
-/// counts the controller's command-zone casts.
-fn parse_number_of_times_it_was_cast_from_the_command_zone(
-    input: &str,
-) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("times it").parse(input)?;
-    let (rest, _) = alt((tag("'s"), tag(" has"))).parse(rest)?;
-    let (rest, _) = tag(" been cast from the command zone this game").parse(rest)?;
-    Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
 }
 
 fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -13335,7 +13600,13 @@ mod tests {
             "the number of times it has been cast from the command zone this game",
         ] {
             let (rest, q) = parse_quantity_ref(text).unwrap();
-            assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount, "{text}");
+            assert_eq!(
+                q,
+                QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: PlayerScope::Controller,
+                },
+                "{text}"
+            );
             assert_eq!(rest, "");
         }
     }
@@ -13346,14 +13617,24 @@ mod tests {
             "times you've cast your commander from the command zone this game",
         )
         .unwrap();
-        assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount);
+        assert_eq!(
+            q,
+            QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            }
+        );
         assert_eq!(rest, "");
 
         let (rest, q) = parse_for_each_clause_ref(
             "time youve cast your commander from the command zone this game",
         )
         .unwrap();
-        assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount);
+        assert_eq!(
+            q,
+            QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -13365,7 +13646,13 @@ mod tests {
             "times youve cast a commander from the command zone this game",
         ] {
             let (rest, q) = parse_for_each_clause_ref(text).unwrap();
-            assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount, "{text}");
+            assert_eq!(
+                q,
+                QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: PlayerScope::Controller,
+                },
+                "{text}"
+            );
             assert_eq!(rest, "");
         }
         assert!(parse_for_each_clause_ref(
@@ -14608,6 +14895,189 @@ mod tests {
             parse_greatest_discarded_this_way("the number of cards a player discarded this way")
                 .is_err(),
             "no superlative means no aggregate axis — must not match"
+        );
+    }
+}
+
+#[cfg(test)]
+mod corpus_quantity_tests {
+    use super::*;
+    use crate::parser::oracle_quantity::parse_for_each_clause;
+
+    /// CR 903.8: the subject axis of the command-zone cast count — "you've"
+    /// (controller), "they've" (the clause's target player) and "it's been"
+    /// (the commander itself, read as its controller's casts).
+    #[test]
+    fn commander_cast_count_subject_axis() {
+        assert_eq!(
+            parse_quantity_ref(
+                "the number of times it's been cast from the command zone this game"
+            ),
+            Ok((
+                "",
+                QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: PlayerScope::Controller,
+                }
+            ))
+        );
+        assert_eq!(
+            parse_for_each_clause("time they've cast a commander from the command zone this game"),
+            Some(QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Target,
+            })
+        );
+        assert_eq!(
+            parse_for_each_clause("time it's been cast from the command zone this game"),
+            Some(QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            })
+        );
+    }
+
+    /// CR 120.1 + CR 603.2c: "the amount of damage <source> dealt to <recipient>"
+    /// and "1 damage dealt to them" read the triggering damage event.
+    #[test]
+    fn event_damage_dealt_to_recipient_is_event_amount() {
+        for text in [
+            "the amount of damage ~ dealt to that player",
+            "the amount of damage this creature dealt to that player",
+            "the amount of damage those creatures dealt to that player",
+            "the amount of damage it dealt to that player",
+            "1 damage dealt to them",
+        ] {
+            assert_eq!(
+                parse_quantity_ref(text),
+                Ok(("", QuantityRef::EventContextAmount)),
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 120.9: the largest single-source damage total this turn.
+    #[test]
+    fn greatest_damage_by_a_source_groups_by_source() {
+        let (rest, qty) = parse_quantity_ref(
+            "the greatest amount of damage dealt by a source to a permanent or player this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            qty,
+            QuantityRef::DamageDealtThisTurn {
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::SourceId),
+                ..
+            }
+        ));
+    }
+
+    /// CR 120.1 + CR 608.2i: damage to an object this turn by sources a player
+    /// controlled carries the controller on the source filter.
+    #[test]
+    fn damage_to_self_by_controlled_sources() {
+        let (rest, qty) = parse_quantity_ref(
+            "the amount of damage dealt to ~ this turn by sources they controlled",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::DamageDealtThisTurn { source, target, .. } = qty else {
+            panic!("expected DamageDealtThisTurn, got {qty:?}");
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+        assert!(matches!(
+            *source,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::ScopedPlayer),
+                ..
+            })
+        ));
+    }
+
+    /// CR 119.3: "lost" and "have lost" name the same opponents' total.
+    #[test]
+    fn opponents_life_lost_simple_past() {
+        for text in [
+            "the total amount of life your opponents lost this turn",
+            "the total amount of life your opponents have lost this turn",
+        ] {
+            assert_eq!(
+                parse_quantity_ref(text),
+                Ok((
+                    "",
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }
+                )),
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 608.2c: "<type> card among those cards" counts the matching members
+    /// of the chain's tracked set.
+    #[test]
+    fn type_among_those_cards_counts_tracked_set_members() {
+        assert!(matches!(
+            parse_for_each_clause("creature card among those cards"),
+            Some(QuantityRef::FilteredTrackedSetSize {
+                caused_by: None,
+                ..
+            })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod qty_grammar_tests {
+    use super::*;
+
+    /// CR 208.4: "its base power" reads the source's base power.
+    #[test]
+    fn its_base_power_is_source_base_power() {
+        assert_eq!(
+            parse_quantity_ref("its base power"),
+            Ok((
+                "",
+                QuantityRef::BasePower {
+                    scope: ObjectScope::Source,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn pronoun_base_power_keeps_the_supplied_object_scope() {
+        assert_eq!(
+            parse_pronoun_characteristic_ref_with_scope("its base power", ObjectScope::EventSource),
+            Ok((
+                "",
+                QuantityRef::BasePower {
+                    scope: ObjectScope::EventSource
+                }
+            )),
+        );
+    }
+
+    /// CR 608.2i: "<type> you had enter the battlefield under your control this
+    /// turn" is the entry-event tally, like "… that entered the battlefield
+    /// under your control this turn".
+    #[test]
+    fn you_had_enter_is_entry_event_tally() {
+        let (rest, qty) = parse_quantity_ref(
+            "the number of nontoken creatures you had enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            qty,
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::NonToken]),
+                ),
+            }
         );
     }
 }

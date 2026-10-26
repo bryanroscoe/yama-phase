@@ -2554,13 +2554,12 @@ fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpell
     .parse(rest)
     .ok()?;
     let (_, count) = all_consuming(terminated(
-        value(
-            QuantityExpr::Ref {
-                qty: QuantityRef::CommanderCastFromCommandZoneCount,
-            },
-            tag::<_, _, OracleError<'_>>(
-                "the number of times it's been cast from the command zone this game",
+        map(
+            preceded(
+                tag::<_, _, OracleError<'_>>("the number of "),
+                crate::parser::oracle_nom::quantity::parse_commander_cast_count_times,
             ),
+            |qty| QuantityExpr::Ref { qty },
         ),
         opt(char('.')),
     ))
@@ -4100,15 +4099,17 @@ mod tests {
         )
         .expect("Opal Palace mana rider must parse");
         assert!(matches!(
-            grants.as_slice(),
-            [ManaSpellGrant::EntersWithCounters {
-                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
-                counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::CommanderCastFromCommandZoneCount,
-                },
-            }] if properties == &[FilterProp::IsCommander]
-        ));
+                   grants.as_slice(),
+                   [ManaSpellGrant::EntersWithCounters {
+                       filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                       counter_type: CounterType::Plus1Plus1,
+                       count: QuantityExpr::Ref {
+                           qty: QuantityRef::CommanderCastFromCommandZoneCount {
+        player: crate::types::ability::PlayerScope::Controller,
+        },
+                       },
+                   }] if properties == &[FilterProp::IsCommander]
+               ));
     }
 
     /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
@@ -4247,7 +4248,9 @@ mod tests {
         assert_eq!(
             *count,
             QuantityExpr::Ref {
-                qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
             }
         );
     }

@@ -18,7 +18,10 @@ use engine::types::phase::Phase;
 /// Verbatim Oracle text (MTGJSON).
 const RESONATING_LUTE: &str = "Lands you control have \"{T}: Add two mana of any one color. Spend this mana only to cast instant and sorcery spells.\"\n{T}: Draw a card. Activate only if you have seven or more cards in your hand.";
 
-fn castable(state: &engine::types::game_state::GameState, id: engine::types::identifiers::ObjectId) -> bool {
+fn castable(
+    state: &engine::types::game_state::GameState,
+    id: engine::types::identifiers::ObjectId,
+) -> bool {
     let (actions, _, _) = legal_actions_full(state);
     actions
         .iter()

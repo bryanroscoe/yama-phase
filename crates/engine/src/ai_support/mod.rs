@@ -51,7 +51,8 @@ pub(crate) use candidates::power_threshold_witness;
 pub(crate) use candidates::retarget_response_exists;
 pub use candidates::{
     balanced_pile_partition, candidate_actions, candidate_actions_broad, candidate_actions_exact,
-    candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction, TacticalClass,
+    candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction,
+    SemanticCandidates, TacticalClass,
 };
 pub use combat_withdrawal::{
     activation_may_yield_combat_withdrawal, combat_withdrawal_fact_for_current_target,
@@ -131,13 +132,23 @@ pub fn validated_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
-    let pipeline = FilterPipeline::default_pipeline();
     let candidates = {
         let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
             crate::game::perf_counters::LegalityClonePhase::Generation,
         );
         candidate_actions_with_probe(state, probe)
     };
+    validate_candidates(state, candidates, probe)
+}
+
+/// Runs the default [`FilterPipeline`] over `candidates` and orders the
+/// survivors.
+fn validate_candidates(
+    state: &GameState,
+    candidates: Vec<CandidateAction>,
+    probe: Option<&crate::game::casting::PriorityCastProbe>,
+) -> Vec<CandidateAction> {
+    let pipeline = FilterPipeline::default_pipeline();
     let mut actions = pipeline.apply_with_probe(state, candidates, probe);
     // Issue #4878: candidate enumeration must not depend on HashSet/HashMap
     // iteration order leaking into AI tie-breaking downstream. Ordered via the
@@ -2394,6 +2405,23 @@ pub fn flat_priority_actions_with_probe(
         .map(|candidate| candidate.action)
         .filter(|action| !action.is_mana_ability())
         .collect()
+}
+
+/// [`flat_priority_actions`] from an existing semantic enumeration of `state`,
+/// for a caller that also issues the decision contract from it.
+pub fn flat_priority_actions_from(
+    state: &GameState,
+    semantic: &SemanticCandidates,
+) -> Vec<GameAction> {
+    validate_candidates(
+        state,
+        candidates::candidate_actions_from(state, semantic),
+        None,
+    )
+    .into_iter()
+    .map(|candidate| candidate.action)
+    .filter(|action| !action.is_mana_ability())
+    .collect()
 }
 
 /// Returns legal actions, spell costs, AND a per-permanent action grouping.

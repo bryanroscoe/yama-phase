@@ -25,7 +25,9 @@ const STUDY_HALL: &str = "{T}: Add {C}.\n{1}, {T}: Add one mana of any color. Wh
 fn study_hall_makes_the_color_a_spell_with_generic_mana_needs() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let hall = scenario.add_land_from_oracle(P0, "Study Hall", STUDY_HALL).id();
+    let hall = scenario
+        .add_land_from_oracle(P0, "Study Hall", STUDY_HALL)
+        .id();
     scenario.add_basic_land(P0, ManaColor::Red);
     let wastes = scenario
         .add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.")
@@ -76,7 +78,10 @@ fn study_hall_makes_the_color_a_spell_with_generic_mana_needs() {
         })
         .expect("the offered selection activates Study Hall");
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::ChooseManaColor { .. }),
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
         "the color is chosen as the ability resolves: {:?}",
         runner.state().waiting_for
     );
@@ -88,6 +93,10 @@ fn study_hall_makes_the_color_a_spell_with_generic_mana_needs() {
         .expect("choose white");
     let pool = &runner.state().players[0].mana_pool;
     assert_eq!(pool.count_color(ManaType::White), 1);
-    assert_eq!(pool.count_color(ManaType::Colorless), 0, "the {{1}} was paid");
+    assert_eq!(
+        pool.count_color(ManaType::Colorless),
+        0,
+        "the {{1}} was paid"
+    );
     assert!(runner.state().objects[&hall].tapped);
 }

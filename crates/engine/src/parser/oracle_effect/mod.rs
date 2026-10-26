@@ -15223,7 +15223,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::DistinctColorsAmong { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
@@ -26639,6 +26639,20 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     let mut skipped_conditional = false;
     for prev in clauses.iter().rev() {
         if let Some(cond) = prev.condition.as_ref() {
+            // CR 608.2c: a clause acting on the referent and gated on a test of
+            // that same referent ("Turn it face up if it's face down" —
+            // Showstopping Surprise) neither introduces nor replaces the
+            // referent, so the walk carries on through it to the declaration.
+            let gates_on_the_referent = matches!(
+                cond,
+                AbilityCondition::TargetMatchesFilter {
+                    subject_slot: None,
+                    ..
+                }
+            ) && effect_acts_on_parent_target(&prev.parsed.effect);
+            if gates_on_the_referent {
+                continue;
+            }
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
             } else if !cond.has_when_you_do_marker()
@@ -26659,15 +26673,46 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
         if has_typed_target_widened(&prev.parsed.effect) {
             return true;
         }
-        if matches!(
-            prev.parsed.effect.target_filter(),
-            Some(TargetFilter::ParentTarget)
-        ) {
+        if effect_acts_on_parent_target(&prev.parsed.effect) {
             continue;
         }
         return false;
     }
     false
+}
+
+/// CR 608.2c + CR 608.2h: rebind the trigger-event object scope of every
+/// per-object quantity of `effect` to the ability's first object target. Only
+/// called outside triggered abilities, where no trigger event exists.
+fn bind_event_source_quantities_to_target(effect: &mut Effect) {
+    let mut rebind = |expr: &mut QuantityExpr| {
+        rebind_object_scope_amount(
+            expr,
+            ObjectScope::EventSource,
+            ObjectScope::Target,
+            SourceRefRebind::AllObjectRefs,
+        );
+    };
+    if let Effect::Token { count, .. } = effect {
+        rebind(count);
+    }
+    each_quantity_expr_mut(effect, &mut rebind);
+}
+
+/// CR 608.2c: whether an instruction acts on the chain's referent ("it") —
+/// through its target slot, or, for the face-down actions that declare no slot
+/// (CR 708.2: "turn it face up"), through its `ParentTarget` subject.
+fn effect_acts_on_parent_target(effect: &Effect) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
+        || matches!(
+            effect,
+            Effect::TurnFaceUp {
+                target: TargetFilter::ParentTarget
+            } | Effect::TurnFaceDown {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
 }
 
 fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
@@ -27202,6 +27247,21 @@ fn refuse_target_pt_threshold_rider_with_own_target(clause: &mut ClauseIr) {
 /// preceding instruction (the comparative "that creature" gate).
 fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &TargetFilter)> {
     for (index, prev) in clauses.iter().enumerate().rev() {
+        // CR 608.2c: an instruction that acts on the established anaphor ("put a
+        // +1/+1 counter on it if it's a creature") declares no new object, so a
+        // condition on it decides only whether IT happens — the antecedent of a
+        // later "it" is still the earlier declared target (Forge of Heroes). Walk
+        // past it before the condition check below, which guards instructions
+        // that would otherwise supply their own (possibly unchosen) antecedent.
+        if prev.condition.is_some()
+            && matches!(
+                prev.parsed.effect.target_filter(),
+                Some(TargetFilter::ParentTarget)
+            )
+            && prev.parsed.sub_ability.is_none()
+        {
+            continue;
+        }
         // CR 608.2c + CR 118.12 / CR 603.12 / CR 207.2c: an affirmative "if you do" / "when you do" gate
         // or whole-spell casting condition (Addendum / kicker) decides whether its
         // instruction happens, not what that instruction declared, so its declared
@@ -40421,6 +40481,76 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     def
 }
 
+/// CR 608.2c + CR 109.4: after "choose a player" / "choose an opponent", a
+/// later "that player" in a player-axis quantity ("If that player has more cards
+/// in hand than you, draw cards equal to the difference" — Sandstone Oracle)
+/// names the player chosen this way, not the ability's controller. The quantity
+/// grammar has no chain context and reads that anaphor as
+/// `PlayerScope::ScopedPlayer`; outside a per-player iteration that scope has no
+/// player to read, so rebind it to the `index`th `Choose(Player|Opponent)` of
+/// this chain. A node with its own `player_scope` (and everything below it)
+/// keeps `ScopedPlayer`, which there names the iterated player.
+fn bind_player_anaphor_to_chosen_player(
+    node: &mut AbilityDefinition,
+    next_index: &mut u8,
+    chosen: Option<u8>,
+) {
+    if node.player_scope.is_some() {
+        return;
+    }
+    if let Some(index) = chosen {
+        let mut rebind = |qty: &mut QuantityRef| {
+            if let Some(player @ PlayerScope::ScopedPlayer) = qty.player_scope_mut() {
+                *player = PlayerScope::ChosenPlayer { index };
+            }
+        };
+        each_quantity_expr_mut(&mut node.effect, &mut |expr| expr.each_ref_mut(&mut rebind));
+        if let Some(condition) = node.condition.as_mut() {
+            rebind_chosen_player_in_condition(condition, &mut rebind);
+        }
+    }
+    let chosen = if matches!(
+        &*node.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
+            ..
+        }
+    ) {
+        let index = *next_index;
+        *next_index = next_index.saturating_add(1);
+        Some(index)
+    } else {
+        chosen
+    };
+    if let Some(sub) = node.sub_ability.as_deref_mut() {
+        bind_player_anaphor_to_chosen_player(sub, next_index, chosen);
+    }
+    if let Some(other) = node.else_ability.as_deref_mut() {
+        bind_player_anaphor_to_chosen_player(other, next_index, chosen);
+    }
+}
+
+/// The condition half of [`bind_player_anaphor_to_chosen_player`]: quantity
+/// comparisons and their boolean combinations.
+fn rebind_chosen_player_in_condition(
+    condition: &mut AbilityCondition,
+    rebind: &mut dyn FnMut(&mut QuantityRef),
+) {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            lhs.each_ref_mut(rebind);
+            rhs.each_ref_mut(rebind);
+        }
+        AbilityCondition::Not { condition } => rebind_chosen_player_in_condition(condition, rebind),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                rebind_chosen_player_in_condition(condition, rebind);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Apply ordered whole-ability transforms after every chain and shell stage.
 ///
 /// CR 608.2c: this is the only point where the final root is known, so the
@@ -41009,6 +41139,7 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+    bind_player_anaphor_to_chosen_player(def, &mut 0, None);
 }
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
@@ -45890,6 +46021,21 @@ fn parse_effect_chain_ir_body(
             && !bind_anaphoric_damage_subject_keep_recipient(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        // CR 608.2c + CR 608.2h: outside a triggered ability there is no
+        // trigger event, so a quantity read off "that spell" names the object
+        // an earlier instruction of this ability targeted ("Counter target
+        // spell. Create X Treasure tokens, where X is that spell's mana value"
+        // — Spell Swindle, Access Denied).
+        if !ctx.in_trigger
+            && builder.clauses().iter().any(|prev| {
+                prev.parsed
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+            })
+        {
+            bind_event_source_quantities_to_target(&mut clause.effect);
         }
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));

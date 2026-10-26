@@ -29,12 +29,12 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, AttachmentReferent, AttackedYouScope, CardTypeSetSource,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef,
-    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr,
-    QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition, TargetFilter,
-    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AggregateFunction, AttachmentKind, AttachmentReferent, AttackedYouScope,
+    CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator,
+    ControllerRef, CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
+    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, SourceExclusion,
+    StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -1161,8 +1161,31 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_put_onto_battlefield_this_way,
         parse_exiled_this_way_count,
         parse_unless_pay_condition,
+        parse_cards_exiled_with_source_count_ge,
     ))
     .parse(input)
+}
+
+/// CR 406.6 + CR 607.1: "<N> or more [<type>] cards have been exiled with ~"
+/// (Colfenor's Urn: "if three or more cards have been exiled with this
+/// artifact") — a threshold on the source's linked-exile pile. The noun phrase
+/// is the shared quantity grammar ("[<type>] cards [have been ]exiled with ~");
+/// anything else it might read is refused, so only the linked-exile count is
+/// claimed here.
+fn parse_cards_exiled_with_source_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_ge_threshold(input)?;
+    let (rest, qty) = nom_quantity::parse_quantity_ref(rest)?;
+    let is_linked_exile_count = match &qty {
+        QuantityRef::CardsExiledBySource => true,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And { filters },
+        } => filters.contains(&TargetFilter::ExiledBySource),
+        _ => false,
+    };
+    if !is_linked_exile_count {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, make_quantity_ge(qty, n)))
 }
 
 /// CR 608.2c: "you put fewer than/more than <N> <noun> onto the battlefield
@@ -2856,8 +2879,14 @@ fn parse_has_counters_axes(
     let (rest, subject) = parse_counter_condition_subject(input)?;
     let (rest, _) = tag("has ").parse(rest)?;
 
+    let (rest, (counters, minimum, maximum)) = parse_counter_state(rest)?;
+    Ok((rest, (subject, counters, minimum, maximum)))
+}
+
+/// CR 122.1: the shared counter predicate payload, independent of its subject.
+fn parse_counter_state(input: &str) -> OracleResult<'_, (CounterMatch, u32, Option<u32>)> {
     // Quantity axis: produces (minimum, maximum).
-    let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
+    let (rest, (minimum, maximum)) = parse_has_counters_quantity(input)?;
 
     // Counter type axis: typed first for robustness — a typed token like
     // "loyalty counter" shares no prefix with bare "counter", so branch
@@ -2872,7 +2901,33 @@ fn parse_has_counters_axes(
     // through the shared recipient-pronoun combinator (single authority).
     let (rest, _) = preceded(tag(" on "), parse_object_recipient_pronoun).parse(rest)?;
 
-    Ok((rest, (subject, counters, minimum, maximum)))
+    Ok((rest, (counters, minimum, maximum)))
+}
+
+/// CR 122.1: adapt the shared counter bounds to properties of an event object
+/// or an earlier target. Preserve exact, upper, and lower bounds rather than
+/// treating comparator words as part of a counter name.
+pub(crate) fn parse_counter_state_properties(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
+    let (rest, (counters, minimum, maximum)) = parse_counter_state(input)?;
+    let property = |comparator, value| -> Result<FilterProp, nom::Err<OracleError<'_>>> {
+        Ok(FilterProp::Counters {
+            counters: counters.clone(),
+            comparator,
+            count: QuantityExpr::Fixed {
+                value: i32::try_from(value).map_err(|_| oracle_err(input))?,
+            },
+        })
+    };
+    let properties = match maximum {
+        None => vec![property(Comparator::GE, minimum)?],
+        Some(maximum) if minimum == maximum => vec![property(Comparator::EQ, minimum)?],
+        Some(maximum) if minimum == 0 => vec![property(Comparator::LE, maximum)?],
+        Some(maximum) => vec![
+            property(Comparator::GE, minimum)?,
+            property(Comparator::LE, maximum)?,
+        ],
+    };
+    Ok((rest, properties))
 }
 
 /// CR 122.1 + CR 608.2c: identifies only a leading `if it has … counter on it,`
@@ -2981,6 +3036,19 @@ fn parse_has_counters_quantity(input: &str) -> OracleResult<'_, (u32, Option<u32
         value(
             (1u32, None),
             nom::combinator::peek(alt((tag("counters"), tag("counter")))),
+        ),
+        // CR 122.1: the same unquantified plural with a counter type — "if ~ has
+        // loyalty counters on it" (Gatewatch Beacon) means at least one. Only
+        // the plural noun: a singular typed noun always carries an article. A
+        // bare count word ("three counters") is not a counter type, so it stays
+        // the ambiguous form the guards above reject.
+        value(
+            (1u32, None),
+            nom::combinator::peek((
+                nom::combinator::not(parse_number),
+                parse_counter_type_typed,
+                tag(" counters"),
+            )),
         ),
     ))
     .parse(input)
@@ -5452,7 +5520,38 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // "another " to `FilterProp::Another`).
     let (rest, _article) =
         nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))).parse(rest)?;
-    let (filter, mut remainder) = parse_type_phrase_folding(rest);
+    // CR 303.4 + CR 301.5: "you control an enchanted creature" / "an equipped
+    // creature" (Concord with the Kami) — a permanent with any Aura / Equipment
+    // attached. The type phrase would read the adjective as source-relative
+    // (`EnchantedBy` / `EquippedBy`: attached to THIS source), which is the
+    // Aura's or Equipment's own "enchanted creature", not this presence test.
+    let attached_state = preceded(
+        alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))),
+        alt((
+            value(AttachmentKind::Aura, tag("enchanted ")),
+            value(AttachmentKind::Equipment, tag("equipped ")),
+        )),
+    )
+    .parse(rest);
+    let (filter, mut remainder) = match attached_state {
+        Ok((after_adjective, kind)) => {
+            let (filter, remainder) = parse_type_phrase_folding(after_adjective);
+            let TargetFilter::Typed(typed) = filter else {
+                return Err(oracle_err(input));
+            };
+            if typed.type_filters.is_empty() {
+                return Err(oracle_err(input));
+            }
+            let mut properties = typed.properties.clone();
+            properties.push(FilterProp::HasAttachment {
+                kind,
+                controller: None,
+                exclude_source: SourceExclusion::Include,
+            });
+            (TargetFilter::Typed(typed.properties(properties)), remainder)
+        }
+        Err(_) => parse_type_phrase_folding(rest),
+    };
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -7870,6 +7969,12 @@ fn parse_creature_died_this_turn_conditions(input: &str) -> OracleResult<'_, Sta
                 tag("a creature died this turn"),
                 tag("a creature died under your control this turn"),
             )),
+        ),
+        // CR 700.4: "no creatures died this turn" (Titan Hunter) — the same
+        // count, equal to zero.
+        value(
+            make_quantity_comparison(creatures_died_this_turn_ref(), Comparator::EQ, 0),
+            tag("no creatures died this turn"),
         ),
         // "a <type-phrase> died this turn" (Undead Sprinter: "a non-Zombie
         // creature died this turn") → filtered zone-change count >= 1. Placed
@@ -11832,7 +11937,7 @@ pub fn parse_you_put_counters_on_type_this_way_condition(
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Fail,
-            )))
+            )));
         }
     };
     let (filter, after_filter) = parse_type_phrase_folding(rest);
@@ -26180,5 +26285,193 @@ mod intervening_if_state_condition_tests {
         assert!(properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::InZone { .. })));
+    }
+}
+
+#[cfg(test)]
+mod corpus_state_condition_tests {
+    use super::*;
+
+    /// CR 122.1: an unquantified typed plural ("loyalty counters") means at
+    /// least one counter of that type.
+    #[test]
+    fn source_has_typed_counters_plural_is_at_least_one() {
+        let (rest, condition) = parse_inner_condition("~ has loyalty counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Loyalty),
+                minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// CR 303.4 + CR 301.5: "you control an enchanted/equipped creature" is a
+    /// presence test for a creature with any Aura/Equipment attached, not one
+    /// attached to this source.
+    #[test]
+    fn you_control_an_enchanted_or_equipped_creature() {
+        for (text, kind) in [
+            ("you control an enchanted creature", AttachmentKind::Aura),
+            (
+                "you control an equipped creature",
+                AttachmentKind::Equipment,
+            ),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            let StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(typed)),
+            } = condition
+            else {
+                panic!("{text}: expected a presence check");
+            };
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(
+                typed.properties,
+                vec![
+                    FilterProp::HasAttachment {
+                        kind,
+                        controller: None,
+                        exclude_source: SourceExclusion::Include,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    },
+                ]
+            );
+        }
+    }
+
+    /// CR 406.6 + CR 607.1: thresholds on the source's linked-exile pile, with
+    /// and without a type phrase, in the "there are" and perfect-tense forms.
+    #[test]
+    fn linked_exile_count_thresholds() {
+        let (rest, condition) =
+            parse_inner_condition("three or more cards have been exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            make_quantity_ge(QuantityRef::CardsExiledBySource, 3)
+        );
+
+        let (rest, condition) =
+            parse_inner_condition("there are four or more creature cards exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::And { filters },
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        } = &condition
+        else {
+            panic!("expected a typed linked-exile count, got {condition:?}");
+        };
+        assert_eq!(
+            filters,
+            &vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::ExiledBySource,
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod history_condition_tests {
+    use super::*;
+    use nom::combinator::all_consuming;
+
+    /// CR 700.4: "no creatures died this turn" is the died count equal to zero.
+    #[test]
+    fn no_creatures_died_this_turn() {
+        let (rest, condition) = parse_inner_condition("no creatures died this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            make_quantity_comparison(creatures_died_this_turn_ref(), Comparator::EQ, 0)
+        );
+    }
+
+    /// CR 400.7: a source that died and returned is a different object. The
+    /// history matcher's storage-ID-only Another exclusion cannot distinguish
+    /// that earlier incarnation. Keep this grammar unsupported rather than
+    /// silently excluding a Human that should count.
+    #[test]
+    fn another_type_died_requires_incarnation_aware_history() {
+        assert!(all_consuming(parse_inner_condition)
+            .parse("another human died under your control this turn")
+            .is_err());
+    }
+
+    /// CR 122.1: "a counter was put on ~ this turn" counts any counter type.
+    #[test]
+    fn any_counter_was_put_on_source_this_turn() {
+        let (rest, condition) = parse_inner_condition("a counter was put on ~ this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            make_quantity_ge(
+                QuantityRef::CounterAddedThisTurn {
+                    actor: CountScope::All,
+                    counters: CounterMatch::Any,
+                    target: TargetFilter::SelfRef,
+                },
+                1,
+            )
+        );
+    }
+}
+
+#[cfg(test)]
+mod counter_state_property_tests {
+    use super::*;
+    use nom::combinator::all_consuming;
+
+    #[test]
+    fn counter_state_properties_preserve_comparators_and_types() {
+        for (text, comparator, count) in [
+            ("a +1/+1 counter on it", Comparator::GE, 1),
+            ("three or more +1/+1 counters on it", Comparator::GE, 3),
+            ("exactly three +1/+1 counters on it", Comparator::EQ, 3),
+            ("no +1/+1 counters on it", Comparator::EQ, 0),
+            ("fewer than three +1/+1 counters on it", Comparator::LE, 2),
+            ("more than three +1/+1 counters on it", Comparator::GE, 4),
+            ("three or fewer +1/+1 counters on it", Comparator::LE, 3),
+        ] {
+            assert_eq!(
+                parse_counter_state_properties(text),
+                Ok((
+                    "",
+                    vec![FilterProp::Counters {
+                        counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                        comparator,
+                        count: QuantityExpr::Fixed { value: count },
+                    },]
+                )),
+                "{text}"
+            );
+        }
+        for text in [
+            "three +1/+1 counters on it",
+            "fewer than three or more +1/+1 counters on it",
+            "an even number of counters on it",
+            "a +1/+1 counter on it and it has flying",
+        ] {
+            assert!(
+                all_consuming(parse_counter_state_properties)
+                    .parse(text)
+                    .is_err(),
+                "{text}"
+            );
+        }
     }
 }

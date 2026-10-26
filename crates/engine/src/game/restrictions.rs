@@ -421,6 +421,7 @@ pub(crate) fn battlefield_entry_record_for(
         // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
         keywords: obj.keywords.clone(),
         controller: obj.controller,
+        is_token: obj.is_token,
     }
 }
 
@@ -549,6 +550,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // source context the predicate cannot exclude self, so it stays
                 // false (the prior behavior for this prop on these paths).
                 FilterProp::Another => source_id.is_some_and(|s| record.object_id != s),
+                // CR 111.1: token-ness is captured on the entry snapshot.
+                FilterProp::Token => record.is_token,
+                FilterProp::NonToken => !record.is_token,
                 _ => false,
             })
         }
@@ -594,7 +598,7 @@ pub(crate) fn battlefield_entry_matches_filter(
 /// a silent constant 0 — but see the `Or` exception documented beside that function's
 /// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
 /// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 6.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
@@ -605,8 +609,9 @@ pub(crate) fn battlefield_entry_matches_filter(
 /// `ledger_guard_agrees_with_matcher` (test, below).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster)
+/// and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`, as `Token`/`NonToken`
+/// got (`is_token`).
 ///
 /// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
 /// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
@@ -627,6 +632,8 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                             | FilterProp::InZone { .. }
                             | FilterProp::WithKeyword { .. }
                             | FilterProp::Another
+                            | FilterProp::Token
+                            | FilterProp::NonToken
                     )
                 })
         }
@@ -3107,6 +3114,7 @@ mod tests {
             colors: vec![],
             keywords: vec![],
             controller: PlayerId(0),
+            is_token: false,
         };
 
         assert!(
@@ -3365,6 +3373,48 @@ mod tests {
         );
     }
 
+    /// CR 608.2i + CR 111.1: Gyome counts nontoken creature ENTRIES under
+    /// your control, even after they leave. Tokens and opponents' entries do
+    /// not count, and repeated entries by the same card count separately.
+    #[test]
+    fn gyome_entry_quantity_excludes_tokens_and_keeps_departed_entries() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let (rest, qty) = crate::parser::oracle_nom::quantity::parse_quantity_ref(
+            "the number of nontoken creatures you had enter the battlefield under your control this turn",
+        ).expect("Gyome's quantity");
+        assert_eq!(rest, "");
+        let expr = QuantityExpr::Ref { qty };
+        let read = |state: &crate::types::game_state::GameState| {
+            crate::game::quantity::resolve_quantity(state, &expr, PlayerId(0), ObjectId(10))
+        };
+        assert_eq!(read(&state), 0);
+        for (object_id, controller, is_token, core_types, expected) in [
+            (99, PlayerId(0), false, vec![CoreType::Creature], 1),
+            (100, PlayerId(0), true, vec![CoreType::Creature], 1),
+            (101, PlayerId(1), false, vec![CoreType::Creature], 1),
+            (102, PlayerId(0), false, vec![CoreType::Artifact], 1),
+            (99, PlayerId(0), false, vec![CoreType::Creature], 2),
+        ] {
+            state
+                .battlefield_entries_this_turn
+                .push_back(BattlefieldEntryRecord {
+                    object_id: ObjectId(object_id),
+                    name: "Entrant".to_string(),
+                    core_types,
+                    subtypes: vec![],
+                    supertypes: vec![],
+                    colors: vec![],
+                    keywords: vec![],
+                    controller,
+                    is_token,
+                });
+            // None of these entries needs a surviving live object.
+            assert_eq!(read(&state), expected);
+        }
+        state.battlefield_entries_this_turn = Default::default();
+        assert_eq!(read(&state), 0);
+    }
+
     #[test]
     fn battlefield_entry_history_condition_survives_object_leaving() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -3379,6 +3429,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 keywords: vec![],
                 controller: PlayerId(1),
+                is_token: false,
             });
         let mut filter = crate::types::ability::TypedFilter::creature();
         filter.controller = Some(ControllerRef::Opponent);
@@ -3448,6 +3499,7 @@ mod tests {
                             colors: vec![],
                             keywords: vec![],
                             controller: *controller,
+                            is_token: false,
                         });
                     next_id += 1;
                 }
@@ -5383,9 +5435,8 @@ mod tests {
     fn ledger_guard_agrees_with_matcher() {
         let player = PlayerId(0);
         let source_id = ObjectId(99);
-        // Positively satisfies all four answerable props: green, on the
-        // battlefield, flying, and not the ability source. Also legendary and
-        // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
+        // Positively satisfies green, battlefield, flying, another, and
+        // nontoken properties. Legendary and tapped status remain unanswerable.
         let record = BattlefieldEntryRecord {
             object_id: ObjectId(10),
             name: "Bbfu10 Binder Entrant".to_string(),
@@ -5395,6 +5446,7 @@ mod tests {
             colors: vec![ManaColor::Green],
             keywords: vec![Keyword::Flying],
             controller: player,
+            is_token: false,
         };
         let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
             TargetFilter::Typed(crate::types::ability::TypedFilter {
@@ -5416,6 +5468,8 @@ mod tests {
                 value: Keyword::Flying,
             },
             FilterProp::Another,
+            // CR 111.1: the record is a nontoken entry (`is_token: false`).
+            FilterProp::NonToken,
         ] {
             let filter = typed(vec![prop.clone()], None);
             assert!(
@@ -5429,12 +5483,23 @@ mod tests {
             );
         }
 
+        // Answerable but not matched: the record is not a token.
+        assert!(ledger_filter_is_evaluable(&typed(
+            vec![FilterProp::Token],
+            None
+        )));
+        assert!(!battlefield_entry_matches_filter(
+            &record,
+            &typed(vec![FilterProp::Token], None),
+            player,
+            &[],
+            Some(source_id)
+        ));
+
         // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
-        // refuse. (The record IS legendary and nontoken, so the matcher's `false`
-        // for those is the fail-closed arm, not a genuine mismatch.)
+        // refuse. (The record IS legendary, so the matcher's `false` for that is
+        // the fail-closed arm, not a genuine mismatch.)
         for prop in [
-            FilterProp::NonToken,
-            FilterProp::Token,
             FilterProp::Tapped,
             FilterProp::FaceDown,
             FilterProp::HasSupertype {
@@ -5455,14 +5520,14 @@ mod tests {
             }],
             None,
         );
-        let nontoken = typed(vec![FilterProp::NonToken], None);
+        let face_down = typed(vec![FilterProp::FaceDown], None);
         let tapped = typed(vec![FilterProp::Tapped], None);
         assert!(ledger_filter_is_evaluable(&TargetFilter::Any));
         assert!(ledger_filter_is_evaluable(&TargetFilter::Or {
             filters: vec![bare.clone(), green]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::Or {
-            filters: vec![bare.clone(), nontoken]
+            filters: vec![bare.clone(), face_down]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::And {
             filters: vec![bare.clone(), tapped]

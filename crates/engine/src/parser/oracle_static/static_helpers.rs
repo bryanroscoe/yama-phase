@@ -182,6 +182,23 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    // CR 903.3 + CR 601.2f: "Your commander costs {1} less to cast …" (Myth
+    // Unbound) — the commander spell(s) the controller owns.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("your commanders"),
+        tag("your commander"),
+    )))
+    .parse(base)
+    .is_ok()
+    {
+        return Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::IsCommander,
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+        ])));
+    }
+
     let that_split: Result<(&str, (&str, &str)), nom::Err<OracleError<'_>>> = all_consuming(alt((
         (
             take_until(" that's "),
@@ -864,9 +881,23 @@ pub(crate) fn try_parse_cost_modification(
                     filter: count_filter,
                 })
             })
+            // CR 601.2f: a count of objects matching nothing in particular is a
+            // phrase none of the readers understood ("for each counter among
+            // players and permanents" — Lumbering Megasloth; "for each {E}
+            // you've paid or lost this turn" — Blaster Hulk). Counting every
+            // object would take the full reduction with nothing to count.
+            .filter(|qty| {
+                !matches!(qty, QuantityRef::ObjectCount { filter }
+                    if *filter == TargetFilter::Typed(TypedFilter::default()))
+            })
     } else {
         None
     };
+    // A "for each" clause nothing above can read leaves the static an honest
+    // gap rather than a flat {N} reduction.
+    if dynamic_count.is_none() && cost_tp.split_around("for each ").is_some() {
+        return None;
+    }
 
     if dynamic_count.is_none() && amount_is_variable_x {
         let (_, where_x_text) = super::oracle_effect::strip_trailing_where_x(cost_tp);
@@ -1541,6 +1572,17 @@ pub(crate) fn parse_self_subject_is_color_cda_line(
         rest,
     ))
     .parse(after_subject)?;
+    // CR 903.4: "This ability doesn't affect its color identity." (Fallaji
+    // Wayfarer) excludes this color-defining ability from the card's color
+    // identity. Color identity is a deck-construction property read from the
+    // card's printed identity (`deck_validation::card_color_identity`), never
+    // from this static, so the rider has no in-game effect and is consumed with
+    // the color line.
+    let (after_predicate, _) = opt((
+        tag::<_, _, OracleError<'_>>(" this ability doesn't affect its color identity"),
+        opt(tag(".")),
+    ))
+    .parse(after_predicate)?;
     eof::<_, OracleError<'_>>(after_predicate)?;
     let Some(colors) = parse_color_predicate(predicate_lower) else {
         return Err(nom::Err::Error(nom::error::Error::new(

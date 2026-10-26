@@ -1499,7 +1499,7 @@ impl GameSession {
 
                 // Restore #[serde(skip)] fields before the engine computes the
                 // first externally visible state from this snapshot.
-                state.all_card_names = db.card_names().into();
+                state.all_card_names = db.shared_card_names();
                 state.log_player_names = ps.display_names.clone();
                 rehydrate_game_from_card_db_with_finalization(
                     state,

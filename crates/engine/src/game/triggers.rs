@@ -2213,6 +2213,20 @@ fn is_keyword_companion_producer(producer: &TriggerGrantProducerKey) -> bool {
     matches!(producer, TriggerGrantProducerKey::KeywordCompanion { .. })
 }
 
+/// Whether `obj` holds any keyword-companion grant or trigger entry, i.e.
+/// whether reconciling it against no candidates could change it.
+fn has_keyword_companion_occurrence(obj: &GameObject) -> bool {
+    obj.trigger_occurrence_state
+        .active_grants()
+        .any(|(producer, _)| is_keyword_companion_producer(producer))
+        || obj.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+            )
+        })
+}
+
 /// Produces the exact keyword-companion candidates for one off-zone source.
 /// The off-zone characteristics pass retains the continuous-effect occurrence
 /// that supplied each final keyword, so no payload comparison or base-keyword
@@ -2267,12 +2281,27 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
         let state = &*state;
         crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
             let mut staged = Vec::with_capacity(object_ids.len());
+            let companions_may_exist =
+                crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(state);
 
             for object_id in object_ids {
                 let Some(obj) = state.objects.get(&object_id) else {
                     continue;
                 };
+                // Nothing can grant this object a companion, so its candidates
+                // are provably empty; with none installed either, reconciling
+                // would change nothing (see below).
+                if !companions_may_exist(obj, obj.zone) && !has_keyword_companion_occurrence(obj) {
+                    continue;
+                }
                 let candidates = off_zone_keyword_trigger_candidates(state, obj);
+                // No companion is wanted and none is installed, so reconciling
+                // would write back an equal occurrence state and an equal trigger
+                // list. Skipping that write keeps the object (and its trigger
+                // list) shared with every cloned state instead of copying it.
+                if candidates.is_empty() && !has_keyword_companion_occurrence(obj) {
+                    continue;
+                }
                 let mut occurrence_state = obj.trigger_occurrence_state.clone();
                 let entries = occurrence_state
                     .reconcile_trigger_entries_matching(candidates, is_keyword_companion_producer)
@@ -2314,15 +2343,18 @@ pub fn trigger_source_context_for_latch(
     state: &GameState,
     source: &GameObject,
 ) -> TriggerSourceContext {
-    let mut record = source.snapshot_for_zone_change(source.id, Some(source.zone), source.zone);
+    let mut record =
+        source.snapshot_for_trigger_source_context(source.id, Some(source.zone), source.zone);
     record.attachments = super::zones::capture_attachment_snapshot(state, source);
     record.linked_exile_snapshot =
         super::zones::capture_linked_exile_snapshot(state, source.id, source.zone);
     record.combat_status = super::zones::capture_combat_status(state, source.id);
     record.sync_trigger_source_context();
+    // The record is a scratch snapshot that is dropped here, so move its
+    // context out rather than cloning it.
     let mut source_context = record
-        .trigger_source_context()
-        .cloned()
+        .trigger_source_context
+        .take()
         .expect("zone-change source snapshot always owns its trigger source context");
     source_context.cards_exiled_this_turn = state
         .cards_exiled_with_source_this_turn
@@ -2739,6 +2771,37 @@ fn record_matched_batched_zone_change_replay(state: &mut GameState, matched: &Ma
     }
 }
 
+/// Rejects, before its source context is built, a live source that the zone
+/// guard in [`collect_matching_triggers_inner`] would reject definition by
+/// definition: none of its trigger entries functions in `zone_filter`.
+///
+/// Exact, not a heuristic. Unless the event is the source's own zone change
+/// (whose record may supply latched entries, CR 603.10a), the scan reads the
+/// live source's own entries (an active subset of them, or its phase-out
+/// subset) with no granted-keyword additions here, and the zone guard admits a
+/// definition only if [`trigger_definition_functions_in_zone`] holds for it.
+fn live_source_cannot_trigger_in_zone(
+    source: TriggerSource<'_>,
+    event: &GameEvent,
+    zone_filter: Option<Zone>,
+    cached_granted_keyword_triggers: Option<&[(KeywordKind, TriggerDefinition)]>,
+) -> bool {
+    let (TriggerSource::Live(source_obj), Some(zone), None) =
+        (source, zone_filter, cached_granted_keyword_triggers)
+    else {
+        return false;
+    };
+    let own_zone_change = matches!(
+        event,
+        GameEvent::ZoneChanged { object_id, .. } if *object_id == source_obj.id
+    );
+    !own_zone_change
+        && !source_obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| trigger_definition_functions_in_zone(entry.definition(), zone))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -2937,6 +3000,14 @@ fn collect_matching_triggers_inner(
     visit: TriggerSourceVisit,
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
+    if live_source_cannot_trigger_in_zone(
+        source,
+        event,
+        zone_filter,
+        cached_granted_keyword_triggers,
+    ) {
+        return pending;
+    }
     let source_context = match source {
         TriggerSource::Live(source_obj) => {
             trigger_source_context_for_event(state, source_obj, event)
@@ -3431,11 +3502,17 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
         Zone::Battlefield => state.battlefield_phased_in_ids(),
         Zone::Graveyard => {
             crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
+                let companions_may_exist =
+                    crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(
+                        state,
+                    );
                 state
                     .players
                     .iter()
                     .flat_map(|player| player.graveyard.iter().copied())
-                    .filter(|id| source_has_trigger_in_zone(state, *id, zone))
+                    .filter(|id| {
+                        source_has_trigger_in_zone_given(state, *id, zone, &companions_may_exist)
+                    })
                     .collect()
             })
         }
@@ -3485,11 +3562,30 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
 /// Candidate discovery at the collector's current observation boundary. This
 /// does not answer a source-relative trigger fact; every matched candidate is
 /// immediately converted to its owned `TriggerSourceContext` before matching.
+#[cfg(test)]
 fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone) -> bool {
+    let companions_may_exist =
+        crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(state);
+    source_has_trigger_in_zone_given(state, source_id, zone, &companions_may_exist)
+}
+
+/// [`source_has_trigger_in_zone`] with the board-wide companion pre-check
+/// computed once by the caller. A keyword-companion trigger synthesized from
+/// the source's off-zone keywords can function outside the battlefield only if
+/// a keyword was ADDED with such a companion (the synthesis drops the source's
+/// printed keywords), so when `companions_may_exist` rules that out the
+/// per-object keyword query is skipped without changing the answer.
+fn source_has_trigger_in_zone_given(
+    state: &GameState,
+    source_id: ObjectId,
+    zone: Zone,
+    companions_may_exist: &impl Fn(&GameObject, Zone) -> bool,
+) -> bool {
     state.objects.get(&source_id).is_some_and(|obj| {
         super::functioning_abilities::active_trigger_definitions(state, obj)
             .any(|active| trigger_definition_functions_in_zone(active.definition, zone))
             || (zone != Zone::Battlefield
+                && companions_may_exist(obj, zone)
                 && synthesize_granted_keyword_triggers(
                     obj,
                     crate::game::off_zone_characteristics::effective_off_zone_keywords(
@@ -12339,7 +12435,9 @@ fn player_scope_unbound_at_fire_time(scope: &PlayerScope) -> bool {
         PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::RecipientController
-        | PlayerScope::ParentObjectTargetController => true,
+        | PlayerScope::ParentObjectTargetController
+        // CR 608.2c: chosen during resolution, so a fire-time check has none.
+        | PlayerScope::ChosenPlayer { .. } => true,
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(player_scope_unbound_at_fire_time),
@@ -12410,6 +12508,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         QuantityRef::HandSize { player, .. }
         | QuantityRef::LifeTotal { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::CommanderCastFromCommandZoneCount { player }
         | QuantityRef::GraveyardSize { player, .. }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::LifeGainedThisTurn { player }
@@ -12571,7 +12670,6 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::CommanderManaValue { .. } => false,
     }
 }
@@ -44118,6 +44216,92 @@ pub mod tests {
             state.players[1].life, 7,
             "issue #886 FIX: P1 takes 7 (Raph) + 6 (revealed Dreadmaw) = 13 combat damage"
         );
+    }
+
+    #[test]
+    fn off_zone_reconciliation_accepts_projected_battlefield_source() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Activation Source", 1, 1);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let overlay = TriggerCollectionOverlay::for_prepared_activated_ability(
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+        );
+        overlay.install_virtual_targeting_source(&mut state);
+        assert_eq!(
+            super::super::targeting::zone_object_ids(&state, Zone::Stack),
+            vec![source],
+            "the production overlay exposes the permanent id through the stack scan"
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert!(
+            crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(&state)(
+                &state.objects[&source],
+                Zone::Battlefield,
+            ),
+            "the off-zone pre-check must defer to the ordinary query"
+        );
+        assert!(off_zone_keyword_trigger_candidates(&state, &state.objects[&source]).is_empty());
+        let before = format!("{:?}", state.objects[&source]);
+        let stack_before = format!("{:?}", state.stack);
+
+        reconcile_off_zone_keyword_triggers(&mut state);
+
+        assert_eq!(format!("{:?}", state.objects[&source]), before);
+        assert_eq!(format!("{:?}", state.stack), stack_before);
+    }
+
+    #[test]
+    fn pending_activation_collection_accepts_projected_battlefield_source() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Activation Source", 1, 1);
+        let target = make_creature(&mut state, PlayerId(1), "Activation Target", 2, 2);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut collection = PendingActivationTriggerCollection::for_prepared_activated_ability(
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+        );
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(target),
+            source_id: source,
+            source_controller: PlayerId(0),
+            targeter: None,
+        };
+        let before = format!("{state:?}");
+
+        // Each slice reconstructs the staged state and its virtual stack entry.
+        // Both slices must reconcile successfully without publishing that entry.
+        collection.collect(&state, std::slice::from_ref(&event));
+        collection.collect(&state, std::slice::from_ref(&event));
+
+        assert!(collection.pending_contexts.is_empty());
+        assert_eq!(format!("{state:?}"), before);
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
     }
 
     #[test]

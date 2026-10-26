@@ -6045,6 +6045,32 @@ pub(crate) fn canonicalize_anchor_label(label: &str) -> String {
 }
 
 pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
+    // CR 604.1 + CR 702.103b: a static may name both its source and its
+    // attached host ("this creature or enchanted creature"). These are two
+    // permanent references, not a spell's choice of targets. Compose only
+    // reference subjects here; ordinary type unions retain the type grammar's
+    // shared controller qualifiers ("Shamans or Wizards you control").
+    let lower = subject.to_lowercase();
+    if let Ok((_, (left, right))) = nom_primitives::split_once_on(&lower, " or ") {
+        if let (Some(left), Some(right)) = (
+            parse_rule_static_subject_filter(left),
+            parse_rule_static_subject_filter(right),
+        ) {
+            let is_host = |filter: &TargetFilter| {
+                matches!(filter, TargetFilter::Typed(typed)
+                    if matches!(typed.properties.as_slice(),
+                        [FilterProp::EnchantedBy | FilterProp::EquippedBy]))
+            };
+            if (left == TargetFilter::SelfRef && is_host(&right))
+                || (is_host(&left) && right == TargetFilter::SelfRef)
+            {
+                return Some(TargetFilter::Or {
+                    filters: vec![left, right],
+                });
+            }
+        }
+    }
+
     let (subject, attachment_prop) = strip_attachment_relative_clause(subject);
     let lower = subject.to_lowercase();
     let tp = TextPair::new(subject, &lower);

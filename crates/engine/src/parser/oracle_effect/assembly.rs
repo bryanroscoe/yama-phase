@@ -2126,30 +2126,83 @@ fn is_mana_spent_gate(condition: &AbilityCondition) -> bool {
     }
 }
 
-/// CR 608.2c + CR 601.2h: instructions are followed in the order written, each
-/// with its own gate. A clause gated on the mana spent to cast the spell that
-/// directly follows another such clause ("<A> if {R} was spent to cast this
-/// spell, and <B> if {G} was spent to cast this spell", or the same as two
-/// sentences) is an independent instruction: its gate reads the spell's payment,
-/// never the previous clause's effect or gate. Stamp it with the independent
-/// OR-branch marker (`SiblingCondition::ReplicatedOrBranch` on a
-/// `SequentialSibling`) so it is still evaluated when the previous clause's gate
-/// is false.
+/// CR 608.2c + CR 109.2: whether `condition` reads only the characteristics of an
+/// object the chain already names — the declared target / anaphor
+/// (`TargetMatchesFilter`, "if it's a creature") or the card a preceding reveal
+/// or move produced (`RevealedHasCardType`, "if it's a land card") — rather than
+/// the outcome of the instruction before it.
+fn is_object_characteristic_gate(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::RevealedHasCardType { .. } => true,
+        AbilityCondition::Not { condition } => is_object_characteristic_gate(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            !conditions.is_empty() && conditions.iter().all(is_object_characteristic_gate)
+        }
+        _ => false,
+    }
+}
+
+/// The families of gates that read something other than the previous clause:
+/// a clause gated by one of these that directly follows a clause gated by a
+/// DIFFERENT gate of the SAME family is an independent instruction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndependentGateFamily {
+    /// CR 601.2h: the mana spent to cast the spell.
+    ManaSpent,
+    /// CR 608.2c + CR 109.2: the characteristics of an already-named object.
+    ObjectCharacteristic,
+}
+
+fn independent_gate_family(condition: &AbilityCondition) -> Option<IndependentGateFamily> {
+    if is_mana_spent_gate(condition) {
+        Some(IndependentGateFamily::ManaSpent)
+    } else if is_object_characteristic_gate(condition) {
+        Some(IndependentGateFamily::ObjectCharacteristic)
+    } else {
+        None
+    }
+}
+
+/// CR 608.2c: instructions are followed in the order written, each with its own
+/// gate. A clause whose gate reads only something the previous clause cannot
+/// change, and that directly follows another clause gated in the same way, is
+/// an independent instruction:
+/// - CR 601.2h: "<A> if {R} was spent to cast this spell, and <B> if {G} was
+///   spent to cast this spell" — both gates read the spell's payment;
+/// - CR 109.2: "Put a +1/+1 counter on it if it's a creature and a loyalty
+///   counter on it if it's a planeswalker" (Forge of Heroes), "If it's a
+///   creature card, … If it's a land card, …" (Druidic Satchel) — both gates
+///   read the characteristics of the same named object.
 ///
-/// Only a gate that DIFFERS from the previous gated clause's (another color or
-/// another threshold) is independent. A clause repeating the same gate is the
+/// Stamp it with the independent OR-branch marker
+/// (`SiblingCondition::ReplicatedOrBranch` on a `SequentialSibling`) so it is
+/// still evaluated when the previous clause's gate is false.
+///
+/// Only a gate that DIFFERS from the previous gated clause's (another color,
+/// threshold or type) is independent. A clause repeating the same gate is the
 /// "then" continuation of one gated instruction ("if five or more mana was spent
 /// to cast that spell, you may exile ~, then return it to the battlefield") and
-/// keeps its `ContinuationStep` link so it still follows the first step.
-fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
-    let mut previous_gate: Option<AbilityCondition> = None;
+/// keeps its `ContinuationStep` link so it still follows the first step. A gate
+/// that follows an UNGATED clause keeps the dependent default (Thieving
+/// Skydiver's "If that artifact is an Equipment" presupposes the control change
+/// before it).
+fn mark_independent_gates(defs: &mut [AbilityDefinition]) {
+    let mut previous: Option<(IndependentGateFamily, AbilityCondition)> = None;
     for def in defs {
-        let gate = def.condition.clone().filter(is_mana_spent_gate);
-        if gate.is_some() && previous_gate.is_some() && gate != previous_gate {
-            def.sub_link = SubAbilityLink::SequentialSibling;
-            def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        let current = def
+            .condition
+            .as_ref()
+            .and_then(|gate| independent_gate_family(gate).map(|family| (family, gate.clone())));
+        if let (Some((family, gate)), Some((previous_family, previous_gate))) =
+            (&current, &previous)
+        {
+            if family == previous_family && gate != previous_gate {
+                def.sub_link = SubAbilityLink::SequentialSibling;
+                def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+            }
         }
-        previous_gate = gate;
+        previous = current;
     }
 }
 
@@ -4234,7 +4287,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // refer to the chosen source, not `SelfRef` (the instant on the stack).
     thread_chosen_damage_source_into_oneshot_effects(&mut defs);
 
-    mark_independent_mana_spent_gates(&mut defs);
+    mark_independent_gates(&mut defs);
 
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),

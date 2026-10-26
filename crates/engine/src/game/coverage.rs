@@ -1513,6 +1513,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
+        PlayerScope::ChosenPlayer { .. } => "the player chosen this way".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
         // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
         PlayerScope::SpecificPlayer { .. } => "that player".to_string(),
@@ -2121,7 +2122,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
-        QuantityRef::CommanderCastFromCommandZoneCount => {
+        QuantityRef::CommanderCastFromCommandZoneCount { .. } => {
             "# of commander casts from command zone".into()
         }
         QuantityRef::CommanderManaValue { .. } => "mana value of a commander".into(),
@@ -2805,6 +2806,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 match recipient {
                     EachDamageRecipient::Shared(filter) => fmt_target(filter),
                     EachDamageRecipient::EachController => "its controller".into(),
+                    EachDamageRecipient::Itself => "itself".into(),
                     EachDamageRecipient::OtherBatchSource { source_filters } => format!(
                         "the other batch source of ({}, {})",
                         fmt_target(&source_filters[0]),
@@ -10537,7 +10539,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
         }
-        QuantityRef::CommanderCastFromCommandZoneCount => {
+        QuantityRef::CommanderCastFromCommandZoneCount { .. } => {
             ("CommanderCastFromCommandZoneCount", Handled)
         }
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),

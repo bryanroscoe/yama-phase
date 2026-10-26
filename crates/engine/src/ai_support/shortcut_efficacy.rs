@@ -1831,50 +1831,32 @@ mod tests {
         );
     }
 
-    /// The fetch class's ONE fail-open candidate, pinned with its mechanism
-    /// visible instead of hidden among the parsed rows.
+    /// Surveyor's Scope, re-measured now that the parser carries its whole
+    /// sentence ("where X is the number of players who control at least two
+    /// more lands than you"). It is shaped like acceptance (a) — it searches the
+    /// actor's own library for the actor's own basics and shuffles the actor's
+    /// own library — and its parsed head is exactly that confined fetch.
     ///
-    /// Surveyor's Scope is shaped like acceptance (a) — it searches the actor's
-    /// own library for the actor's own basics and shuffles the actor's own
-    /// library — but at this base the parser does not carry its whole sentence
-    /// ("where X is the number of players who control at least two more lands
-    /// than you"), so `abilities[0]` heads an `Effect::Unimplemented`.
-    ///
-    /// The verdict is JOINTLY determined, and the two assertions below are not
-    /// equally load-bearing. MEASURED at this base: the head reaches
-    /// `effect_window_reach`'s fail-closed `_` arm, AND the cost is
-    /// `Composite[Tap, Exile{filter: SelfRef}]` — `AbilityCost::Exile` is not
-    /// allowlisted, so `cost_window_reach` returns `MayInterfere` on its own.
-    /// Therefore:
-    ///
-    /// * the head assertion is the one that carries weight. If it ever flips
-    ///   (the parser learns the sentence), this row fails LOUDLY rather than
-    ///   silently changing which arm it exercises — the failure is the signal
-    ///   to re-verify the verdict on the parsed AST and, if it is then
-    ///   confined, move it into the confined table above. Do NOT delete it as
-    ///   "redundant with the verdict": that leaves a vacuous row;
-    /// * the verdict assertion is DOMINATED by the cost leg — it would still
-    ///   hold if the head parsed to a fully confined fetch, so it is NOT
-    ///   evidence that the `_` effect arm fired. It is kept because it is the
-    ///   class-level statement "the fetch class has no fail-open member".
-    ///
-    /// Kept OUT of the two tables deliberately: an `Unimplemented` row placed
-    /// among the interfering rows would look like hostile-detection coverage
-    /// while exercising only the fail-closed arm, which is the exact vacuity
-    /// the tables' guards exist to forbid.
+    /// It still does not belong in the confined table: the cost is
+    /// `Composite[Tap, Exile{filter: SelfRef}]`, and `AbilityCost::Exile` is not
+    /// allowlisted, so `cost_window_reach` returns `MayInterfere` on its own and
+    /// the verdict is the cost's. The two assertions pin that split: the effect
+    /// leg is confined, the whole ability is not.
     #[test]
-    fn surveyors_scope_is_the_fetch_classs_fail_closed_member() {
+    fn surveyors_scope_fetch_is_confined_but_its_exile_cost_is_not() {
         assert!(
-            head_is_unparsed(&SURVEYORS_SCOPE, 0),
-            "PREMISE: this row exists because the head is UNPARSED at this base. If the parser \
-             has learned the sentence, re-measure the parsed AST and reclassify the row \
-             deliberately — do not delete this assertion to make the suite green"
+            !head_is_unparsed(&SURVEYORS_SCOPE, 0),
+            "the parser carries Surveyor's Scope's where-X, so the head is the fetch itself"
+        );
+        assert_eq!(
+            effect_window_reach(&ability(&SURVEYORS_SCOPE, 0).effect),
+            WindowReach::OwnResourcesOnly,
+            "the fetch reads other players' boards for X but touches only the actor's library"
         );
         assert_eq!(
             reach(&SURVEYORS_SCOPE, 0),
             WindowReach::MayInterfere,
-            "the fetch class has no fail-open member: an ability the parser cannot carry must \
-             never be proven confined"
+            "the exile-self cost leg is not allowlisted, so the ability is not confined"
         );
     }
 

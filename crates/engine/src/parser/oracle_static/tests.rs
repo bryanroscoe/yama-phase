@@ -17,6 +17,80 @@ use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
+/// CR 604.1 + CR 702.103b: self/host unions describe a permanent static,
+/// including before a bestow card has become an Aura.
+#[test]
+fn static_subject_unions_combine_self_and_attachment_references() {
+    for (subject, host) in [
+        (
+            "this creature or enchanted creature",
+            FilterProp::EnchantedBy,
+        ),
+        ("enchanted creature or ~", FilterProp::EnchantedBy),
+        ("~ or equipped creature", FilterProp::EquippedBy),
+        ("equipped creature or this artifact", FilterProp::EquippedBy),
+    ] {
+        let filter = super::shared::parse_rule_static_subject_filter(subject)
+            .unwrap_or_else(|| panic!("reference union should parse: {subject}"));
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected a reference union for {subject}, got {filter:?}");
+        };
+        assert!(filters.contains(&TargetFilter::SelfRef));
+        assert!(filters.contains(&TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![host])
+        )));
+        assert_eq!(filters.len(), 2);
+    }
+
+    // Type unions still belong to the type grammar: the trailing controller
+    // must apply to the whole population, not only its second disjunct.
+    assert_eq!(
+        super::shared::parse_rule_static_subject_filter("Shamans or Wizards you control"),
+        Some(
+            crate::parser::oracle_target::parse_type_phrase_folding(
+                "Shamans or Wizards you control"
+            )
+            .0
+        ),
+    );
+}
+
+#[test]
+fn noble_quarry_lure_is_static_instead_of_a_targeted_spell_effect() {
+    let parsed = crate::parser::parse_oracle_text(
+        "Bestow {5}{G} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\n\
+         All creatures able to block this creature or enchanted creature do so.\n\
+         Enchanted creature gets +1/+1.",
+        "Noble Quarry",
+        &["Bestow".to_string()],
+        &["Enchantment".to_string(), "Creature".to_string()],
+        &["Unicorn".to_string()],
+    );
+    assert!(parsed.abilities.is_empty(), "no spell effects: {parsed:#?}");
+    let lure = parsed
+        .statics
+        .iter()
+        .find(|definition| {
+            matches!(
+                definition.mode,
+                StaticMode::MustBeBlockedByAll { blockers: None }
+            )
+        })
+        .expect("the printed lure must remain represented as a static");
+    assert_eq!(
+        lure.affected,
+        Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::SelfRef,
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+                ),
+            ],
+        }),
+    );
+    assert_eq!(parsed.statics.len(), 2, "lure plus the host's +1/+1");
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies
@@ -20741,9 +20815,11 @@ fn self_ref_every_nonbasic_land_type_is_cda() {
     );
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     // Negative: a trailing clause is outside the grant and must not be dropped.
-    assert!(parse_static_line("~ is every nonbasic land type and is a creature.")
-        .is_none_or(|def| def.modifications
-            != vec![ContinuousModification::AddAllNonbasicLandTypes]));
+    assert!(
+        parse_static_line("~ is every nonbasic land type and is a creature.").is_none_or(|def| def
+            .modifications
+            != vec![ContinuousModification::AddAllNonbasicLandTypes])
+    );
 }
 
 #[test]
@@ -21085,6 +21161,50 @@ fn self_animation_card_type_replacement_preserves_other_modifications() {
     assert_eq!(
         super::type_change::maybe_replace_card_types(non_types.clone(), "with hexproof"),
         non_types
+    );
+}
+
+/// CR 205.1a + CR 205.1b: "becomes a blue Frog with base power and toughness
+/// 1/1" (Turn to Frog, Snakeform, Polymorphist's Jest) sets the creature types
+/// but names no card type, so it must not replace card types: an artifact
+/// creature stays an artifact (the cards' rulings). A descriptor that names a
+/// core type ("becomes a 1/1 white Human creature") still replaces them.
+#[test]
+fn bare_becomes_creature_type_keeps_card_types() {
+    let modifications = |text: &str| {
+        let lower = text.to_lowercase();
+        super::type_change::parse_bare_becomes_type_replacement_modifications(
+            &crate::parser::oracle_util::TextPair::new(text, &lower),
+        )
+    };
+    let frog = modifications("becomes a blue Frog with base power and toughness 1/1");
+    assert!(
+        !frog
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "a creature type alone must not set card types: {frog:?}"
+    );
+    let remove_at = frog.iter().position(|m| {
+        *m == ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }
+    });
+    let frog_at = frog.iter().position(|m| {
+        *m == ContinuousModification::AddSubtype {
+            subtype: "Frog".to_string(),
+        }
+    });
+    assert!(
+        matches!((remove_at, frog_at), (Some(r), Some(f)) if r < f),
+        "Frog replaces the creature types: {frog:?}"
+    );
+
+    let human = modifications("becomes a 1/1 white Human creature");
+    assert!(
+        human.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
+        }),
+        "a named core type sets card types: {human:?}"
     );
 }
 
@@ -40179,4 +40299,36 @@ fn sab_sunen_parity_gate_stays_unrecognized() {
         "{:?}",
         restrictions[0].condition
     );
+}
+
+/// CR 601.2f: a self cost reduction whose "for each" phrase nothing reads must
+/// not become a count of every object (Lumbering Megasloth was reduced {10} on
+/// a board with no counters; Blaster Hulk {6} with no energy paid).
+#[test]
+fn self_cost_reduction_never_counts_every_object() {
+    for text in [
+        "This spell costs {1} less to cast for each counter among players and permanents.",
+        "This spell costs {1} less to cast for each {E} you've paid or lost this turn.",
+    ] {
+        let counts_everything = parse_static_line(text).is_some_and(|def| {
+            matches!(
+                def.mode,
+                StaticMode::ModifyCost {
+                    dynamic_count: Some(QuantityRef::ObjectCount { ref filter }),
+                    ..
+                } if *filter == TargetFilter::Typed(TypedFilter::default())
+            )
+        });
+        assert!(!counts_everything, "{text}");
+    }
+    // A readable count still reduces per object.
+    let def = parse_static_line("This spell costs {1} less to cast for each creature you control.")
+        .expect("reads");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            dynamic_count: Some(_),
+            ..
+        }
+    ));
 }

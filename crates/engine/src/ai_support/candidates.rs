@@ -3913,12 +3913,67 @@ pub fn candidate_actions_with_probe(
     actions
 }
 
+/// One state's semantic candidate enumeration, before owner scoping, actor
+/// authorization or legality filtering.
+///
+/// The decision contract ([`AiDecisionContract::issue_from`]) and the flat
+/// priority list ([`flat_priority_actions_from`]) both derive from it, so a
+/// caller that needs both for one state enumerates once. It is valid only for
+/// the state it was enumerated from.
+///
+/// [`AiDecisionContract::issue_from`]: super::AiDecisionContract::issue_from
+/// [`flat_priority_actions_from`]: super::flat_priority_actions_from
+pub struct SemanticCandidates {
+    actions: Vec<CandidateAction>,
+}
+
+impl SemanticCandidates {
+    /// Enumerates `state`'s semantic candidates once.
+    pub fn enumerate(state: &GameState) -> Self {
+        Self {
+            actions: semantic_candidate_actions_with_probe(state, None),
+        }
+    }
+}
+
+/// [`candidate_actions_with_probe`] without a probe, from an existing
+/// enumeration of the same state.
+pub(crate) fn candidate_actions_from(
+    state: &GameState,
+    semantic: &SemanticCandidates,
+) -> Vec<CandidateAction> {
+    let mut actions = semantic.actions.clone();
+    authorize_candidate_actors(state, &mut actions);
+    actions
+}
+
+/// [`candidate_actions_for_semantic_owner_with_probe`] without a probe, from an
+/// existing enumeration of the same state.
+pub(crate) fn candidate_actions_for_semantic_owner_from(
+    state: &GameState,
+    semantic_owner: PlayerId,
+    semantic: &SemanticCandidates,
+) -> Vec<CandidateAction> {
+    scope_candidates_to_semantic_owner(state, semantic_owner, semantic.actions.clone())
+}
+
 pub(crate) fn candidate_actions_for_semantic_owner_with_probe(
     state: &GameState,
     semantic_owner: PlayerId,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
-    let mut actions = semantic_candidate_actions_with_probe(state, probe);
+    scope_candidates_to_semantic_owner(
+        state,
+        semantic_owner,
+        semantic_candidate_actions_with_probe(state, probe),
+    )
+}
+
+fn scope_candidates_to_semantic_owner(
+    state: &GameState,
+    semantic_owner: PlayerId,
+    mut actions: Vec<CandidateAction>,
+) -> Vec<CandidateAction> {
     actions.retain(|action| {
         action
             .metadata

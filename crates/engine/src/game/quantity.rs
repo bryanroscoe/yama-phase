@@ -1594,11 +1594,60 @@ pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) ->
             .as_deref()
             .is_none_or(player_scope_is_source_context_previewable),
         PlayerScope::ScopedPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::AnyTurn => false,
+    }
+}
+
+/// CR 608.2c: whether a quantity reads only the game state as seen from the
+/// ability's source and controller — players' life totals, hand sizes, and
+/// counts of objects or players selected by context-free filters — and never
+/// an object or player supplied by an earlier instruction of the resolving
+/// ability (a target, a tracked set, a chosen or scoped player, an anaphor).
+/// Such a quantity means the same thing whether or not an earlier instruction
+/// happened. Conservative: any reference this walk doesn't model is `false`.
+pub(crate) fn quantity_expr_reads_only_source_context(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::StartingLifeTotal { player } => {
+                player_scope_is_source_context_previewable(player)
+            }
+            QuantityRef::ObjectCount { filter } => target_filter_is_source_context_free(filter),
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsCount {
+                        filter: counted,
+                        count,
+                        ..
+                    },
+            } => {
+                target_filter_is_source_context_free(counted)
+                    && quantity_expr_reads_only_source_context(count)
+            }
+            _ => false,
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_reads_only_source_context(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().all(quantity_expr_reads_only_source_context)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_only_source_context(left)
+                && quantity_expr_reads_only_source_context(right)
+        }
     }
 }
 
@@ -1771,6 +1820,7 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::CommanderCastFromCommandZoneCount { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -1904,7 +1954,6 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => RecipientRead::Unread,
     }
@@ -1943,6 +1992,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
     }
@@ -1960,6 +2010,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
     }
@@ -2453,7 +2504,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
-        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. } => false,
     }
 }
 
@@ -2786,7 +2837,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
-        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. } => false,
     }
 }
 
@@ -3099,7 +3150,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::ManaSpentToCast { .. }
         // CR 903.4: color identity is fixed by the printed card.
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::VoteCount { .. } => CharacteristicKinds::EMPTY,
     }
 }
@@ -3361,7 +3412,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
-        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. } => false,
     }
 }
 
@@ -6126,9 +6177,14 @@ fn resolve_ref(
         QuantityRef::ColorsInCommandersColorIdentity => usize_to_i32_saturating(
             super::commander::commander_color_identity(state, controller).len(),
         ),
-        QuantityRef::CommanderCastFromCommandZoneCount => u32_to_i32_saturating(
-            super::commander::commander_casts_from_command_zone(state, controller),
-        ),
+        // CR 903.8: command-zone casts of `player`'s commander(s) this game.
+        QuantityRef::CommanderCastFromCommandZoneCount { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                u32_to_i32_saturating(super::commander::commander_casts_from_command_zone(
+                    state, p.id,
+                ))
+            })
+        }
         // CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
         // Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
         // or in the command zone" pattern. Returns the mana value of the first matching commander
@@ -9219,6 +9275,11 @@ fn resolve_single_player_scope(
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx),
+        // CR 608.2c + CR 109.4: the player an earlier `Choose` of this
+        // resolution picked ("choose an opponent. If that player ...").
+        PlayerScope::ChosenPlayer { index } => {
+            ability.and_then(|a| a.chosen_players.get(usize::from(*index)).copied())
+        }
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
         PlayerScope::AnyTurn => {
@@ -9331,6 +9392,12 @@ where
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 608.2c + CR 109.4: the player an earlier `Choose` of this
+        // resolution picked.
+        PlayerScope::ChosenPlayer { index } => ability
+            .and_then(|a| a.chosen_players.get(usize::from(*index)).copied())
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
         // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
         // excluded from the aggregate population, same as
         // `resolve_player_count`'s candidate loop (outside its life-history
@@ -9434,6 +9501,7 @@ where
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, extract)
@@ -14184,7 +14252,9 @@ mod tests {
         record_commander_cast(&mut state, opponent_commander);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+            qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);

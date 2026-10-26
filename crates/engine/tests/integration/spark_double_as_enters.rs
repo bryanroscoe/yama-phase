@@ -140,7 +140,11 @@ fn spark_double_copying_a_planeswalker_enters_with_its_loyalty_plus_one() {
     runner.advance_until_stack_empty();
 
     let copy = &runner.state().objects[&spark];
-    assert_eq!(copy.zone, Zone::Battlefield, "the copy stays: it isn't legendary");
+    assert_eq!(
+        copy.zone,
+        Zone::Battlefield,
+        "the copy stays: it isn't legendary"
+    );
     assert_eq!(
         copy.counters.get(&CounterType::Loyalty).copied(),
         Some(5),

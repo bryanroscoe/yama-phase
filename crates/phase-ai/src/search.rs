@@ -302,7 +302,10 @@ fn choose_action_with_session_inner(
     durable_pact_routes: bool,
     diagnostics: bool,
 ) -> AiDecisionSelection {
-    let contract = AiDecisionContract::issue(state, ai_player);
+    // One semantic enumeration serves both the contract and the priority
+    // shortcut's flat action list below.
+    let semantic = engine::ai_support::SemanticCandidates::enumerate(state);
+    let contract = AiDecisionContract::issue_from(state, ai_player, &semantic);
     let direct = |action: Option<GameAction>| AiDecisionSelection {
         receipt: diagnostics
             .then(|| {
@@ -506,7 +509,7 @@ fn choose_action_with_session_inner(
         return direct(fallback_action(state, config, &contract).and_then(&bind_specialist));
     }
 
-    let fast_priority = fast_priority_action(state, ai_player, config, session);
+    let fast_priority = fast_priority_action_from(state, ai_player, config, session, &semantic);
     // Only an absent shortcut is reusable: a present one may be filtered out or
     // followed by session writes below, so the scorer recomputes it.
     let priority_shortcut = match &fast_priority {
@@ -650,6 +653,24 @@ fn fast_priority_action(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Option<GameAction> {
+    fast_priority_action_from(
+        state,
+        ai_player,
+        config,
+        session,
+        &engine::ai_support::SemanticCandidates::enumerate(state),
+    )
+}
+
+/// [`fast_priority_action`] reading the flat priority list from an existing
+/// semantic enumeration of `state`.
+fn fast_priority_action_from(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+    semantic: &engine::ai_support::SemanticCandidates,
+) -> Option<GameAction> {
     let WaitingFor::Priority { player } = state.waiting_for else {
         return None;
     };
@@ -662,7 +683,7 @@ fn fast_priority_action(
             .then_some(GameAction::PassPriority);
     }
 
-    let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
+    let actions: Vec<_> = engine::ai_support::flat_priority_actions_from(state, semantic)
         .into_iter()
         .filter(|action| root_action_is_allowed(state, ai_player, action))
         .collect();

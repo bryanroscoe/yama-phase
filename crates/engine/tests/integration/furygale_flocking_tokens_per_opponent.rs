@@ -44,7 +44,10 @@ fn furygale_flocking_makes_two_hasty_flyers_for_each_opponent() {
     for id in tokens {
         let token = &outcome.state().objects[&id];
         assert!(token.keywords.contains(&Keyword::Flying), "flying");
-        assert!(token.keywords.contains(&Keyword::Haste), "haste for every token");
+        assert!(
+            token.keywords.contains(&Keyword::Haste),
+            "haste for every token"
+        );
         assert_eq!((token.power, token.toughness), (Some(3), Some(3)));
     }
 }

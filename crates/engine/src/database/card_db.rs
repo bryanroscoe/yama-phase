@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +104,11 @@ pub struct CardDatabase {
     /// (Coat of Arms, Changeling expansion) see every printed creature type,
     /// not just the subset present in the loaded decks.
     pub(crate) creature_type_vocabulary: Vec<String>,
+    /// Every card name, sorted and deduplicated, built on first request by
+    /// [`Self::shared_card_names`]. Each game seeds `GameState::all_card_names`
+    /// from it, so it is computed once per database instead of once per game.
+    /// Loaders finish filling `face_index` before any game reads it.
+    pub(crate) card_names: OnceLock<Arc<[String]>>,
 }
 
 impl CardDatabase {
@@ -199,6 +204,7 @@ impl CardDatabase {
             bracket_lists: BracketLists::default(),
             bracket_signals_by_name,
             creature_type_vocabulary,
+            card_names: OnceLock::new(),
         }
     }
 
@@ -476,14 +482,26 @@ impl CardDatabase {
 
     /// Returns all card names (title-cased as stored in face data), sorted.
     pub fn card_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .face_index
-            .values()
-            .map(|face| face.name.clone())
-            .collect();
-        names.sort();
-        names.dedup();
-        names
+        self.shared_card_names().to_vec()
+    }
+
+    /// Returns all card names (title-cased as stored in face data), sorted and
+    /// deduplicated, as a shared slice. Built on the first call and cached, so
+    /// seeding a game's `all_card_names` is a reference-count bump rather than
+    /// a clone and sort of the whole corpus.
+    pub fn shared_card_names(&self) -> Arc<[String]> {
+        self.card_names
+            .get_or_init(|| {
+                let mut names: Vec<String> = self
+                    .face_index
+                    .values()
+                    .map(|face| face.name.clone())
+                    .collect();
+                names.sort();
+                names.dedup();
+                names.into()
+            })
+            .clone()
     }
 
     /// Attach loaded `BracketLists` to the database. Returns `Self` so it can

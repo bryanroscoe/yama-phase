@@ -403,14 +403,38 @@ fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) ->
     }
 
     let lower = text.to_lowercase();
-    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
-        alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
-    })?;
-    let subject_text = text[..subject_lower.len()].trim();
+    // CR 205.1b: the contracted plural copula "They're <descriptor> in addition
+    // to their other [colors and] types" (Grimoire of the Dead, The War in
+    // Heaven) is the "they are" form with the subject and copula fused, so the
+    // copula scan below cannot split it. Decontract and reuse the same builder.
+    let decontracted = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, VE>("they"),
+                alt((tag("'"), tag("\u{2019}"))),
+                tag("re "),
+            ),
+        )
+        .parse(input)
+    })
+    .map(|((), descriptor)| format!("are {descriptor}"));
+    let (subject_text, predicate) = match &decontracted {
+        Some(predicate) => ("they", predicate.as_str()),
+        None => {
+            let (subject_lower, predicate_lower) =
+                nom_primitives::scan_split_at_phrase(&lower, |i| {
+                    alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
+                })?;
+            (
+                text[..subject_lower.len()].trim(),
+                &text[text.len() - predicate_lower.len()..],
+            )
+        }
+    };
     if subject_text.eq_ignore_ascii_case("you") {
         return None;
     }
-    let predicate = &text[text.len() - predicate_lower.len()..];
     let application = additive_type_subject_application(subject_text, ctx)?;
     let clause = build_additive_type_continuous_clause(&application, predicate)?;
 
@@ -547,8 +571,18 @@ fn try_parse_contracted_subject_additive_type_clause(
     // types" form above is unaffected (it is a type *addition* and stays on the
     // referenced subject regardless).
     let affected = static_affected_for_application(&application);
+    // CR 400.7 + CR 603.6 + CR 603.10a: inside a proven dies trigger the "it"
+    // of "return it to the battlefield … It's a Spirit Detective" (Otherworldly
+    // Escort) is the card that died and was returned — the trigger's own source
+    // on a self-dies head (`SelfRef`) or the triggering card (`TriggeringSource`),
+    // the same returned-object referent the type-replacement arm above accepts.
+    let returned_by_dies_trigger = ctx.trigger_zone_change.as_pair().is_some();
     let binds_honestly = match pronoun {
-        ContractedSubjectPronoun::It => matches!(affected, TargetFilter::ParentTarget),
+        ContractedSubjectPronoun::It => match affected {
+            TargetFilter::ParentTarget => true,
+            TargetFilter::TriggeringSource | TargetFilter::SelfRef => returned_by_dies_trigger,
+            _ => false,
+        },
         ContractedSubjectPronoun::He | ContractedSubjectPronoun::She => {
             matches!(affected, TargetFilter::SelfRef)
         }
@@ -7869,8 +7903,23 @@ pub(super) fn try_parse_each_source_deals_damage(
             } => (amount, target, damage_source),
             _ => return None,
         };
-    // The source set comes from the filter, never a `Target` damage source.
-    if damage_source.is_some() {
+    // CR 120.1 + CR 120.3e: "each <filter> deals [N] damage to itself [equal to
+    // its power]" (Wave of Reckoning) — every matching object deals damage to
+    // itself. The shared damage parser reads "itself" as one declared object
+    // dealing damage to itself (its "its power" bound to `Target`); under an
+    // "each" subject that object is each batch source, so the recipient is
+    // per-source and "its power" goes back to the deferred pronoun, which the
+    // per-source binding below reads from each source.
+    let itself = recipient_phrase.is_some_and(is_itself_recipient);
+    if itself {
+        super::rebind_object_scope_amount(
+            &mut amount,
+            ObjectScope::Target,
+            ObjectScope::Anaphoric,
+            super::SourceRefRebind::AllObjectRefs,
+        );
+    } else if damage_source.is_some() {
+        // The source set comes from the filter, never a `Target` damage source.
         return None;
     }
     // CR 120.1 + CR 608.2: a per-source amount ("deals damage equal to its
@@ -7895,6 +7944,8 @@ pub(super) fn try_parse_each_source_deals_damage(
         EachDamageRecipient::OtherBatchSource { source_filters }
     } else if recipient_phrase.is_some_and(is_its_controller_recipient) {
         EachDamageRecipient::EachController
+    } else if itself {
+        EachDamageRecipient::Itself
     } else {
         EachDamageRecipient::Shared(target)
     };
@@ -7937,6 +7988,18 @@ fn is_its_controller_recipient(recipient_phrase: &str) -> bool {
     all_consuming(tag::<_, _, OracleError<'_>>("its controller"))
         .parse(recipient_phrase)
         .is_ok()
+}
+
+/// CR 120.1 + CR 120.3e: the recipient phrase is "itself", alone ("deals 1
+/// damage to itself") or followed by its amount ("deals damage to itself equal
+/// to its power"). Anchored at both ends so "itself and ..." stays out.
+fn is_itself_recipient(recipient_phrase: &str) -> bool {
+    all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("itself"),
+        opt(preceded(tag(" equal to "), rest)),
+    ))
+    .parse(recipient_phrase)
+    .is_ok()
 }
 
 /// CR 120.3: exact pairwise recipient phrase used after a two-object anaphoric
@@ -9098,6 +9161,55 @@ mod tests {
         assert!(
             !matches!(effect, Effect::EachSourceDealsDamage { .. }),
             "granted-ability damage wrongly captured: {effect:?}"
+        );
+    }
+
+    // CR 120.1 + CR 120.3e: Wave of Reckoning — "Each creature deals damage to
+    // itself equal to its power." Every creature is the source of damage to
+    // itself; the amount is each source's own power. Before, the "each" subject
+    // was stripped and the clause became one `DealDamage` with no source set.
+    #[test]
+    fn each_source_deals_damage_to_itself_is_per_source_itself_recipient() {
+        let effect =
+            super::super::parse_effect("Each creature deals damage to itself equal to its power");
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(
+            matches!(&sources, TargetFilter::Typed(typed) if typed.controller.is_none()),
+            "sources must be every creature, got {sources:?}"
+        );
+        assert_eq!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource
+                }
+            }
+        );
+        assert_eq!(recipient, EachDamageRecipient::Itself);
+    }
+
+    // A fixed amount to itself takes the same recipient.
+    #[test]
+    fn each_source_deals_fixed_damage_to_itself() {
+        let effect =
+            super::super::parse_effect("Each creature you control deals 1 damage to itself");
+        assert!(
+            matches!(
+                effect,
+                Effect::EachSourceDealsDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    recipient: EachDamageRecipient::Itself,
+                    ..
+                }
+            ),
+            "got {effect:?}"
         );
     }
 

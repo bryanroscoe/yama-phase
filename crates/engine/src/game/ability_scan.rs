@@ -630,7 +630,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
                         acc = acc.or(scan_target_filter(filter, target_ctx, mode));
                     }
                 }
-                EachDamageRecipient::EachController => {}
+                EachDamageRecipient::EachController | EachDamageRecipient::Itself => {}
             }
             acc
         }
@@ -3099,7 +3099,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         },
         QuantityRef::ManaSpentToCast { .. } => Axes::CONSERVATIVE,
         QuantityRef::ColorsInCommandersColorIdentity => Axes::NONE,
-        QuantityRef::CommanderCastFromCommandZoneCount => Axes::NONE,
+        QuantityRef::CommanderCastFromCommandZoneCount { player } => scan_player_scope(player),
         QuantityRef::CommanderManaValue { owner, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_controller_ref(owner));
@@ -5397,6 +5397,9 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
             history: HistoryReads::NONE,
         },
         PlayerScope::SourceChosenPlayer => Axes::NONE,
+        // CR 608.2c: a resolution-local choice — reads no event, sibling,
+        // projected or history axis.
+        PlayerScope::ChosenPlayer { .. } => Axes::NONE,
         // CR 513.1: turn-agnostic end-step deadline reached via the
         // `UntilNextStepOf` duration walk — a pure timing referent, no axes.
         PlayerScope::AnyTurn => Axes::NONE,

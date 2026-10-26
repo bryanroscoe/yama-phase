@@ -5001,6 +5001,29 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
 /// hoist must still apply to it) and `SiblingCondition::ReplicatedOrBranch`
 /// (a structural marker on the sub, not a condition, so it is tested against
 /// the sub itself by [`sub_outlives_false_parent_gate`], which wraps this).
+/// CR 608.2c: whether a condition is a self-contained check of the game state
+/// ("if an opponent has more life than you", "if an opponent controls more
+/// creatures than you") that names nothing an earlier instruction produced —
+/// no target, tracked set, chosen player or "that"/"it" anaphor. A following
+/// sentence gated on such a condition is its own instruction, checked when it
+/// is reached (Sunset Revelry's three "If an opponent ..." sentences), so a
+/// false gate on the sentence before it says nothing about it. Conservative:
+/// only `QuantityCheck`s whose two sides read source context alone (and
+/// `And`/`Or`/`Not` of them) qualify; anything else stays `Dependent`.
+fn condition_reads_only_game_state(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            crate::game::quantity::quantity_expr_reads_only_source_context(lhs)
+                && crate::game::quantity::quantity_expr_reads_only_source_context(rhs)
+        }
+        AbilityCondition::Not { condition } => condition_reads_only_game_state(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().all(condition_reads_only_game_state)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition) -> bool {
     condition_depends_on_effect_performed(condition)
         || matches!(
@@ -5420,6 +5443,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
             | PlayerScope::DefendingPlayer
             | PlayerScope::ParentObjectTargetController
             | PlayerScope::SourceChosenPlayer
+            | PlayerScope::ChosenPlayer { index: _ }
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { id: _ } => false,
         },
@@ -6290,7 +6314,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => false,
     }
@@ -8676,17 +8700,15 @@ fn is_sole_chain_producer(state: &GameState, ability: &ResolvedAbility) -> bool 
 /// branch executes, so counting both can only DECLINE a publish, never cause a
 /// wrong one).
 ///
-/// CHAIN-WIDE, NOT NEAREST-ANTECEDENT — and that is the sharp edge. Any later
-/// publisher position anywhere below this node declines the head, including the
-/// shape `head -> consumer{TrackedSet} -> consumer2{TrackedSet}`, where BOTH
-/// consumers wanted this head's population and both get nothing. No corpus row
-/// hits it today, but the loaded gun is named: **Motivated Pony**'s third node
-/// is `Unimplemented { name: "they" }` ("and they get an additional +2/+2").
-/// The day that clause parses into any tracked-set consumer, this leg declines
-/// the head, the untap regresses, and
-/// `motivated_pony_untaps_only_the_attacking_creatures_it_pumped` goes red. The
-/// fix at that point is to scope the leg to the nearest antecedent (CR 608.2c's
-/// actual rule) rather than to relax the test.
+/// CHAIN-WIDE, NOT NEAREST-ANTECEDENT, with one scoping: a later node in
+/// publisher position that itself consumes the chain set does not count (see
+/// [`node_or_later_is_publisher_position`]), so the shape
+/// `head -> consumer{TrackedSet} -> consumer2{TrackedSet}` publishes the head's
+/// population for both consumers (Unbreakable Formation: "Creatures you control
+/// gain indestructible ... put a +1/+1 counter on each of those creatures and
+/// they gain vigilance"; Motivated Pony's "and they get an additional +2/+2"
+/// once it parses). A later node that produces its own population still
+/// declines the head.
 ///
 /// CR 700.2: chain-wide, but NOT past a mode boundary. Without that stop, two
 /// publishing modes A → B make leg 2 walk past A's own consumer into B's root,
@@ -8718,7 +8740,13 @@ fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
     // delayed-exile chain (Twinflame, Myra the Magnificent), putting the
     // ORIGINAL creature into the set the delayed "exile those tokens"
     // then binds — measured, not predicted.
-    next_sub_needs_tracked_set(node)
+    // CR 608.2c: a node that itself CONSUMES the chain set ("put a +1/+1
+    // counter on each of those creatures") acts on the earlier producer's
+    // population, so its being in publisher position for a later "they gain
+    // vigilance" relays that population rather than naming a competing one
+    // (Unbreakable Formation's addendum). Only a node that produces its own
+    // population competes with the head for the anaphor.
+    (next_sub_needs_tracked_set(node) && !effect_references_tracked_set(&node.effect))
         || node
             .sub_ability
             .as_deref()
@@ -14453,6 +14481,19 @@ fn start_player_scope_sacrifice_choices(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
+    // CR 608.2c + CR 701.21a: "each opponent sacrifices a creature. You create
+    // a token for each creature sacrificed this way" — the text after the
+    // per-player sacrifice reads the permanents it sacrificed, so the completed
+    // batch publishes them, each recorded as `Sacrificed` (Syphon Flesh, Reign
+    // of the Pit, Shadowgrange Archfiend). Only when that text consumes the
+    // chain set, so a tail that names nothing of it isn't handed a stale set.
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::Sacrifice),
+        publish_fresh_tracked_set: after_scope
+            .as_deref()
+            .is_some_and(chain_references_tracked_set),
+        ..Default::default()
+    };
     // CR 101.4: If multiple players make choices for one instruction, choices
     // are announced in APNAP order before the simultaneous action happens.
     let mut selections = Vec::new();
@@ -14469,7 +14510,7 @@ fn start_player_scope_sacrifice_choices(
                         ability: Box::new(template.clone()),
                         remaining_players: matching_players[i + 1..].to_vec(),
                         selections,
-                        completion: PendingPlayerScopeSacrificeCompletion::default(),
+                        completion,
                     });
                 set_player_scope_sacrifice_waiting_for(state, prompt, template.source_id);
                 return Ok(ResolutionProgress::Waiting);
@@ -14477,7 +14518,7 @@ fn start_player_scope_sacrifice_choices(
         }
     }
 
-    match perform_player_scope_sacrifices(state, template, selections, None, events)? {
+    match perform_player_scope_sacrifices(state, template, selections, Some(completion), events)? {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
             return Ok(ResolutionProgress::Waiting)
         }
@@ -16655,9 +16696,21 @@ fn resolve_chain_body(
                             ..
                         })
                     );
+                // CR 608.2c: a following sentence gated on its own
+                // self-contained game-state check (Sunset Revelry: "If an
+                // opponent controls more creatures than you, ...") is the next
+                // instruction in written order, checked on its own when reached.
+                let is_self_contained_conditional_sibling = sub.sub_link
+                    == SubAbilityLink::SequentialSibling
+                    && sub
+                        .condition
+                        .as_ref()
+                        .is_some_and(condition_reads_only_game_state);
                 if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && (sub.condition.is_none() || is_ordinal_sequential_sibling))
+                        && (sub.condition.is_none()
+                            || is_ordinal_sequential_sibling
+                            || is_self_contained_conditional_sibling))
                 {
                     let mut sub_resolved = sub.as_ref().clone();
                     // CR 608.2d: a `Resolution`-timed sub makes its OWN
@@ -21745,7 +21798,8 @@ fn resolve_grant_next_spell_ability(
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
-        | PlayerScope::SourceChosenPlayer => ability.controller,
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. } => ability.controller,
     };
     state
         .pending_next_spell_modifiers

@@ -19382,11 +19382,11 @@ fn trigger_valkmira_mixed_subject_splits_player_and_object_axes_full_pipeline() 
     let parsed = parse_oracle_text(
             "If a source an opponent controls would deal damage to you or a permanent you control, prevent 1 of that damage.\n\
              Whenever you or another permanent you control becomes the target of a spell or ability an opponent controls, counter that spell or ability unless its controller pays {1}.",
-            "Valkmira, Protector's Shield",
-            &[],
-            &["Artifact".to_string()],
-            &[],
-        );
+        "Valkmira, Protector's Shield",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
     let bt = parsed
         .triggers
         .iter()
@@ -32397,8 +32397,8 @@ fn gix_its_controller_antecedent_does_not_leak_to_later_that_player() {
     let def = parse_trigger_line(
             "Whenever a creature deals combat damage to one of your opponents, \
              its controller may pay 1 life. If they do, they draw a card. That player discards a card.",
-            "Gix, Yawgmoth Praetor",
-        );
+        "Gix, Yawgmoth Praetor",
+    );
     let execute = def.execute.as_ref().expect("trigger should have execute");
     let chain = ability_chain(execute);
     let discard_node = chain
@@ -32431,8 +32431,8 @@ fn star_athlete_decline_damage_binds_parent_target_controller() {
     let def = parse_trigger_line(
             "Whenever this creature attacks, choose up to one target nonland permanent. \
              Its controller may sacrifice it. If they don't, this creature deals 5 damage to that player.",
-            "Star Athlete",
-        );
+        "Star Athlete",
+    );
     assert_eq!(def.mode, TriggerMode::Attacks);
     let execute = def.execute.as_ref().expect("trigger should have execute");
     let chain = ability_chain(execute);
@@ -32469,11 +32469,11 @@ fn star_athlete_decline_damage_binds_parent_target_controller() {
 #[test]
 fn star_athlete_its_controller_antecedent_does_not_leak_to_later_that_player() {
     let def = parse_trigger_line(
-            "Whenever this creature attacks, choose up to one target nonland permanent. \
+        "Whenever this creature attacks, choose up to one target nonland permanent. \
              Its controller may sacrifice it. If they don't, this creature deals 5 damage to that player. \
              That player discards a card.",
-            "Star Athlete",
-        );
+        "Star Athlete",
+    );
     let execute = def.execute.as_ref().expect("trigger should have execute");
     let chain = ability_chain(execute);
     let damage_node = chain
@@ -37567,14 +37567,15 @@ fn didnt_attack_with_a_creature_intervening_if_hoists_as_zero_attack_tally() {
 
 /// CR 603.4 + CR 608.2c: a LEADING guard has no earlier instruction to refer to.
 /// When the effect parser lowers it to a prior-instruction back-reference
-/// ("if you didn't" -> not-performed, "if it's a creature" -> revealed card type)
-/// and the trigger grammar cannot hoist it, the trigger fails closed instead of
-/// keeping a condition that can never be evaluated meaningfully.
+/// ("if you didn't" -> not-performed) and the trigger grammar cannot hoist it,
+/// the trigger fails closed instead of keeping a condition that can never be
+/// evaluated meaningfully. (A leading "if it's a creature" on a turned-face-up
+/// head is now hoisted onto the event object — see
+/// `turned_face_up_if_its_a_creature_is_event_object_intervening_if`.)
 #[test]
 fn unhoistable_leading_guard_lowered_to_a_back_reference_fails_closed() {
     for text in [
         "At the beginning of your end step, if you didn't play a card from exile this turn, create a tapped Powerstone token.",
-        "Whenever a permanent you control is turned face up, if it's a creature, put two +1/+1 counters on it.",
     ] {
         let def = parse_trigger_line(text, "Test Card");
         assert_eq!(def.condition, None, "nothing was hoisted for {text:?}");
@@ -38783,4 +38784,125 @@ fn becomes_target_object_controller_antecedent_fails_closed() {
             "{name}: stays supported: {json}"
         );
     }
+}
+
+/// CR 603.4 + CR 205.2a: "Whenever a permanent you control is turned face up, if
+/// it's a creature, …" — the card-type check is an intervening-if on the
+/// turned-up permanent (the trigger's event object), not effect text.
+#[test]
+fn turned_face_up_if_its_a_creature_is_event_object_intervening_if() {
+    let trigger = parse_trigger_line(
+        "Whenever a permanent you control is turned face up, if it's a creature, it gets +2/+2 until end of turn.",
+        "Trail of Mystery",
+    );
+    assert_eq!(trigger.mode, TriggerMode::TurnFaceUp);
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::EventObjectMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("turned-face-up effect");
+    assert_no_unimplemented(execute);
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Pump {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
+}
+
+/// CR 603.4: the negated copula wraps the same event-object gate in `Not`.
+#[test]
+fn turned_face_up_if_its_not_a_creature_negates_event_object_gate() {
+    let trigger = parse_trigger_line(
+        "Whenever a permanent you control is turned face up, if it's not a creature, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::EventObjectMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            }),
+        })
+    );
+    assert_no_unimplemented(trigger.execute.as_deref().expect("draw"));
+}
+
+/// CR 603.4 + CR 208.1 + CR 700.9: a state predicate on the triggering event's
+/// object — "if that creature is 1/1" (both stats equal) and "if it's modified"
+/// — is an intervening-if over the event object's current characteristics.
+#[test]
+fn event_object_state_intervening_ifs() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature you control enters, if that creature is 1/1, put two +1/+1 counters on it.",
+        "Sigil Captain",
+    );
+    let Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: None,
+        destination: Zone::Battlefield,
+        filter: TargetFilter::Typed(typed),
+    }) = &trigger.condition
+    else {
+        panic!(
+            "expected an event-object filter, got {:?}",
+            trigger.condition
+        );
+    };
+    assert!(matches!(
+        typed.properties.as_slice(),
+        [
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 1 },
+                ..
+            },
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 1 },
+                ..
+            },
+        ]
+    ));
+    assert_no_unimplemented(trigger.execute.as_deref().expect("counters"));
+
+    let trigger = parse_trigger_line(
+        "Whenever ~ attacks, if it's modified, you may have it deal damage equal to its power to you and any target.",
+        "Ian the Reckless",
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::EventObjectMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Modified])
+            ),
+        })
+    );
+}
+
+/// CR 603.4 + CR 508.5: an attacked-player filter alone loses the resolution
+/// recheck (for example, after the attack target changes). Keep Kazuul's gate
+/// as an explicit gap until that condition can be evaluated at both times.
+#[test]
+fn attack_trigger_defending_player_gate_stays_explicit_gap() {
+    let trigger = parse_trigger_line(
+        "Whenever a creature an opponent controls attacks, if you're the defending player, create a 3/3 red Ogre creature token unless that creature's controller pays {3}.",
+        "Kazuul, Tyrant of the Cliffs",
+    );
+    assert_eq!(trigger.mode, TriggerMode::Attacks);
+    assert_eq!(trigger.valid_target, None);
+    assert_eq!(trigger.condition, None);
+    assert!(matches!(
+        trigger
+            .execute
+            .as_deref()
+            .expect("explicit gap")
+            .effect
+            .as_ref(),
+        Effect::Unimplemented { .. }
+    ));
 }

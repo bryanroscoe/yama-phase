@@ -1036,6 +1036,20 @@ pub(crate) fn is_difference_lose_life_gap(desc: &str) -> bool {
         .is_some_and(|body| parse_difference_lose_life_body(&body).is_ok())
 }
 
+/// CR 506.2 + CR 508.5: the leading "if you're the defending player, " gate of
+/// an attack trigger's effect text (Kazuul, Tyrant of the Cliffs).
+fn parse_defending_player_is_you_gate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("if you"),
+            alt((tag("'re"), tag("\u{2019}re"), tag(" are"))),
+            tag(" the defending player, "),
+        ),
+    )
+    .parse(input)
+}
+
 fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
     alt((
         value((), tag::<_, _, OracleError<'_>>("attack ")),
@@ -1631,6 +1645,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // for the meld effect combinator, and the residual ("exile them, then meld
     // them into [result]") is parsed as the effect body. Falls through to the
     // generic `extract_if_condition` for every non-meld trigger.
+    // CR 603.4 + CR 508.5: this gate must also be rechecked at resolution,
+    // including after an attacker changes what it attacks. An attacked-player
+    // filter alone would erase that check. Keep the unsupported gate explicit.
+    let defending_player_gate_refused = nom_on_lower(
+        &effect_text,
+        &effect_text.to_lowercase(),
+        parse_defending_player_is_you_gate,
+    )
+    .is_some();
     let (effect_without_if, if_condition, meld_partner, leading_guard_refused) =
         match crate::parser::oracle_effect::meld::parse_meld_gate(&effect_text) {
             Some((gate, partner, residual)) => (residual, Some(gate), Some(partner), false),
@@ -1654,6 +1677,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 )
             }
         };
+    let leading_guard_refused = leading_guard_refused || defending_player_gate_refused;
     let optional_player = optional_player_from_effect_body(&effect_without_if)
         .or_else(|| after_structural_if.and_then(optional_player_from_effect_body))
         // CR 109.5 + CR 608.2c: on a phase trigger scoped to another player's
@@ -2392,7 +2416,6 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         def.optional = false;
     }
     def.unless_pay = modifiers.unless_pay.clone();
-
     // CR 603.8 + CR 603.4: a state trigger's condition is its trigger event — it
     // is checked when the game state matches it and never again on resolution
     // (the CR 603.4 recheck applies only to an "if" that immediately follows a
@@ -8122,7 +8145,11 @@ fn extract_if_condition_with_card_name(
         let clause_len = lower.len() - before.len() - rest.len();
         // CR 603.4 + CR 603.10: route zone-change triggers (dies/leaves) through
         // the event-snapshot evaluator; non-zone events (CounterAdded) stay live.
-        let condition = build_event_object_subtype_condition(filter, negated, trigger_zone_change);
+        let condition = build_event_object_subtype_condition(
+            filter,
+            negated,
+            trigger_zone_change.map(|(origin, destination)| (Some(origin), destination)),
+        );
         return IfExtraction::hoisted(strip_condition_clause(text, pos, clause_len), condition);
     }
 
@@ -8154,6 +8181,48 @@ fn extract_if_condition_with_card_name(
             condition: cond,
             leading_guard_refused: false,
         };
+    }
+
+    // CR 603.4 + CR 205.2a: "if it's [not] a <card-type phrase>" on the
+    // triggering event's object (Trail of Mystery's turned-face-up head). Only the
+    // LEADING position is an intervening-if; a trailing "… if it's a creature"
+    // stays with the effect clause it gates.
+    if let Some((before, (filter, negated), rest)) =
+        scan_preceded(&lower, parse_event_object_type_phrase_intervening_if)
+            .filter(|(before, _, _)| before.trim_start().is_empty())
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        let condition = build_event_object_subtype_condition(
+            filter,
+            negated,
+            trigger_zone_change.map(|(origin, destination)| (Some(origin), destination)),
+        );
+        return IfExtraction::hoisted(
+            strip_condition_clause(text, before.len(), clause_len),
+            condition,
+        );
+    }
+
+    // CR 603.4: "if it's modified" / "if that creature is 1/1" / "if it has a
+    // +1/+1 counter on it" — a state predicate on the triggering event's object
+    // (Ian the Reckless, Sigil Captain). Leading position only, like the
+    // card-type arm above.
+    if let Some((before, (filter, negated), rest)) =
+        scan_preceded(&lower, parse_event_object_state_intervening_if)
+            .filter(|(before, _, _)| before.trim_start().is_empty())
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        let condition = build_event_object_subtype_condition(
+            filter,
+            negated,
+            trigger_zone_change
+                .map(|(origin, destination)| (Some(origin), destination))
+                .or_else(|| head_enters_battlefield.then_some((None, Zone::Battlefield))),
+        );
+        return IfExtraction::hoisted(
+            strip_condition_clause(text, before.len(), clause_len),
+            condition,
+        );
     }
 
     // CR 603.4 + CR 120.1: "if any of that [combat] damage was dealt by
@@ -8637,19 +8706,124 @@ fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
 fn parse_event_object_subtype_intervening_if(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, negated) = parse_event_object_copula_article(input)?;
+    let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
+    let rest = &rest[consumed..];
+    let filter = TargetFilter::Typed(typed_filter_for_subtype(&subtype));
+    Ok((rest, (filter, negated)))
+}
+
+/// CR 603.4: the shared "if it's [not] a(n) " head of an event-object type
+/// intervening-if. Returns whether the copula is negated. Longest-match: the
+/// negated forms ("'s not"/" is not"/" isn't") share a prefix with the plain
+/// forms ("'s"/" is"), so they must be tried first.
+fn parse_event_object_copula_article(input: &str) -> OracleResult<'_, bool> {
     let (rest, _) = tag("if it").parse(input)?;
-    // Longest-match: the negated forms ("'s not"/" is not"/" isn't") share a
-    // prefix with the plain forms ("'s"/" is"), so they must be tried first.
     let (rest, negated) = alt((
         value(true, alt((tag("'s not "), tag(" is not "), tag(" isn't ")))),
         value(false, alt((tag("'s "), tag(" is ")))),
     ))
     .parse(rest)?;
     let (rest, _) = alt((tag("an "), tag("a "))).parse(rest)?;
-    let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
-    let rest = &rest[consumed..];
-    let filter = TargetFilter::Typed(typed_filter_for_subtype(&subtype));
-    Ok((rest, (filter, negated)))
+    Ok((rest, negated))
+}
+
+/// CR 603.4 + CR 205.2a: "if it's [not] a <card-type phrase>" on the triggering
+/// event's object — the card-type sibling of
+/// [`parse_event_object_subtype_intervening_if`] (Trail of Mystery: "Whenever a
+/// permanent you control is turned face up, if it's a creature, it gets +2/+2
+/// until end of turn"; Phyrexian Totem: "if it's a creature, sacrifice that many
+/// permanents"). The type phrase is delegated to `parse_type_phrase_folding` and
+/// must end at a clause boundary, so a longer predicate ("if it's attacking
+/// alone") never matches here. Registered AFTER the zone-change object filter
+/// path, so dies/enters heads keep their snapshot-aware conditions; the caller
+/// routes any remaining zone-change trigger through the snapshot evaluator via
+/// [`build_event_object_subtype_condition`].
+fn parse_event_object_type_phrase_intervening_if(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, negated) = parse_event_object_copula_article(input)?;
+    let (filter, after) = parse_type_phrase_folding(rest);
+    if !matches!(&filter, TargetFilter::Typed(tf) if !tf.type_filters.is_empty()) {
+        return Err(oracle_err(rest));
+    }
+    nom_primitives::peek_clause_terminator(after)?;
+    Ok((after, (filter, negated)))
+}
+
+/// CR 603.4: "if <it | that creature | that permanent> <state predicate>" on the
+/// triggering event's object, as a filter over its current characteristics:
+/// - "is N/M" — power and toughness both equal (CR 208.1; Sigil Captain:
+///   "Whenever a creature you control enters, if that creature is 1/1, …");
+/// - "is modified" (CR 700.9; Ian the Reckless: "if it's modified");
+/// - "is face down" (CR 708.2);
+/// - "has <counter spec> on it" (CR 122.1; "if it has a +1/+1 counter on it").
+///
+/// The predicate must end at a clause boundary. The caller routes zone-change
+/// triggers through the event snapshot (`build_event_object_subtype_condition`).
+fn parse_event_object_state_intervening_if(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("if ").parse(input)?;
+    let (rest, _) = alt((tag("that creature"), tag("that permanent"), tag("it"))).parse(rest)?;
+    let (rest, (negated, properties)) = alt((
+        |i| {
+            let (i, negated) = alt((
+                preceded(
+                    tag(" "),
+                    super::oracle_nom::condition::parse_copula_is_or_isnt,
+                ),
+                preceded(
+                    super::oracle_nom::condition::parse_apostrophe_s,
+                    alt((value(true, tag(" not ")), value(false, tag(" ")))),
+                ),
+            ))
+            .parse(i)?;
+            let (i, properties) = alt((
+                nom::combinator::map_opt(
+                    (
+                        nom_primitives::parse_number,
+                        tag("/"),
+                        nom_primitives::parse_number,
+                    ),
+                    |(power, _, toughness)| {
+                        let (power, toughness) =
+                            (i32::try_from(power).ok()?, i32::try_from(toughness).ok()?);
+                        Some(vec![
+                            FilterProp::PtComparison {
+                                stat: PtStat::Power,
+                                scope: PtValueScope::Current,
+                                comparator: Comparator::EQ,
+                                value: QuantityExpr::Fixed { value: power },
+                            },
+                            FilterProp::PtComparison {
+                                stat: PtStat::Toughness,
+                                scope: PtValueScope::Current,
+                                comparator: Comparator::EQ,
+                                value: QuantityExpr::Fixed { value: toughness },
+                            },
+                        ])
+                    },
+                ),
+                value(vec![FilterProp::Modified], tag("modified")),
+                value(vec![FilterProp::FaceDown], tag("face down")),
+            ))
+            .parse(i)?;
+            Ok((i, (negated, properties)))
+        },
+        |i| {
+            let (i, _) = tag(" has ").parse(i)?;
+            let (i, properties) = super::oracle_nom::condition::parse_counter_state_properties(i)?;
+            Ok((i, (false, properties)))
+        },
+    ))
+    .parse(rest)?;
+    nom_primitives::peek_clause_terminator(rest)?;
+    Ok((
+        rest,
+        (
+            TargetFilter::Typed(TypedFilter::default().properties(properties)),
+            negated,
+        ),
+    ))
 }
 
 /// CR 603.4 + CR 603.10: Build the trigger condition for a recognized "if it's
@@ -8666,11 +8840,11 @@ fn parse_event_object_subtype_intervening_if(
 fn build_event_object_subtype_condition(
     filter: TargetFilter,
     negated: bool,
-    trigger_zone_change: Option<(Zone, Zone)>,
+    trigger_zone_change: Option<(Option<Zone>, Zone)>,
 ) -> TriggerCondition {
     let condition = match trigger_zone_change {
         Some((origin, destination)) => TriggerCondition::ZoneChangeObjectMatchesFilter {
-            origin: Some(origin),
+            origin,
             destination,
             filter,
         },
@@ -17108,7 +17282,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
                 return Err(nom::Err::Error(OracleError::new(
                     rest,
                     nom::error::ErrorKind::Alt,
-                )))
+                )));
             }
         },
     };

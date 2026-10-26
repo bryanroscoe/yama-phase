@@ -1194,9 +1194,9 @@ mod tests {
     #[test]
     fn a_rejected_trailing_guard_is_a_condition_gap() {
         assert_eq!(
-            diagnose_clause_gap("turn it face up if it's face down"),
+            diagnose_clause_gap("untap it if the squirrel wore a tiny hat"),
             ClauseGap::Condition {
-                guard: "it's face down".to_string()
+                guard: "the squirrel wore a tiny hat".to_string()
             }
         );
     }
@@ -1447,7 +1447,7 @@ mod tests {
             "if a squirrel would die, exile it instead",
             "if you would draw a card, instead draw two",
             // Condition
-            "turn it face up if it's face down",
+            "untap it if the squirrel wore a tiny hat",
             "destroy that squirrel unless an opponent pays {2}",
             "if it's spring, search your library for a squirrel",
             "then if it's spring, search your library for a squirrel",
@@ -1596,11 +1596,11 @@ mod tests {
         assert_eq!(
             swallowed_clause_gap(
                 SwallowedAxis::Quantity,
-                "creatures you control get +1/+0 until end of turn for each lore counter \
-                 among sagas you control."
+                "creatures you control get +1/+0 until end of turn for each squirrel \
+                 bearing a tiny hat."
             ),
             Some(ClauseGap::Quantity {
-                operand: "lore counter among sagas you control".to_string()
+                operand: "squirrel bearing a tiny hat".to_string()
             })
         );
     }

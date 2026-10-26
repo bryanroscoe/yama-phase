@@ -6,7 +6,10 @@ use crate::types::actions::GameAction;
 use crate::types::player::PlayerId;
 
 use super::{
-    candidates::{candidate_actions_for_semantic_owner_with_probe, CandidateAction},
+    candidates::{
+        candidate_actions_for_semantic_owner_from, candidate_actions_for_semantic_owner_with_probe,
+        CandidateAction, SemanticCandidates,
+    },
     FilterPipeline,
 };
 
@@ -80,6 +83,32 @@ pub fn apply_ai_action_proposal(
 
 impl AiDecisionContract {
     pub fn issue(state: &GameState, semantic_owner: PlayerId) -> Self {
+        Self::issue_with_candidates(
+            state,
+            semantic_owner,
+            candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None),
+        )
+    }
+
+    /// [`Self::issue`] from an existing semantic enumeration of `state`, for a
+    /// caller that also derives other lists from it.
+    pub fn issue_from(
+        state: &GameState,
+        semantic_owner: PlayerId,
+        semantic: &SemanticCandidates,
+    ) -> Self {
+        Self::issue_with_candidates(
+            state,
+            semantic_owner,
+            candidate_actions_for_semantic_owner_from(state, semantic_owner, semantic),
+        )
+    }
+
+    fn issue_with_candidates(
+        state: &GameState,
+        semantic_owner: PlayerId,
+        owner_candidates: Vec<CandidateAction>,
+    ) -> Self {
         Self {
             semantic_owner,
             authorized_actor: resolve_all_frozen_actor(state, semantic_owner).unwrap_or_else(
@@ -93,8 +122,7 @@ impl AiDecisionContract {
             // before issue. Submission still performs the public action-boundary
             // apply after exact-membership and owner checks.
             candidates: {
-                let mut candidates =
-                    candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None);
+                let mut candidates = owner_candidates;
                 if decision_contract_requires_reducer_validation(state) {
                     candidates = FilterPipeline::default_pipeline().apply(state, candidates);
                 }

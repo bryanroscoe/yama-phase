@@ -3685,7 +3685,10 @@ fn def_tree_co_scoped_parent_target_iteration_count(
     // graveyards, no two controlled by the same player (Sepulchral Primordial):
     // one target per opponent is the iteration.
     if *pop == PlayerFilter::Opponent
-        && def.multi_target.as_ref().is_some_and(|spec| spec.max.is_none())
+        && def
+            .multi_target
+            .as_ref()
+            .is_some_and(|spec| spec.max.is_none())
         && def.target_constraints.contains(
             &crate::types::game_state::TargetSelectionConstraint::DifferentObjectControllers,
         )
@@ -6742,13 +6745,15 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// `DynamicQty` reports the rejected operand.
     #[test]
     fn dynamic_qty_swallow_carries_the_rejected_operand() {
-        // Chong and Lily, Nomads (second mode, standalone). The operand
-        // is spanned by the marker's own `OperandSpan` and bounded by its own
-        // `end_bounds`; a hand-rolled split would produce a different string.
+        // Shaped on Chong and Lily, Nomads' second mode, with an operand the
+        // quantity grammar can't read (its own "lore counter among Sagas you
+        // control" now parses). The operand is spanned by the marker's own
+        // `OperandSpan` and bounded by its own `end_bounds`; a hand-rolled
+        // split would produce a different string.
         let parsed = parse_named(
             "Whenever one or more Bards you control attack, creatures you control get \
-             +1/+0 until end of turn for each lore counter among Sagas you control.",
-            "Chong and Lily, Nomads",
+             +1/+0 until end of turn for each squirrel bearing a tiny hat.",
+            "Test Bard Captain",
             &["Creature"],
         );
         let warning = only_swallow(&parsed, "DynamicQty");
@@ -6756,7 +6761,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         assert_eq!(
             warning.gap(),
             Some(&ClauseGap::Quantity {
-                operand: "lore counter among sagas you control".to_string()
+                operand: "squirrel bearing a tiny hat".to_string()
             }),
             "full warning: {warning:?}"
         );

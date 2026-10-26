@@ -2248,7 +2248,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::VoteCount { .. }
@@ -3278,7 +3278,8 @@ fn legacy_effect(x: &Effect) -> bool {
                     crate::types::ability::EachDamageRecipient::Shared(f) => {
                         legacy_target_filter(f)
                     }
-                    crate::types::ability::EachDamageRecipient::EachController => false,
+                    crate::types::ability::EachDamageRecipient::EachController
+                    | crate::types::ability::EachDamageRecipient::Itself => false,
                     crate::types::ability::EachDamageRecipient::OtherBatchSource {
                         source_filters,
                     } => source_filters.iter().any(|filter| legacy_target_filter(filter)),
@@ -4732,7 +4733,8 @@ fn rw_effect(
         // CR 120.1 + CR 608.2c: each object matching `sources` (or each legal
         // member of a typed announced pair) deals `amount` damage. `Shared` ⇒
         // target damage_writes; `EachController` ⇒ each source's controller
-        // takes life loss; `OtherBatchSource` ⇒ both slot filters are board
+        // takes life loss; `Itself` ⇒ damage writes on the sources themselves;
+        // `OtherBatchSource` ⇒ both slot filters are board
         // reads and the reciprocal objects are damage writes.
         Effect::EachSourceDealsDamage {
             sources,
@@ -4743,6 +4745,10 @@ fn rw_effect(
             p.merge(match recipient {
                 crate::types::ability::EachDamageRecipient::Shared(filter) => damage_writes(filter),
                 crate::types::ability::EachDamageRecipient::EachController => life_writes(),
+                // CR 120.3e: each source's damage is marked on the source itself.
+                crate::types::ability::EachDamageRecipient::Itself => {
+                    damage_writes(sources)
+                }
                 crate::types::ability::EachDamageRecipient::OtherBatchSource {
                     source_filters,
                 } => {
@@ -6514,6 +6520,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_player_of(StateKind::PlayerLife)
         }
         QuantityRef::StartingLifeTotal { player } => rw_player_scope(player),
+        // CR 903.8: reads the per-commander cast ledger for `player`; the ledger
+        // is written only by casting, so only the player binding is relevant.
+        QuantityRef::CommanderCastFromCommandZoneCount { player } => rw_player_scope(player),
         // CR 701.57a: reads the transient last-discover scalar, written only by
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
@@ -6686,8 +6695,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
-        | QuantityRef::CommanderManaValue { .. }
+                | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::Speed { .. } => RwProfile::empty(),
         QuantityRef::ZoneCardCount {
             zone,
@@ -7473,6 +7481,7 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         // reads no game state, exactly like the controller/scoped scopes.
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
         | PlayerScope::RecipientController

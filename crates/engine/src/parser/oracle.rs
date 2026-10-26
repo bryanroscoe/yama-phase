@@ -1970,7 +1970,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => false,
     }
@@ -7303,7 +7303,13 @@ fn parse_normalized_oracle_ir(
                 // B7: Ability-word-prefixed static lines — strip prefix and attach condition.
                 // Must happen here (Priority 7) because Priority 9 (spell catch-all) would
                 // otherwise consume the line before Priority 14 for instants/sorceries.
-                if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
+                // CR 207.2d: a longer flavor word ("The Will of the Hive Mind —",
+                // Winged Hive Tyrant) labels a static the same way; the stripped
+                // body must still parse as a static, so an ordinary em-dash
+                // sentence is not mistaken for a label.
+                if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line)
+                    .or_else(|| strip_flavor_word_with_name(&line))
+                {
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
                     let mut defs = parse_static_line_with_graveyard_keyword_continuation(
                         &effect_static,

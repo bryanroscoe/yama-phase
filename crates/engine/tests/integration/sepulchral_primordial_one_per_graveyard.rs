@@ -29,8 +29,12 @@ fn sepulchral_primordial_takes_a_creature_card_from_each_opponents_graveyard() {
         .add_creature_to_hand_from_oracle(P0, "Sepulchral Primordial", 5, 4, SEPULCHRAL_PRIMORDIAL)
         .with_mana_cost(ManaCost::generic(7))
         .id();
-    let giant = scenario.add_creature_to_graveyard(P1, "Hill Giant", 3, 3).id();
-    let wurm = scenario.add_creature_to_graveyard(P2, "Craw Wurm", 6, 4).id();
+    let giant = scenario
+        .add_creature_to_graveyard(P1, "Hill Giant", 3, 3)
+        .id();
+    let wurm = scenario
+        .add_creature_to_graveyard(P2, "Craw Wurm", 6, 4)
+        .id();
     let mut runner = scenario.build();
 
     let outcome = runner

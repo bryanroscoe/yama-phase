@@ -3646,6 +3646,14 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // clause previously fell through, leaving every creature eligible. Checked
     // before `parse_that_clause_suffix` (mirrors the `that isn't` arm); it only
     // fires for real subtypes, so color/supertype "that's" clauses are unaffected.
+    // CR 205.2a + CR 205.3: a mixed card-type/subtype disjunction ("permanent you
+    // control that's a creature or Vehicle", Ao, the Dawn Sky) — one `AnyOf`
+    // adjective filter. Only claims lists that mix the two kinds, so the pure
+    // subtype and pure card-type arms below keep their own lowering.
+    if let Some((mixed_filter, consumed)) = parse_that_is_mixed_type_suffix(&lower[pos..]) {
+        adjective_type_filters.push(mixed_filter);
+        pos += consumed;
+    }
     if let Some((subtype_filter, consumed)) = parse_that_is_subtype_suffix(&lower[pos..]) {
         adjective_type_filters.push(subtype_filter);
         pos += consumed;
@@ -4088,6 +4096,30 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += counters_offset + (remaining_counters.len() - rest.len());
     }
 
+    // CR 608.2c + CR 400.7j: "[that was|that were] put into a graveyard this
+    // way" — the cards an earlier instruction of the same ability put into a
+    // graveyard (Necromantic Selection: "Destroy all creatures, then return a
+    // creature card put into a graveyard this way"). The producer publishes the
+    // cards it moved into the chain's tracked set; `TrackedSetFiltered`
+    // intersects it with the type filter, so a card that was already in a
+    // graveyard is never offered. Not action-discriminated (`caused_by: None`),
+    // like the "put into a graveyard this way" count.
+    let mut put_into_graveyard_this_way = false;
+    let remaining_graveyard = lower[pos..].trim_start();
+    let graveyard_offset = lower[pos..].len() - remaining_graveyard.len();
+    if let Ok((rest, _)) = preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("that was "),
+            tag("that were "),
+        ))),
+        tag("put into a graveyard this way"),
+    )
+    .parse(remaining_graveyard)
+    {
+        put_into_graveyard_this_way = true;
+        pos += graveyard_offset + (remaining_graveyard.len() - rest.len());
+    }
+
     // CR 201.2a + CR 201.4: "<type-phrase> with the chosen name" / "<type-phrase>
     // with a name chosen for ~" — restrict the object class to objects whose name
     // equals the source's ChosenAttribute::CardName (bound by a preceding
@@ -4426,6 +4458,16 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             filter: Box::new(filter),
             // "counters put this way" names objects that received counters but
             // did not change zones — a selection set with no zone binding.
+            caused_by: None,
+        }
+    } else {
+        filter
+    };
+
+    let filter = if put_into_graveyard_this_way {
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(filter),
             caused_by: None,
         }
     } else {
@@ -7952,6 +7994,28 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_with, _) = tag::<_, _, OracleError<'_>>("with ").parse(trimmed).ok()?;
+    // CR 702.29a: "with a <keyword> ability" names the keyword as an ability
+    // (Zenith Flare: "the number of cards with a cycling ability in your
+    // graveyard") — the same keyword test as "with <keyword>".
+    if let Ok((after_article, _)) = tag::<_, _, OracleError<'_>>("a ").parse(after_with) {
+        if let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(after_article) {
+            if let Ok((rest, _)) =
+                tag::<_, _, OracleError<'_>>(" ability").parse(&after_article[keyword_len..])
+            {
+                let property = match keyword_match {
+                    KeywordMatch::Concrete(keyword) => FilterProp::WithKeyword { value: keyword },
+                    KeywordMatch::Kind(kind) => FilterProp::HasKeywordKind { value: kind },
+                };
+                return Some((
+                    KeywordSuffix {
+                        properties: vec![property],
+                        disjunctive: false,
+                    },
+                    leading_ws + trimmed.len() - rest.len(),
+                ));
+            }
+        }
+    }
     let mut remaining = after_with;
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
@@ -9355,6 +9419,28 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         ("convoked it", FilterProp::ConvokedSource),
     ];
 
+    // CR 400.7 + CR 109.4: "that entered [the battlefield] under your control
+    // this turn" (Shaile, Dean of Radiance) — the object entered this turn and
+    // is controlled by the ability's controller. Before VERB_PHRASES, whose
+    // "entered the battlefield this turn" row would not reach the control axis.
+    if let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("entered "),
+        opt(tag("the battlefield ")),
+        tag("under your control this turn"),
+    )
+        .parse(after_that)
+    {
+        return Some((
+            vec![
+                FilterProp::EnteredThisTurn,
+                FilterProp::ControllerMatches {
+                    player: Box::new(PlayerFilter::Controller),
+                },
+            ],
+            that_len + after_that.len() - rest.len(),
+        ));
+    }
+
     for (phrase, prop) in VERB_PHRASES {
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(after_that) {
             let total = that_len + phrase.len();
@@ -10107,6 +10193,53 @@ fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter
     }
 
     Ok((rest, type_filters))
+}
+
+/// One leg of a mixed relative type list: a card type or a subtype, each with
+/// an optional article.
+fn parse_relative_type_or_subtype_leg(input: &str) -> Option<(TypeFilter, &str)> {
+    if let Ok((rest, type_filter)) = parse_relative_core_type_leg(input) {
+        return Some((type_filter, rest));
+    }
+    parse_relative_subtype_leg(input).map(|(subtype, rest)| (TypeFilter::Subtype(subtype), rest))
+}
+
+/// CR 205.2a + CR 205.3: "that's a creature or Vehicle" (Ao, the Dawn Sky) — a
+/// relative type disjunction whose legs mix card types and subtypes. Any leg
+/// satisfies the clause, so the legs fold into one `AnyOf` adjective filter that
+/// AND-merges with the base type. Returns `None` unless the list really mixes
+/// the two kinds: a pure card-type list stays with
+/// `parse_that_is_core_type_suffix` (which distributes the legs as `Or`
+/// branches) and a pure subtype list with `parse_that_is_subtype_suffix`.
+fn parse_that_is_mixed_type_suffix(text: &str) -> Option<(TypeFilter, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    if negated {
+        return None;
+    }
+    let (first, mut rest) = parse_relative_type_or_subtype_leg(after_intro)?;
+    let mut legs = vec![first];
+    while let Ok((after_separator, _)) = alt((
+        tag::<_, _, OracleError<'_>>(", or "),
+        tag(" or "),
+        tag(", "),
+    ))
+    .parse(rest)
+    {
+        let Some((next, after_leg)) = parse_relative_type_or_subtype_leg(after_separator) else {
+            break;
+        };
+        legs.push(next);
+        rest = after_leg;
+    }
+    let has_card_type = legs.iter().any(is_relative_core_type_filter);
+    let has_subtype = legs.iter().any(|leg| matches!(leg, TypeFilter::Subtype(_)));
+    if !(has_card_type && has_subtype) {
+        return None;
+    }
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    Some((TypeFilter::AnyOf(legs), consumed))
 }
 
 /// Parses a positive relative card-type clause like
@@ -21976,12 +22109,9 @@ mod tests {
                 assert!(filters
                     .iter()
                     .any(|f| typed_leg(f).is_some_and(|tf| has_type(tf, TypeFilter::Creature))));
-                assert!(
-                    filters
-                        .iter()
-                        .any(|f| typed_leg(f)
-                            .is_some_and(|tf| has_type(tf, TypeFilter::Planeswalker)))
-                );
+                assert!(filters.iter().any(|f| {
+                    typed_leg(f).is_some_and(|tf| has_type(tf, TypeFilter::Planeswalker))
+                }));
             }
             other => panic!("expected Or eligible set, got {other:?}"),
         }
@@ -23488,5 +23618,24 @@ mod color_or_type_union {
         }
         assert!(parse_type_phrase_union("Giant", &scope).is_none());
         assert!(parse_type_phrase_union("Goblin or Shaman you know", &scope).is_none());
+    }
+}
+
+#[cfg(test)]
+mod keyword_ability_suffix_tests {
+    use super::*;
+
+    /// CR 702.29a: "with a <keyword> ability" is the same keyword test as
+    /// "with <keyword>".
+    #[test]
+    fn with_a_keyword_ability_suffix() {
+        let (filter, rest) = parse_type_phrase_folding("cards with a cycling ability");
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Cycling,
+        }));
     }
 }

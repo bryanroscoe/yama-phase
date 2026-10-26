@@ -18067,7 +18067,8 @@ fn strip_counter_conditional_demonstrative_target_non_trigger() {
 /// SHAPE C3 — GUARD: a LEADING demonstrative "if that creature has … counter …,
 /// [source] deals N … instead" (Bring Low's verbatim clause 2) must NOT be
 /// captured by the counter-conditional as an additive `QuantityCheck`-gated
-/// `DealDamage`. The leading demonstrative is deliberately withheld from
+/// `DealDamage`; the target counter-threshold gate owns it. The leading
+/// demonstrative is deliberately withheld from
 /// `strip_counter_conditional` (offered only in the trailing form), so
 /// `strip_counter_conditional` returns no condition here and this
 /// replacement-class clause stays off the counter-conditional (the "if that
@@ -18095,13 +18096,24 @@ fn strip_counter_conditional_leading_demonstrative_instead_deferred() {
          QuantityCheck-gated additive DealDamage; got {:?}",
         def.condition,
     );
-    // Upstream parity: the counter-conditional does not recognize this leading
-    // demonstrative at all, so no counter condition is attached — the clause is
-    // left as an honest deferred gap, identical to upstream `main`.
+    // CR 122.1 + CR 608.2c: the leading demonstrative is owned by the target
+    // counter-threshold gate — a live `Counters` test on the named creature,
+    // never the counter-conditional's `QuantityCheck`. (In a whole card the
+    // "instead" wraps it as `ConditionInstead`; see
+    // `bring_low_replacement_rider_lowers_to_instead_counter_gate`.)
     assert!(
-        def.condition.is_none(),
-        "Leading demonstrative 'instead' clause must stay a deferred gap (no counter \
-         condition), matching upstream main; got {:?}",
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::TargetMatchesFilter {
+                filter: crate::types::ability::TargetFilter::Typed(typed),
+                use_lki: false,
+                ..
+            }) if matches!(
+                typed.properties.as_slice(),
+                [crate::types::ability::FilterProp::Counters { .. }]
+            )
+        ),
+        "Leading demonstrative counter gate must be a live target counter filter; got {:?}",
         def.condition,
     );
 }
@@ -27231,13 +27243,13 @@ fn rider_declaring_its_own_target_fails_closed() {
     );
 }
 
-/// CR 608.2c: an "if that creature has <predicate>," gate whose predicate is not
-/// a keyword (a counter threshold) cannot be evaluated by the
-/// keyword check, so it must fail closed as a named `Unimplemented` rather than
-/// ship as an inert `TargetHasKeywordInstead{Unknown}` that reads as supported.
-/// Real keyword gates (Toxic, Flying) are unchanged.
+/// CR 608.2c + CR 122.1: an "if that creature has <counter spec> on it," gate is
+/// a counter threshold, not a keyword: it lowers to a live `Counters` filter on
+/// the named creature and never ships as an inert
+/// `TargetHasKeywordInstead{Unknown}`. Real keyword gates (Toxic, Flying) are
+/// unchanged.
 #[test]
-fn unknown_keyword_gate_fails_closed() {
+fn counter_threshold_gate_lowers_to_counters_filter() {
     for (name, text, types) in [
         (
             "Bring Low",
@@ -27258,8 +27270,12 @@ fn unknown_keyword_gate_fails_closed() {
         let r = parse(text, name, &[], types, &[]);
         let rendered = format!("{r:?}");
         assert!(
-            has_unimplemented_mentioning(&r, "target_has_unknown_keyword_condition"),
-            "{name}: a non-keyword gate must fail closed: {r:#?}"
+            !has_unimplemented_mentioning(&r, "target_has_unknown_keyword_condition"),
+            "{name}: the counter gate must lower: {r:#?}"
+        );
+        assert!(
+            rendered.contains("TargetMatchesFilter") && rendered.contains("Counters"),
+            "{name}: expected a live counter gate on the creature: {r:#?}"
         );
         assert!(
             !rendered.contains("TargetHasKeywordInstead"),

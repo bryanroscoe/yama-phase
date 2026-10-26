@@ -2824,7 +2824,9 @@ pub fn resolve_each_source_deals_damage(
                 .then_some(*id)
             })
             .collect(),
-        EachDamageRecipient::Shared(_) | EachDamageRecipient::EachController => {
+        EachDamageRecipient::Shared(_)
+        | EachDamageRecipient::EachController
+        | EachDamageRecipient::Itself => {
             let resolved_sources =
                 crate::game::effects::resolved_object_filter(state, ability, sources);
             let filter_ctx = filter::FilterContext::from_ability(ability);
@@ -2846,9 +2848,9 @@ pub fn resolve_each_source_deals_damage(
         EachDamageRecipient::Shared(filter) => {
             resolve_effect_recipients(state, ability, filter, false)
         }
-        EachDamageRecipient::EachController | EachDamageRecipient::OtherBatchSource { .. } => {
-            Vec::new()
-        }
+        EachDamageRecipient::EachController
+        | EachDamageRecipient::Itself
+        | EachDamageRecipient::OtherBatchSource { .. } => Vec::new(),
     };
 
     // Build every (source, context, recipient, amount) entry up front, before any
@@ -2891,6 +2893,11 @@ pub fn resolve_each_source_deals_damage(
                     .map(|obj| obj.controller)
                     .unwrap_or(ctx.controller);
                 entries.push((source_id, ctx, TargetRef::Player(controller), amt));
+            }
+            // CR 120.1 + CR 120.3e: each source deals damage to itself; the
+            // damage is marked on that same object.
+            EachDamageRecipient::Itself => {
+                entries.push((source_id, ctx, TargetRef::Object(source_id), amt));
             }
             // CR 120.1 + CR 608.2c: the relation exists only for an exact
             // two-object batch. With zero/one surviving choices there is no

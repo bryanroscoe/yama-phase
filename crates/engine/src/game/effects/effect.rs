@@ -1513,7 +1513,9 @@ fn fix_population_player(
 ) -> Option<crate::types::ability::TypedFilter> {
     let player = match typed.controller.as_ref() {
         None
-        | Some(ControllerRef::You | ControllerRef::Opponent | ControllerRef::SpecificPlayer { .. }) => {
+        | Some(
+            ControllerRef::You | ControllerRef::Opponent | ControllerRef::SpecificPlayer { .. },
+        ) => {
             return Some(typed.clone());
         }
         Some(ControllerRef::ScopedPlayer) => ability.scoped_player?,

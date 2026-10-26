@@ -4,7 +4,8 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while};
 use nom::character::complete::{char, multispace0, satisfy};
-use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value, verify};
+use nom::multi::separated_list1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -203,11 +204,48 @@ fn comma_inside_if_creature_subtype_list(lower: &str, comma_idx: usize) -> bool 
     // the span ends where `parse_type_phrase_folding` stops consuming type words.
     target_anaphoric_subtype_span(lower, after_prefix)
         .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
+        // CR 205.2a: "if it's a noncreature, nonland card, …" (Druidic Satchel) —
+        // the comma joins negated card types inside one card description.
+        || negated_card_type_list_span(lower, after_prefix)
+            .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
         // CR 205.3m + CR 608.2c: "if you control a Fish, Octopus, Otter, Seal,
         // Serpent, or Whale, draw a card" (Unagi's Spray) — the same list commas
         // inside a control-presence condition.
         || controls_type_span(lower, after_prefix)
             .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
+}
+
+/// CR 205.2a: a comma-joined list of two or more negated card types ending at
+/// the card noun — "noncreature, nonland card". Returns the named card types; a
+/// card matches the description only when it has NONE of them. Consumes through
+/// the last type word and peeks (does not consume) the " card" noun.
+fn parse_negated_card_type_list(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    preceded(tag("non"), parse_negated_card_type_list_after_non).parse(input)
+}
+
+/// [`parse_negated_card_type_list`] after its leading "non" was consumed.
+fn parse_negated_card_type_list_after_non(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    terminated(
+        verify(
+            separated_list1(tag(", non"), nom_primitives::parse_core_type),
+            |types: &Vec<CoreType>| types.len() > 1,
+        ),
+        peek(tag(" card")),
+    )
+    .parse(input)
+}
+
+/// CR 205.2a: the byte span of a negated card-type list ("noncreature, nonland")
+/// in an "it's a <list> card" condition, or `None` when the text is not this
+/// shape. A lexical span like [`controls_type_span`]: it only prevents the
+/// leading-conditional splitter from cutting the description at its commas.
+fn negated_card_type_list_span(lower: &str, after_prefix: &str) -> Option<(usize, usize)> {
+    let (after_article, _) = alt((tag::<_, _, OracleError<'_>>("it's an "), tag("it's a ")))
+        .parse(after_prefix)
+        .ok()?;
+    let (rest, _) = parse_negated_card_type_list(after_article).ok()?;
+    let start = lower.len() - after_article.len();
+    Some((start, lower.len() - rest.len()))
 }
 
 /// CR 205.3m: the byte span of a CLOSED subtype list ("a Fish, Octopus, …, or
@@ -1801,6 +1839,43 @@ fn parse_revealed_card_gate_suffix<'a>(
     (after_type, None)
 }
 
+/// CR 608.2c + CR 205.2a: "[non]<type> card[ <property>] or a[n] [non]<type>
+/// card[ <property>] …" after the `"it's a/an "` head. Each disjunct is its own
+/// card description with its own property slot (Nissa, Steward of Elements: "a
+/// land card or a creature card with mana value less than or equal to …"), so
+/// the legs are parsed independently by [`parse_its_a_card_type_gate_body`] and
+/// joined with `Or`. A single leg returns that leg's condition unchanged.
+fn parse_its_a_card_type_gate_disjunction<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(AbilityCondition, &'a str)> {
+    fn leg<'a>(rest: &'a str, ctx: &mut ParseContext) -> Option<(AbilityCondition, &'a str)> {
+        let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
+            .parse(rest)
+            .map(|(rest, matched)| (rest, matched.is_some()))
+            .unwrap_or((rest, false));
+        parse_its_a_card_type_gate_body(rest, negated, ctx)
+    }
+
+    let (first, mut after) = leg(rest, ctx)?;
+    let mut legs = vec![first];
+    while let Ok((next, _)) =
+        alt((tag::<_, _, OracleError<'_>>(" or an "), tag(" or a "))).parse(after)
+    {
+        let Some((condition, after_leg)) = leg(next, ctx) else {
+            break;
+        };
+        legs.push(condition);
+        after = after_leg;
+    }
+    let condition = if legs.len() == 1 {
+        legs.pop()?
+    } else {
+        AbilityCondition::Or { conditions: legs }
+    };
+    Some((condition, after))
+}
+
 /// CR 608.2c: Shared body for `"[non]<type> card[...suffix]"` gates after the
 /// `"it's a/an "` or `"if it's a/an "` prefix. Returns the condition and the
 /// unconsumed remainder (effect body for leading-if forms).
@@ -1840,6 +1915,29 @@ fn parse_its_a_card_type_gate_body<'a>(
             ),
             after_type,
         ));
+    }
+    // CR 205.2a: "noncreature, nonland card" (Druidic Satchel, Narset
+    // Transcendent) — every listed type is negated, so the card matches only when
+    // it has none of them: `Not(RevealedHasCardType { any of the list })`. The
+    // caller has already consumed the first "non". No postnominal property slot
+    // is read here: negating the whole condition would also negate the property.
+    if negated {
+        if let Ok((after_list, card_types)) = parse_negated_card_type_list_after_non(rest) {
+            let (after_type, _) = tag::<_, _, OracleError<'_>>(" card")
+                .parse(after_list)
+                .ok()?;
+            return Some((
+                maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_types,
+                        additional_filter: None,
+                        subtype_filter: None,
+                    },
+                    true,
+                ),
+                after_type,
+            ));
+        }
     }
     let (after_type, type_str) = alt((
         terminated(take_until(" card"), tag::<_, _, OracleError<'_>>(" card")),
@@ -2090,12 +2188,8 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     let Some(rest) = rest else {
         return (None, text.to_string());
     };
-    let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
-        .parse(rest)
-        .map(|(rest, matched)| (rest, matched.is_some()))
-        .unwrap_or((rest, false));
     let mut ctx = ParseContext::default();
-    let Some((condition, after_type)) = parse_its_a_card_type_gate_body(rest, negated, &mut ctx)
+    let Some((condition, after_type)) = parse_its_a_card_type_gate_disjunction(rest, &mut ctx)
     else {
         return (None, text.to_string());
     };
@@ -2145,11 +2239,7 @@ fn parse_its_a_type_condition(
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an ")))
         .parse(condition_text)
         .ok()?;
-    let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
-        .parse(rest)
-        .map(|(rest, matched)| (rest, matched.is_some()))
-        .unwrap_or((rest, false));
-    let (condition, remainder) = parse_its_a_card_type_gate_body(rest, negated, ctx)?;
+    let (condition, remainder) = parse_its_a_card_type_gate_disjunction(rest, ctx)?;
     if remainder.trim().trim_end_matches('.').is_empty() {
         Some(condition)
     } else {
@@ -2382,6 +2472,30 @@ fn parse_target_type_membership_condition<'a>(
                 return Err(oracle_err(input));
             }
         }
+    }
+    // CR 708.2 + CR 700.9: a state adjective instead of a type — "turn it face
+    // up if it's face down" (Showstopping Surprise), "if it's modified" — tests
+    // the same declared object's current status.
+    if let Ok((remainder, prop)) = alt((
+        value(
+            FilterProp::FaceDown,
+            tag::<_, _, OracleError<'_>>("face down"),
+        ),
+        value(FilterProp::Modified, tag("modified")),
+    ))
+    .parse(rest)
+    {
+        return Ok((
+            remainder,
+            maybe_negate(
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+                    use_lki,
+                    subject_slot: None,
+                },
+                negated,
+            ),
+        ));
     }
     // CR 205.3: an optional "a"/"an" article precedes a single type/subtype word
     // ("is a Goblin"); a leading core type with no article ("is artifact") is not
@@ -2793,6 +2907,9 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
         // "was untapped" sets use_lki (reads the snapshot), present-tense "is
         // untapped" reads live state, and "isn't untapped" wraps in `Not`.
         value(FilterProp::Untapped, tag("untapped")),
+        // CR 708.2: face-down status (Showstopping Surprise "Turn it face up if
+        // it's face down").
+        value(FilterProp::FaceDown, tag("face down")),
         // CR 508.1b: combat status (Wisecrack "is attacking").
         value(FilterProp::Attacking { defender: None }, tag("attacking")),
         // CR 509.1a: combat status (blocking sibling).
@@ -2903,10 +3020,9 @@ fn parse_threshold_with_exactly(input: &str) -> OracleResult<'_, (Comparator, i3
 ///     (`parse_reflexive_pt_stat`)
 ///   - threshold: `parse_threshold_with_exactly`.
 ///
-/// Only P/T is on this axis: counter thresholds ("that creature has a +1/+1
-/// counter on it") deliberately stay on the target-has gate's fail-closed
-/// `Keyword::Unknown` path, since routing them here would also reroute
-/// "instead" gates through `lower_instead_condition`.
+/// Counter thresholds ("that creature has a +1/+1 counter on it") are the
+/// sibling [`parse_target_counter_threshold_condition`], tried beside this one
+/// by [`parse_target_pt_threshold_condition_text`].
 fn parse_target_pt_threshold_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
@@ -2940,12 +3056,39 @@ fn parse_target_pt_threshold_condition(
     ))
 }
 
+/// CR 122.1 + CR 608.2c: "that creature has <counter spec> on it" — the counter
+/// sibling of [`parse_target_pt_threshold_condition`] (Hadana's Climb: "Then if
+/// that creature has three or more +1/+1 counters on it, transform ~"; Marcus,
+/// Mutant Mayor: "draw a card if that creature has a +1/+1 counter on it"). The
+/// subject and binding are the same as the P/T threshold's (the earlier
+/// instruction's target, or the triggering object when nothing was targeted);
+/// the counter spec is the shared `FilterProp::Counters` grammar, read live.
+fn parse_target_counter_threshold_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, _) = parse_target_demonstrative_subject(input)?;
+    let (rest, _) = tag(" has ").parse(rest)?;
+    let (rest, properties) =
+        crate::parser::oracle_nom::condition::parse_counter_state_properties(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(properties)),
+            use_lki: false,
+            subject_slot: None,
+        },
+    ))
+}
+
 fn parse_target_pt_threshold_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
-    let parsed = all_consuming(parse_target_pt_threshold_condition)
-        .parse(lower.as_str())
-        .ok()
-        .map(|(_, c)| c);
+    let parsed = all_consuming(alt((
+        parse_target_pt_threshold_condition,
+        parse_target_counter_threshold_condition,
+    )))
+    .parse(lower.as_str())
+    .ok()
+    .map(|(_, c)| c);
     parsed
 }
 
@@ -4442,6 +4585,20 @@ pub(super) fn strip_routed_suffix_conditional(
     } else {
         effect_prefix.to_string()
     };
+
+    // CR 608.2c + CR 109.2: a trailing "if it's a <permanent type>" whose "it"
+    // anaphors an object target declared earlier in the same chain (Forge of
+    // Heroes: "Choose target commander … Put a +1/+1 counter on it if it's a
+    // creature") tests that target, not a revealed card. The membership gate
+    // only claims bare "it" under a battlefield-permanent declared target and a
+    // card-less type phrase, so reveal/zone-change riders ("put that card into
+    // your hand if it's a land") keep the `RevealedHasCardType` reading below.
+    if let Some(cond) = parse_target_type_membership_condition_text(
+        condition_core,
+        ctx.chain_declared_object_target.as_ref(),
+    ) {
+        return (general(cond), effect_text);
+    }
 
     if let Some(cond) = parse_its_a_type_condition(condition_core, ctx) {
         return (general(cond), effect_text);
@@ -9954,11 +10111,38 @@ mod tests {
         assert!(
             parse_target_pt_threshold_condition_text("that creature had power 2 or less").is_none()
         );
-        // Off-axis "has" predicates stay unclaimed: counters (fail-closed
-        // target-has gate), comparatives (comparative gate), bare "it" (source
-        // scope), keywords (keyword gate), and a threshold-less stat.
+        // CR 122.1: counter thresholds are claimed by the counter sibling as a
+        // live `Counters` filter on the same subject.
+        for (text, count) in [
+            ("that creature has a +1/+1 counter on it", 1),
+            ("that creature has three or more +1/+1 counters on it", 3),
+        ] {
+            let condition = parse_target_pt_threshold_condition_text(text)
+                .unwrap_or_else(|| panic!("{text}: must parse"));
+            let AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                use_lki: false,
+                subject_slot: None,
+            } = &condition
+            else {
+                panic!("{text}: expected a live target filter, got {condition:?}");
+            };
+            assert!(
+                matches!(
+                    typed.properties.as_slice(),
+                    [FilterProp::Counters {
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value },
+                        ..
+                    }] if *value == count
+                ),
+                "{text}: {typed:?}"
+            );
+        }
+        // Off-axis "has" predicates stay unclaimed: comparatives (comparative
+        // gate), bare "it" (source scope), keywords (keyword gate), and a
+        // threshold-less stat.
         for text in [
-            "that creature has a +1/+1 counter on it",
             "that creature has greater power than ~",
             "it has power 4 or greater",
             "that creature has flying",

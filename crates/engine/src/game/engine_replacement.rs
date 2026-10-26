@@ -2351,16 +2351,14 @@ pub(super) fn handle_copy_target_choice(
             let post_actions = vec![PendingCounterPostAction::FinishMeldEntry {
                 context: context.clone(),
             }];
-            if let Some(waiting_for) =
-                finish_copy_target_choice_entry(
-                    state,
-                    source_id,
-                    events,
-                    post_actions,
-                    false,
-                    None,
-                )?
-            {
+            if let Some(waiting_for) = finish_copy_target_choice_entry(
+                state,
+                source_id,
+                events,
+                post_actions,
+                false,
+                None,
+            )? {
                 if state.active_counter_additions().is_none() {
                     crate::game::meld::finish_deferred_meld_entry(state, context, events);
                 }

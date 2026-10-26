@@ -1369,6 +1369,49 @@ fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
     );
 }
 
+/// CR 608.2c + CR 109.4: Sandstone Oracle — "choose an opponent. If that player
+/// has more cards in hand than you, draw cards equal to the difference." "That
+/// player" is the opponent chosen this way, in both the gate and the amount.
+#[test]
+fn that_player_after_choose_an_opponent_is_the_chosen_player() {
+    let def = parse_effect_chain(
+        "Choose an opponent. If that player has more cards in hand than you, draw cards equal to the difference.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Choose { .. }),
+        "head is the choice, got {:?}",
+        def.effect
+    );
+    let draw = def.sub_ability.as_ref().expect("draw clause chained");
+    let chosen = PlayerScope::ChosenPlayer { index: 0 };
+    let mut scopes = Vec::new();
+    if let Some(AbilityCondition::QuantityCheck { lhs, rhs, .. }) = &draw.condition {
+        for side in [lhs, rhs] {
+            side.any_ref(&mut |qty| {
+                if let QuantityRef::HandSize { player } = qty {
+                    scopes.push(player.clone());
+                }
+                false
+            });
+        }
+    } else {
+        panic!("expected a hand-size comparison, got {:?}", draw.condition);
+    }
+    assert_eq!(scopes, vec![chosen.clone(), PlayerScope::Controller]);
+    let Effect::Draw { count, .. } = &*draw.effect else {
+        panic!("expected Draw, got {:?}", draw.effect);
+    };
+    let mut count_scopes = Vec::new();
+    count.any_ref(&mut |qty| {
+        if let QuantityRef::HandSize { player } = qty {
+            count_scopes.push(player.clone());
+        }
+        false
+    });
+    assert_eq!(count_scopes, vec![chosen, PlayerScope::Controller]);
+}
+
 /// CR 608.2d: the recipient-less binding channel generalizes past the
 /// possessive axis. Infernal Offering's "You and that player each sacrifice a
 /// creature" has no `TargetFilter` recipient slot on `Effect::Sacrifice` either,
@@ -14013,7 +14056,9 @@ fn effect_copy_it_for_each_commander_cast_sets_repeat_for() {
     assert!(matches!(
         def.repeat_for,
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::CommanderCastFromCommandZoneCount
+            qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            }
         })
     ));
 }
@@ -71606,12 +71651,12 @@ fn lost_isle_calling_second_sentence_stays_swallowed() {
 /// "Bring Low deals 3 damage to target creature. If that creature has a
 /// +1/+1 counter on it, Bring Low deals 5 damage to it instead." — present
 /// tense `has` is the target-gated replacement class, untouched by the new
-/// PAST-tense `had` branch. Its counter gate is not a keyword, so the "if that
-/// creature has" owner fails the rider closed (CR 608.2c) instead of emitting
-/// an inert `TargetHasKeywordInstead{Unknown}` that read as supported; it must
-/// still never be captured as an additive `ChainRootTarget`-gated clause.
+/// PAST-tense `had` branch. Its counter gate lowers through the target
+/// counter-threshold recognizer to a `ConditionInstead` swap (never an inert
+/// `TargetHasKeywordInstead{Unknown}`), and it must still never be captured as
+/// an additive `ChainRootTarget`-gated clause.
 #[test]
-fn bring_low_replacement_rider_fails_closed() {
+fn bring_low_replacement_rider_lowers_to_instead_counter_gate() {
     let parsed = parse_oracle_text(
         "Bring Low deals 3 damage to target creature. If that creature has a +1/+1 \
          counter on it, Bring Low deals 5 damage to it instead.",
@@ -71641,12 +71686,33 @@ fn bring_low_replacement_rider_fails_closed() {
         .sub_ability
         .as_deref()
         .expect("Bring Low's replacement rider must still be represented");
+    // CR 614.1a + CR 122.1: the counter gate lowers to an "instead" swap gated
+    // on a live counter test of the targeted creature — 5 damage replaces the 3,
+    // never an additive 3+5.
     assert!(
         matches!(
             &*sub.effect,
-            Effect::Unimplemented { name, .. } if name == "target_has_unknown_keyword_condition"
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                ..
+            }
         ),
-        "the non-keyword gate must fail closed, got {sub:#?}"
+        "the rider deals 5 instead, got {sub:#?}"
+    );
+    assert!(
+        matches!(
+            &sub.condition,
+            Some(AbilityCondition::ConditionInstead { inner })
+                if matches!(
+                    inner.as_ref(),
+                    AbilityCondition::TargetMatchesFilter {
+                        filter: TargetFilter::Typed(typed),
+                        use_lki: false,
+                        ..
+                    } if matches!(typed.properties.as_slice(), [FilterProp::Counters { .. }])
+                )
+        ),
+        "the rider must be an instead swap on the target's counters, got {sub:#?}"
     );
     fn unimplemented_names(def: &AbilityDefinition, out: &mut Vec<String>) {
         if let Effect::Unimplemented { name, .. } = &*def.effect {
@@ -71661,11 +71727,7 @@ fn bring_low_replacement_rider_fails_closed() {
     }
     let mut names = Vec::new();
     unimplemented_names(ability, &mut names);
-    assert_eq!(
-        names,
-        vec!["target_has_unknown_keyword_condition".to_string()],
-        "the rider must be the only Unimplemented node: {ability:#?}"
-    );
+    assert!(names.is_empty(), "no gap may remain: {ability:#?}");
     fn tree_mentions_chain_root_target(def: &AbilityDefinition) -> bool {
         let self_hit = matches!(
             &def.condition,
@@ -88980,4 +89042,576 @@ fn cast_permission_rider_requires_the_lingering_shape() {
             "{text:?}: the rider stays an explicit gap, got {abilities:?}"
         );
     }
+}
+
+/// CR 608.2c + CR 400.7j: Necromantic Selection — "Destroy all creatures, then
+/// return a creature card put into a graveyard this way to the battlefield under
+/// your control." The returned card must come from the cards this spell put into
+/// a graveyard (the chain's tracked set), never a card already there.
+#[test]
+fn return_card_put_into_a_graveyard_this_way_reads_the_tracked_set() {
+    let def = parse_effect_chain(
+        "Destroy all creatures, then return a creature card put into a graveyard this way \
+         to the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::DestroyAll { .. }),
+        "head is the destroy, got {:?}",
+        def.effect
+    );
+    let ret = def.sub_ability.as_ref().expect("return clause chained");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*ret.effect
+    else {
+        panic!("expected ChangeZone, got {:?}", ret.effect);
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    // The tracked set may be intersected with the graveyard zone filter the
+    // return's origin adds.
+    let tracked = match target {
+        TargetFilter::And { filters } => filters
+            .iter()
+            .find(|f| matches!(f, TargetFilter::TrackedSetFiltered { .. }))
+            .unwrap_or_else(|| panic!("return target must read the tracked set, got {target:?}")),
+        other => other,
+    };
+    let TargetFilter::TrackedSetFiltered {
+        filter, caused_by, ..
+    } = tracked
+    else {
+        panic!("return target must be the tracked set, got {target:?}");
+    };
+    assert_eq!(*caused_by, None);
+    assert!(
+        matches!(&**filter, TargetFilter::Typed(typed)
+            if typed.type_filters.contains(&TypeFilter::Creature)),
+        "the tracked set is narrowed to creature cards, got {filter:?}"
+    );
+}
+
+/// The relative-clause form "that was put into a graveyard this way" reads the
+/// same tracked set.
+#[test]
+fn card_that_was_put_into_a_graveyard_this_way_reads_the_tracked_set() {
+    let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(
+        "creature card that was put into a graveyard this way",
+    );
+    assert_eq!(rest.trim(), "");
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::TrackedSetFiltered {
+                caused_by: None,
+                ..
+            }
+        ),
+        "got {filter:?}"
+    );
+}
+
+/// CR 708.2 + CR 608.2c + CR 120.1: Showstopping Surprise — "Choose target
+/// creature you control. Turn it face up if it's face down. Then it deals
+/// damage equal to its power to each other creature." "If it's face down"
+/// tests the target, and that conditional clause doesn't hide the target from
+/// the damage clause: the chosen creature is the source of the damage.
+#[test]
+fn turn_it_face_up_if_face_down_keeps_the_damage_source_bound() {
+    let def = parse_effect_chain(
+        "Choose target creature you control. Turn it face up if it's face down. \
+         Then it deals damage equal to its power to each other creature.",
+        AbilityKind::Spell,
+    );
+    let turn = def.sub_ability.as_ref().expect("turn face up chained");
+    assert!(
+        matches!(
+            &*turn.effect,
+            Effect::TurnFaceUp {
+                target: TargetFilter::ParentTarget
+            }
+        ),
+        "got {:?}",
+        turn.effect
+    );
+    assert!(
+        matches!(
+            &turn.condition,
+            Some(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                ..
+            }) if typed.properties.contains(&FilterProp::FaceDown)
+        ),
+        "got {:?}",
+        turn.condition
+    );
+    let damage = turn.sub_ability.as_ref().expect("damage chained");
+    let Effect::DamageAll { damage_source, .. } = &*damage.effect else {
+        panic!("expected DamageAll, got {:?}", damage.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+}
+
+/// CR 608.2c + CR 608.2h: Spell Swindle — "Counter target spell. Create X
+/// Treasure tokens, where X is that spell's mana value." Outside a trigger,
+/// "that spell" is the countered target, not a trigger event's object.
+#[test]
+fn that_spells_mana_value_after_counter_target_spell_reads_the_target() {
+    let def = parse_effect_chain(
+        "Counter target spell. Create X Treasure tokens, where X is that spell's mana value.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Counter { .. }),
+        "got {:?}",
+        def.effect
+    );
+    let token = def.sub_ability.as_ref().expect("token clause chained");
+    let Effect::Token { count, .. } = &*token.effect else {
+        panic!("expected Token, got {:?}", token.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target
+            }
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Commander-corpus gap shapes: whole-card parses with no `Unimplemented` node.
+// ---------------------------------------------------------------------------
+
+fn corpus_card(text: &str, name: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
+    let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+    parse_oracle_text(text, name, &[], &types, &[])
+}
+
+fn corpus_assert_no_unimplemented(parsed: &crate::parser::oracle::ParsedAbilities) {
+    let json = serde_json::to_string(&(&parsed.abilities, &parsed.triggers, &parsed.statics))
+        .expect("serialize");
+    assert!(!json.contains("Unimplemented"), "unexpected gap: {json}");
+}
+
+/// CR 608.2c + CR 109.2: "Put A on it if it's a creature and B on it if it's a
+/// planeswalker" is two placement instructions sharing the elided "put", each
+/// gated on the declared target's type. The second gate reads the same object,
+/// not the first instruction, so it is an independent instruction that still
+/// runs when the first gate is false.
+#[test]
+fn forge_of_heroes_conjoined_placements_each_gate_on_the_declared_target() {
+    let parsed = corpus_card(
+        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
+        "Forge of Heroes",
+        &["Land"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let choose = &parsed.abilities[1];
+    let plus_one = choose.sub_ability.as_deref().expect("+1/+1 placement");
+    assert!(matches!(
+        plus_one.effect.as_ref(),
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &plus_one.condition,
+        Some(AbilityCondition::TargetMatchesFilter { filter: TargetFilter::Typed(tf), use_lki: false, .. })
+            if tf.type_filters == vec![TypeFilter::Creature]
+    ));
+    let loyalty = plus_one.sub_ability.as_deref().expect("loyalty placement");
+    assert!(matches!(
+        loyalty.effect.as_ref(),
+        Effect::PutCounter {
+            counter_type: CounterType::Loyalty,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &loyalty.condition,
+        Some(AbilityCondition::TargetMatchesFilter { filter: TargetFilter::Typed(tf), .. })
+            if tf.type_filters == vec![TypeFilter::Planeswalker]
+    ));
+    assert_eq!(
+        loyalty.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert_eq!(
+        loyalty.sibling_condition,
+        crate::types::ability::SiblingCondition::ReplicatedOrBranch
+    );
+}
+
+/// CR 205.2a: "If it's a noncreature, nonland card, …" — the comma joins negated
+/// card types inside one description, so the leading conditional must not split
+/// there, and the gate is "none of these types". Consecutive reveal gates are
+/// independent branches.
+#[test]
+fn druidic_satchel_negated_type_list_gate() {
+    let parsed = corpus_card(
+        "{2}, {T}: Reveal the top card of your library. If it's a creature card, create a 1/1 green Saproling creature token. If it's a land card, put that card onto the battlefield under your control. If it's a noncreature, nonland card, you gain 2 life.",
+        "Druidic Satchel",
+        &["Artifact"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let mut node = parsed.abilities[0].sub_ability.as_deref();
+    let mut gates = Vec::new();
+    while let Some(def) = node {
+        gates.push((def.condition.clone(), def.sibling_condition));
+        node = def.sub_ability.as_deref();
+    }
+    assert_eq!(gates.len(), 3, "{gates:?}");
+    assert_eq!(
+        gates[2].0,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature, CoreType::Land],
+                additional_filter: None,
+                subtype_filter: None,
+            }),
+        })
+    );
+    assert_eq!(
+        gates[1].1,
+        crate::types::ability::SiblingCondition::ReplicatedOrBranch
+    );
+    assert_eq!(
+        gates[2].1,
+        crate::types::ability::SiblingCondition::ReplicatedOrBranch
+    );
+}
+
+/// CR 608.2c + CR 205.2a: "If it's a land card or a creature card with mana value
+/// …" — each disjunct is a card description with its own property slot.
+#[test]
+fn nissa_steward_of_elements_disjunctive_card_type_gate() {
+    let parsed = corpus_card(
+        "[0]: Look at the top card of your library. If it's a land card or a creature card with mana value less than or equal to the number of loyalty counters on Nissa, you may put that card onto the battlefield.",
+        "Nissa, Steward of Elements",
+        &["Planeswalker"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let put = parsed.abilities[0].sub_ability.as_deref().expect("put");
+    let Some(AbilityCondition::Or { conditions }) = &put.condition else {
+        panic!("expected Or gate, got {:?}", put.condition);
+    };
+    assert!(matches!(
+        &conditions[0],
+        AbilityCondition::RevealedHasCardType { card_types, additional_filter: None, .. }
+            if card_types == &vec![CoreType::Land]
+    ));
+    assert!(matches!(
+        &conditions[1],
+        AbilityCondition::RevealedHasCardType { card_types, additional_filter: Some(FilterProp::Cmc { comparator: Comparator::LE, .. }), .. }
+            if card_types == &vec![CoreType::Creature]
+    ));
+}
+
+/// CR 903.8 + CR 107.1: "draws X cards plus an additional card for each time
+/// they've cast a commander from the command zone this game" — the head count
+/// plus the target player's command-zone casts.
+#[test]
+fn commanders_insight_plus_additional_for_each_commander_cast() {
+    let parsed = corpus_card(
+        "Target player draws X cards plus an additional card for each time they've cast a commander from the command zone this game.",
+        "Commander's Insight",
+        &["Sorcery"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let Effect::Draw { count, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("expected Draw, got {:?}", parsed.abilities[0].effect);
+    };
+    assert_eq!(
+        count,
+        &QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                        player: PlayerScope::Target,
+                    }
+                },
+            ],
+        }
+    );
+}
+
+/// CR 903.3 + CR 903.8 + CR 601.2f: "Your commander costs {1} less to cast for
+/// each time it's been cast from the command zone this game."
+#[test]
+fn myth_unbound_commander_cost_reduction_per_command_zone_cast() {
+    let parsed = corpus_card(
+        "Your commander costs {1} less to cast for each time it's been cast from the command zone this game.\nWhenever your commander is put into the command zone from anywhere, draw a card.",
+        "Myth Unbound",
+        &["Enchantment"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let crate::types::statics::StaticMode::ModifyCost {
+        spell_filter,
+        dynamic_count,
+        ..
+    } = &parsed.statics[0].mode
+    else {
+        panic!("expected ModifyCost, got {:?}", parsed.statics[0].mode);
+    };
+    assert!(matches!(
+        spell_filter,
+        Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::IsCommander)
+    ));
+    assert_eq!(
+        dynamic_count,
+        &Some(QuantityRef::CommanderCastFromCommandZoneCount {
+            player: PlayerScope::Controller,
+        })
+    );
+}
+
+/// CR 122.1 + CR 608.2c: "put A on X and B on Y" — the bare second conjunct
+/// re-acquires the elided "put", for targeted and mass placements alike.
+#[test]
+fn elided_put_counter_conjuncts_split_into_placements() {
+    let parsed = corpus_card(
+        "At the beginning of your upkeep, put three +1/+1 counters on target creature you control and three +1/+1 counters on target creature an opponent controls.",
+        "Evolutionary Escalation",
+        &["Enchantment"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let first = parsed.triggers[0].execute.as_deref().expect("first");
+    let second = first.sub_ability.as_deref().expect("second");
+    assert!(matches!(
+        second.effect.as_ref(),
+        Effect::PutCounter { target: TargetFilter::Typed(tf), .. }
+            if tf.controller == Some(ControllerRef::Opponent)
+    ));
+
+    let parsed = corpus_card(
+        "[−9]: Put five +1/+1 counters on each creature you control and five loyalty counters on each other planeswalker you control.",
+        "Ajani Unyielding",
+        &["Planeswalker"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let first = &parsed.abilities[0];
+    assert!(matches!(
+        first.effect.as_ref(),
+        Effect::PutCounterAll { .. }
+    ));
+    let second = first.sub_ability.as_deref().expect("loyalty placement");
+    assert!(matches!(
+        second.effect.as_ref(),
+        Effect::PutCounterAll {
+            counter_type: CounterType::Loyalty,
+            ..
+        }
+    ));
+}
+
+/// CR 400.7 + CR 109.4: "each creature that entered the battlefield under your
+/// control this turn" — the "this turn" belongs to the relative clause, not to
+/// an effect duration.
+#[test]
+fn shaile_entered_under_your_control_this_turn_filter() {
+    let parsed = corpus_card(
+        "{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.",
+        "Shaile, Dean of Radiance",
+        &["Creature"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let def = &parsed.abilities[0];
+    let Effect::PutCounterAll {
+        target: TargetFilter::Typed(tf),
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected PutCounterAll, got {:?}", def.effect);
+    };
+    assert!(tf.properties.contains(&FilterProp::EnteredThisTurn));
+    assert!(def.duration.is_none());
+}
+
+/// CR 205.1b + CR 613.1d/e: the contracted plural copula "They're black Zombies
+/// in addition to their other colors and types" adds the color and subtype.
+#[test]
+fn theyre_additive_type_clause_adds_color_and_subtype() {
+    let parsed = corpus_card(
+        "{T}, Remove three study counters from Grimoire of the Dead and sacrifice it: Put all creature cards from all graveyards onto the battlefield under your control. They're black Zombies in addition to their other colors and types.",
+        "Grimoire of the Dead",
+        &["Artifact"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let json = serde_json::to_string(&parsed.abilities).expect("serialize");
+    assert!(json.contains("\"AddColor\""), "{json}");
+    assert!(json.contains("\"Zombie\""), "{json}");
+}
+
+/// CR 109.5 + CR 109.4: "for each opponent who controls fewer creatures than
+/// you" counts the opponents whose creature count is below the controller's.
+#[test]
+fn voice_of_many_counts_opponents_with_fewer_creatures() {
+    let parsed = corpus_card(
+        "When this creature enters, draw a card for each opponent who controls fewer creatures than you.",
+        "Voice of Many",
+        &["Creature"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let Effect::Draw { count, .. } = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .unwrap()
+        .effect
+        .as_ref()
+    else {
+        panic!("expected Draw");
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    comparator: Comparator::LT,
+                    ..
+                }
+            }
+        }
+    ));
+}
+
+/// CR 608.2c + CR 109.5: a leading "Then for each opponent who …," iterates a
+/// count when the body names no per-player anaphor.
+#[test]
+fn then_for_each_opponent_attribute_prefix_repeats_body() {
+    let parsed = corpus_card(
+        "At the beginning of your end step, each opponent loses 2 life. Then for each opponent who has less life than you, create a 1/3 black Demon creature token.",
+        "Test Card",
+        &["Creature"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let json = serde_json::to_string(&parsed.triggers).expect("serialize");
+    assert!(json.contains("\"PlayerAttribute\""), "{json}");
+}
+
+/// CR 708.2 + CR 608.2c: a trailing "if it's face down" on the declared target
+/// tests that object's face-down status.
+#[test]
+fn showstopping_surprise_face_down_gate_on_declared_target() {
+    let parsed = corpus_card(
+        "Choose target creature you control. Turn it face up if it's face down. Then it deals damage equal to its power to each other creature.",
+        "Showstopping Surprise",
+        &["Instant"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let turn_face_up = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("turn face up");
+    assert!(matches!(
+        turn_face_up.effect.as_ref(),
+        Effect::TurnFaceUp {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &turn_face_up.condition,
+        Some(AbilityCondition::TargetMatchesFilter { filter: TargetFilter::Typed(tf), use_lki: false, .. })
+            if tf.properties == vec![FilterProp::FaceDown]
+    ));
+}
+
+/// CR 122.1 + CR 608.2c: "Then if that creature has three or more +1/+1
+/// counters on it, …" gates on the earlier instruction's target's counters.
+#[test]
+fn hadanas_climb_counter_threshold_gate() {
+    let parsed = corpus_card(
+        "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has three or more +1/+1 counters on it, transform Hadana's Climb.",
+        "Hadana's Climb",
+        &["Enchantment"],
+    );
+    corpus_assert_no_unimplemented(&parsed);
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    let transform = execute.sub_ability.as_deref().expect("transform");
+    assert!(matches!(
+        &transform.condition,
+        Some(AbilityCondition::TargetMatchesFilter { filter: TargetFilter::Typed(tf), use_lki: false, .. })
+            if matches!(
+                tf.properties.as_slice(),
+                [FilterProp::Counters {
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }]
+            )
+    ));
+}
+
+/// CR 208.4b: Curie's printed damage trigger draws from base power, independent
+/// of power modifications and counters. The copy ability is outside this test.
+#[test]
+fn curie_damage_trigger_draw_uses_source_base_power() {
+    let parsed = corpus_card(
+        "Whenever Curie deals combat damage to a player, draw cards equal to its base power.",
+        "Curie, Emergent Intelligence",
+        &["Creature"],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    corpus_assert_no_unimplemented(&parsed);
+    assert!(matches!(
+        parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("draw")
+            .effect
+            .as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::BasePower {
+                    scope: ObjectScope::Source
+                }
+            },
+            ..
+        }
+    ));
+}
+
+/// CR 608.2i + CR 111.1: retain both the entry-event player and the nontoken
+/// predicate through Gyome's complete printed end-step trigger.
+#[test]
+fn gyome_token_count_carries_nontoken_entry_history() {
+    let parsed = corpus_card(
+        "At the beginning of your end step, create a number of Food tokens equal to the number of nontoken creatures you had enter the battlefield under your control this turn.",
+        "Gyome, Master Chef",
+        &["Creature"],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    corpus_assert_no_unimplemented(&parsed);
+    let Effect::Token { count, .. } = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("create Food")
+        .effect
+        .as_ref()
+    else {
+        panic!("expected Food creation");
+    };
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::NonToken]),
+                ),
+            },
+        }
+    );
 }

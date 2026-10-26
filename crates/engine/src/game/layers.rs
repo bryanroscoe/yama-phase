@@ -575,7 +575,8 @@ fn permission_scope_is_keyable(scope: &PlayerScope) -> bool {
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
-        | PlayerScope::SourceChosenPlayer => false,
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. } => false,
     }
 }
 
@@ -609,7 +610,8 @@ fn permission_scope_selects(
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
-        | PlayerScope::SourceChosenPlayer => false,
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. } => false,
     }
 }
 
@@ -1491,6 +1493,7 @@ impl ConditionContext {
             | PlayerScope::AllPlayers { .. }
             | PlayerScope::ParentObjectTargetController
             | PlayerScope::SourceChosenPlayer
+            | PlayerScope::ChosenPlayer { .. }
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
         }
@@ -1581,6 +1584,7 @@ fn designation_player(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => None,
     }
@@ -3132,6 +3136,14 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
         .flat_map(|p| p.hand.iter().copied())
         .collect();
     for id in hand_ids {
+        // A hand object already at its base keywords is left as it is, so a
+        // cloned state keeps sharing it rather than copying it to rewrite the
+        // same value.
+        if state.objects.get(&id).is_some_and(|obj| {
+            obj.base_characteristics_initialized && obj.keywords == obj.base_keywords
+        }) {
+            continue;
+        }
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
             obj.keywords = obj.base_keywords.clone();
@@ -3197,6 +3209,15 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
         )
         .collect();
     for (id, base) in stack_bases {
+        // As for the hand: a stack object the reset below would not change is
+        // left shared.
+        if state.objects.get(&id).is_some_and(|obj| {
+            obj.base_characteristics_initialized
+                && obj.keywords == obj.base_keywords
+                && (obj.zone != Zone::Stack || obj.controller == base)
+        }) {
+            continue;
+        }
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
             obj.keywords = obj.base_keywords.clone(); // pre-existing, unchanged
@@ -4032,7 +4053,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::CostXPaid
         | QuantityRef::CounterAddedThisTurn { .. }
@@ -4371,7 +4392,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => false,
     }
@@ -7161,39 +7182,19 @@ pub(crate) fn for_each_static_effect_source(
     // (CR 604.3) rather than through an opt-in `active_zones` list.
     // `active_continuous_effects_from_static_definitions` applies the
     // zone-of-function gate per-static (including the CDA all-zones rule via
-    // `static_functions_in_zone`), so scanning every object outside the
+    // `static_functions_in_zone`), so visiting every such object outside the
     // battlefield / command-zone passes already covered above is safe:
     // battlefield-default statics filter themselves out.
-    for obj in state.objects.values() {
-        // Battlefield objects were already processed above (phased-out gate
-        // included). Command-zone sources (emblems, face-up conspiracies, and
-        // active planes/phenomena that opt in) were fully handled by the two
-        // command loops above via `object_sources_static_from_command_zone`, so
-        // the `Command` arm skips here to avoid double-visiting (CR 114.4).
-        match obj.zone {
-            crate::types::zones::Zone::Battlefield | crate::types::zones::Zone::Command => continue,
-            _ => {}
+    //
+    // `GameObject::may_source_statics_off_battlefield` is the admission (zone
+    // other than battlefield and command, which the loops above cover; phased
+    // in; an opt-in-zone static or a CDA). The object store keeps the admitted
+    // ids in its own iteration order until it is next written, so a gather does
+    // not walk every object in every library and hand to find them.
+    for id in state.objects.off_battlefield_static_source_ids().iter() {
+        if let Some(obj) = state.objects.get(id) {
+            visit(state, obj);
         }
-        if obj.is_phased_out() {
-            continue;
-        }
-        // Cheap pre-check: only scan objects that carry at least one
-        // opt-in-zone static OR a characteristic-defining ability. Avoids
-        // iterating libraries/hands full of ordinary cards on every layer
-        // recomputation. A CDA (`characteristic_defining`) must be included
-        // here even though it typically carries an empty `active_zones` list
-        // (CR 604.3: CDAs function in all zones by definition, not by opt-in
-        // list) — otherwise a source whose ONLY static is a bare CDA would
-        // never even reach `active_continuous_effects_from_static_definitions`
-        // to have that CDA evaluated off-battlefield.
-        if !obj
-            .static_definitions
-            .iter_all()
-            .any(|def| !def.active_zones.is_empty() || def.characteristic_defining)
-        {
-            continue;
-        }
-        visit(state, obj);
     }
 }
 
@@ -7256,6 +7257,118 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
         StaticZoneAdmission::PreFilteredBaseStatic,
         &mut GatherPass::matching(keep),
     )
+}
+
+/// The first part of [`collect_shared_active_continuous_effects_matching`]:
+/// the functioning static sources, narrowed to the modifications `keep`
+/// accepts, with what that part had to evaluate. The gather is this part, then
+/// [`collect_live_transient_effects_matching`], then
+/// [`collect_ring_emblem_effects_matching`], each run with its own pass; a
+/// pass's dependence only records what it evaluated, so the three parts
+/// concatenated are that gather element for element.
+pub(crate) fn collect_static_source_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> (Vec<ActiveContinuousEffect>, GatherDependence) {
+    let mut pass = GatherPass::matching(keep);
+    let mut effects = Vec::new();
+    for_each_static_effect_source(state, |state, obj| {
+        effects.extend(static_source_effects_in_pass(state, obj, &mut pass));
+    });
+    (effects, pass.into_dependence())
+}
+
+/// The second part of [`collect_shared_active_continuous_effects_matching`]:
+/// the live stored transients, narrowed to the modifications `keep` accepts.
+/// See [`collect_static_source_effects_matching`].
+pub(crate) fn collect_live_transient_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> (Vec<ActiveContinuousEffect>, GatherDependence) {
+    let mut pass = GatherPass::matching(keep);
+    let mut effects = Vec::new();
+    gather_transient_continuous_effects_with(
+        state,
+        &mut effects,
+        transient_effect_is_live,
+        &mut pass,
+    );
+    (effects, pass.into_dependence())
+}
+
+/// The last part of [`collect_shared_active_continuous_effects_matching`]: the
+/// Ring emblem's effects, if `keep` accepts their modification. Evaluates no
+/// filter or condition. See [`collect_static_source_effects_matching`].
+pub(crate) fn collect_ring_emblem_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> Vec<ActiveContinuousEffect> {
+    let mut effects = Vec::new();
+    gather_ring_emblem_continuous_effects(
+        state,
+        &mut effects,
+        ModificationAdmission::Matching(keep),
+    );
+    effects
+}
+
+/// The transient half of [`collect_shared_active_continuous_effects_matching`],
+/// read from the stored transients alone: every modification that could yield
+/// an effect `keep` accepts, whether or not the transient is live, paired with
+/// the one object the effect can apply to when the transient's affected filter
+/// names it ([`TargetFilter::SpecificObject`] matches that id alone). A
+/// modification a granted static would donate to its hosts' recipients names
+/// no object. Evaluates no liveness, condition or filter, so it is a
+/// conservative superset of the transient effects any gather can keep.
+pub(crate) fn transient_modifications_reaching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> Vec<(&ContinuousModification, Option<ObjectId>)> {
+    let mut reaching = Vec::new();
+    for tce in &state.transient_continuous_effects {
+        let recipient = match &tce.affected {
+            TargetFilter::SpecificObject { id } => Some(*id),
+            _ => None,
+        };
+        for modification in &tce.modifications {
+            if keep(modification) {
+                reaching.push((modification, recipient));
+            } else if let ContinuousModification::GrantStaticAbility { definition: inner } =
+                modification
+            {
+                reaching.extend(
+                    inner
+                        .modifications
+                        .iter()
+                        .filter(|granted| keep(granted))
+                        .map(|granted| (granted, None)),
+                );
+            }
+        }
+    }
+    reaching
+}
+
+/// Whether [`active_continuous_effects_from_base_static_source`] could return
+/// any effect for `source` under `keep`, decided from the definitions alone:
+/// that builder admits only the definitions this one admits, and produces an
+/// effect only for a modification that is not skipped and that
+/// [`ModificationAdmission::reaches_admitted`] accepts. A `false` is exact; a
+/// `true` may still produce nothing once conditions and filters are read.
+pub(crate) fn base_static_source_may_reach(
+    source: &crate::game::game_object::GameObject,
+    keep: fn(&ContinuousModification) -> bool,
+) -> bool {
+    let admission = ModificationAdmission::Matching(keep);
+    source
+        .base_static_definitions
+        .iter()
+        .filter(|def| base_static_can_source_off_zone_keyword_query(def, source.zone))
+        .any(|def| {
+            def.modifications.iter().any(|modification| {
+                !continuous_gather_skips(modification) && admission.reaches_admitted(modification)
+            })
+        })
 }
 
 fn base_static_can_source_off_zone_keyword_query(
@@ -11369,7 +11482,6 @@ fn apply_continuous_effect_filtered(
     } else {
         None
     };
-    let all_creature_types = state.all_creature_types.clone();
     // CR 201.5a: a granted body's by-name references bind to the granting object.
     let granter = state
         .objects
@@ -11757,7 +11869,8 @@ fn apply_continuous_effect_filtered(
                     modification,
                     chosen_subtype.as_deref(),
                     chosen_color,
-                    &all_creature_types,
+                    // Read in place: `obj` borrows only `state.objects`.
+                    &state.all_creature_types,
                 );
                 debug_assert_eq!(applied, TypeColorModification::Applied);
             }

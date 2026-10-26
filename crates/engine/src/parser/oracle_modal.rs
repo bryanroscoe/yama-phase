@@ -12,7 +12,7 @@ use crate::types::ability::{
     AdditionalCostPaymentSource, ChoiceType, ControllerRef, Effect, ModalChoice,
     ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, QuantityExpr, QuantityRef,
     ReplacementDefinition, StaticCondition, TargetFilter, TargetSelectionMode, TriggerCondition,
-    TypedFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -2381,6 +2381,22 @@ fn guard_unsupported_mode_qualifiers(
     parsed
 }
 
+/// CR 205.2a + CR 205.3: whether a counter-placement filter kept a relative
+/// "that's a X or Y" narrowing — as `Or` branches (a pure card-type list) or a
+/// `TypeFilter::AnyOf` adjective (a subtype or mixed card-type/subtype list,
+/// Ao, the Dawn Sky: "each permanent you control that's a creature or
+/// Vehicle"). Only a filter without either can have silently dropped it.
+fn carries_relative_type_disjunction(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { .. } => true,
+        TargetFilter::Typed(typed) => typed
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::AnyOf(_))),
+        _ => false,
+    }
+}
+
 /// IR-native qualifier guard for the modal migration. It inspects every parsed
 /// clause against its enclosing mode source; it never lowers an `AbilityIr`
 /// merely to decide whether a restrictive qualifier was swallowed.
@@ -2393,10 +2409,13 @@ fn guard_unsupported_mode_qualifiers_ir(
     let has_unsupported_qualifier = ability.body.clauses.iter().any(|clause| {
         let dig_with_total_mv = matches!(&clause.parsed.effect, Effect::Dig { .. })
             && nom_primitives::scan_contains(&lower, "with total mana value");
-        let put_counter_with_thats_a = matches!(
-            &clause.parsed.effect,
-            Effect::PutCounterAll { .. } | Effect::PutCounter { .. }
-        ) && nom_primitives::scan_contains(&lower, "that's a ");
+        let put_counter_with_thats_a = match &clause.parsed.effect {
+            Effect::PutCounterAll { target, .. } | Effect::PutCounter { target, .. } => {
+                nom_primitives::scan_contains(&lower, "that's a ")
+                    && !carries_relative_type_disjunction(target)
+            }
+            _ => false,
+        };
         dig_with_total_mv || put_counter_with_thats_a
     });
 
@@ -4318,28 +4337,40 @@ mod tests {
     }
 
     #[test]
-    fn ao_mode_bodies_guarded_as_unimplemented() {
-        // Both modes carry filter qualifiers the parser silently drops:
-        //   - mode 1: "with total mana value 4 or less" (no budgeted-selection
-        //     primitive yet; Dig would otherwise admit unlimited-MV cards).
-        //   - mode 2: "that's a creature or Vehicle" (relative clause dropped;
-        //     PutCounterAll would otherwise apply to every permanent you
-        //     control, not just creatures/Vehicles).
-        // CR 700.2 requires the mode effect to faithfully match printed text;
-        // the guard replaces each mode with Effect::Unimplemented preserving
-        // the original body for coverage reporting.
+    fn ao_mode_bodies_guard_only_the_dropped_qualifier() {
+        // Mode 1 carries "with total mana value 4 or less", which has no
+        // budgeted-selection primitive yet (Dig would otherwise admit
+        // unlimited-MV cards), so CR 700.2 keeps it guarded as Unimplemented.
+        // Mode 2's "that's a creature or Vehicle" is now lowered (CR 205.2a +
+        // CR 205.3: a mixed card-type/subtype `AnyOf` adjective), so the
+        // PutCounterAll keeps the narrowing and is not guarded.
         let parsed = parse_oracle_text(AO_ORACLE, "Ao, the Dawn Sky", &[], &[], &[]);
         let execute = parsed.triggers[0]
             .execute
             .as_deref()
             .expect("trigger execute");
-        for mode in &execute.mode_abilities {
-            assert!(
-                matches!(*mode.effect, Effect::Unimplemented { .. }),
-                "mode should be guarded as Unimplemented: {:?}",
-                mode.effect
-            );
-        }
+        let [dig_mode, counter_mode] = execute.mode_abilities.as_slice() else {
+            panic!("expected two modes: {:?}", execute.mode_abilities);
+        };
+        assert!(
+            matches!(*dig_mode.effect, Effect::Unimplemented { .. }),
+            "mode 1 should be guarded as Unimplemented: {:?}",
+            dig_mode.effect
+        );
+        let Effect::PutCounterAll { target, .. } = &*counter_mode.effect else {
+            panic!("mode 2 should be PutCounterAll: {:?}", counter_mode.effect);
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected a typed filter: {target:?}");
+        };
+        assert!(
+            typed.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                crate::types::ability::TypeFilter::AnyOf(legs) if legs.len() == 2
+            )),
+            "creature-or-Vehicle narrowing must survive: {typed:?}"
+        );
+        assert_eq!(typed.controller, Some(ControllerRef::You));
     }
 
     const RUINOUS_ORACLE: &str = "The Ruinous Wrecking Crew enters with X +1/+1 counters on it.\n\
