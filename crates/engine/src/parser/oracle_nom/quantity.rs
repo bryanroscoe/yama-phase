@@ -33,9 +33,9 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, AttachmentReferent, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
-    DamageGroupKey, DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
-    PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
+    DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
+    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
     ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4150,21 +4150,6 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
                 channel: DamageChannel::Total,
             },
             tag("damage dealt to target opponent this turn"),
-        ),
-        // CR 120.9: "the greatest amount of damage dealt by a source to a
-        // permanent or player this turn" (Impact Resonance) — group the turn's
-        // damage records by source, sum each source's damage, take the largest.
-        value(
-            QuantityRef::DamageDealtThisTurn {
-                source: Box::new(TargetFilter::Any),
-                target: Box::new(TargetFilter::Any),
-                aggregate: AggregateFunction::Max,
-                group_by: Some(DamageGroupKey::SourceId),
-                damage_kind: DamageKindFilter::Any,
-
-                channel: DamageChannel::Total,
-            },
-            tag("greatest amount of damage dealt by a source to a permanent or player this turn"),
         ),
         parse_damage_dealt_to_object_by_controlled_sources,
     ))
@@ -14953,22 +14938,51 @@ mod corpus_quantity_tests {
         }
     }
 
-    /// CR 120.9: the largest single-source damage total this turn.
+    /// CR 120.1 + CR 608.2c: the source-to-recipient maximum cannot be
+    /// represented by summing each source's damage across all recipients.
     #[test]
-    fn greatest_damage_by_a_source_groups_by_source() {
-        let (rest, qty) = parse_quantity_ref(
+    fn source_recipient_damage_maximum_stays_unsupported() {
+        for text in [
             "the greatest amount of damage dealt by a source to a permanent or player this turn",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
-        assert!(matches!(
-            qty,
-            QuantityRef::DamageDealtThisTurn {
-                aggregate: AggregateFunction::Max,
-                group_by: Some(DamageGroupKey::SourceId),
-                ..
-            }
-        ));
+            "greatest amount of damage dealt by a source to a permanent or player this turn",
+        ] {
+            assert!(parse_quantity_ref_complete(text).is_err(), "{text}");
+            assert!(parse_damage_dealt_this_turn_ref(text).is_err(), "{text}");
+        }
+
+        for (text, controller, damage_kind) in [
+            (
+                "damage dealt to target opponent this turn",
+                ControllerRef::TargetPlayer,
+                DamageKindFilter::Any,
+            ),
+            (
+                "the total amount of noncombat damage dealt to your opponents this turn",
+                ControllerRef::Opponent,
+                DamageKindFilter::NoncombatOnly,
+            ),
+        ] {
+            let expected = QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::default().controller(controller)),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind,
+                channel: DamageChannel::Total,
+            };
+            let (rest, qty) =
+                parse_damage_dealt_this_turn_ref(text).expect("supported damage total");
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(qty, expected, "{text}");
+            let (rest, qty) = parse_quantity_ref_complete(text).expect("complete supported total");
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(qty, expected, "{text}");
+        }
     }
 
     /// CR 120.1 + CR 608.2i: damage to an object this turn by sources a player

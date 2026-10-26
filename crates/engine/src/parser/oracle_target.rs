@@ -9419,28 +9419,6 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         ("convoked it", FilterProp::ConvokedSource),
     ];
 
-    // CR 400.7 + CR 109.4: "that entered [the battlefield] under your control
-    // this turn" (Shaile, Dean of Radiance) — the object entered this turn and
-    // is controlled by the ability's controller. Before VERB_PHRASES, whose
-    // "entered the battlefield this turn" row would not reach the control axis.
-    if let Ok((rest, _)) = (
-        tag::<_, _, OracleError<'_>>("entered "),
-        opt(tag("the battlefield ")),
-        tag("under your control this turn"),
-    )
-        .parse(after_that)
-    {
-        return Some((
-            vec![
-                FilterProp::EnteredThisTurn,
-                FilterProp::ControllerMatches {
-                    player: Box::new(PlayerFilter::Controller),
-                },
-            ],
-            that_len + after_that.len() - rest.len(),
-        ));
-    }
-
     for (phrase, prop) in VERB_PHRASES {
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(after_that) {
             let total = that_len + phrase.len();
@@ -19770,6 +19748,54 @@ mod tests {
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
         );
+    }
+
+    /// CR 109.5 + CR 608.2c: control at entry qualifies the historical event,
+    /// not the creature's current controller; leave that unsupported tail intact.
+    #[test]
+    fn historical_entry_control_qualifier_is_left_unconsumed() {
+        for (text, tail) in [
+            (
+                "creature that entered the battlefield under your control this turn",
+                "that entered the battlefield under your control this turn",
+            ),
+            (
+                "creature that entered under your control this turn",
+                "that entered under your control this turn",
+            ),
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(text);
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                "recognized creature head for {text:?}"
+            );
+            assert_eq!(rest.trim_start(), tail, "unconsumed qualifier for {text:?}");
+        }
+
+        for (text, controller) in [
+            ("creature that entered the battlefield this turn", None),
+            (
+                "creature you control that entered this turn",
+                Some(ControllerRef::You),
+            ),
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(text);
+            assert_eq!(rest, "", "supported sibling for {text:?}");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller,
+                    properties: vec![FilterProp::EnteredThisTurn],
+                }),
+                "supported sibling for {text:?}"
+            );
+        }
     }
 
     #[test]

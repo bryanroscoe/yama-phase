@@ -17,9 +17,10 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, CardSelectionMode,
     CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    CommanderOwnership, CountBinding, CounterTransferMode, DamageChannel, DamageKindFilter,
+    DigRestOrder, ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
+    VoterScope,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -89416,27 +89417,179 @@ fn elided_put_counter_conjuncts_split_into_placements() {
     ));
 }
 
-/// CR 400.7 + CR 109.4: "each creature that entered the battlefield under your
-/// control this turn" — the "this turn" belongs to the relative clause, not to
-/// an effect duration.
+/// CR 109.5 + CR 608.2c: Shaile qualifies the controller at entry, which
+/// cannot be replaced by a predicate on the creature's current controller.
 #[test]
-fn shaile_entered_under_your_control_this_turn_filter() {
-    let parsed = corpus_card(
-        "{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.",
-        "Shaile, Dean of Radiance",
-        &["Creature"],
-    );
-    corpus_assert_no_unimplemented(&parsed);
+fn shaile_entered_under_your_control_this_turn_stays_explicit_gap() {
+    let text = "Flying, vigilance\n{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.";
+    let parsed = corpus_card(text, "Shaile, Dean of Radiance", &["Creature"]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
     let def = &parsed.abilities[0];
-    let Effect::PutCounterAll {
-        target: TargetFilter::Typed(tf),
-        ..
-    } = def.effect.as_ref()
-    else {
-        panic!("expected PutCounterAll, got {:?}", def.effect);
+    assert_eq!(def.kind, AbilityKind::Activated);
+    let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
+        panic!(
+            "expected a gap on the counter placement, got {:?}",
+            def.effect
+        );
     };
-    assert!(tf.properties.contains(&FilterProp::EnteredThisTurn));
-    assert!(def.duration.is_none());
+    assert_eq!(name, "put_counter_tail");
+    assert_eq!(
+        description.as_deref(),
+        Some("Put a +1/+1 counter on each creature that entered the battlefield under your control this turn")
+    );
+    let face = CardFace {
+        name: "Shaile, Dean of Radiance".to_string(),
+        oracle_text: Some(text.to_string()),
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        ..Default::default()
+    };
+    assert!(card_face_has_unimplemented_parts(&face), "{face:#?}");
+}
+
+/// CR 122.1a + CR 109.5 + CR 608.2c: the count is one +1/+1 counter;
+/// a separate "you control" axis is live, alongside unqualified entry this turn.
+#[test]
+fn live_control_and_unqualified_entry_filters_remain_supported() {
+    for (text, controller) in [
+        (
+            "{T}: Put a +1/+1 counter on each creature that entered the battlefield this turn.",
+            None,
+        ),
+        (
+            "{T}: Put a +1/+1 counter on each creature you control that entered this turn.",
+            Some(ControllerRef::You),
+        ),
+    ] {
+        let parsed = corpus_card(text, "Entry grammar control", &["Creature"]);
+        corpus_assert_no_unimplemented(&parsed);
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+        let def = &parsed.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        let Effect::PutCounterAll {
+            counter_type,
+            count,
+            target,
+        } = def.effect.as_ref()
+        else {
+            panic!("expected supported counter placement for {text:?}, got {def:#?}");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller,
+                properties: vec![FilterProp::EnteredThisTurn],
+            })
+        );
+        assert!(def.duration.is_none(), "{def:#?}");
+    }
+}
+
+/// CR 120.1 + CR 608.2c: an unrepresentable source-to-recipient maximum
+/// must reject the affected where-X operation, even without divided targeting.
+#[test]
+fn unsupported_source_recipient_damage_quantity_reaches_where_x_gap() {
+    let expression =
+        "the greatest amount of damage dealt by a source to a permanent or player this turn";
+    assert_eq!(
+        super::lower::parse_where_x_quantity_expression(expression),
+        None
+    );
+    let parsed = corpus_card(
+        "Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player this turn.",
+        "Unsupported damage quantity isolation",
+        &["Sorcery"],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let def = &parsed.abilities[0];
+    assert_eq!(def.kind, AbilityKind::Spell);
+    let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
+        panic!("expected a where-X gap on the draw instruction, got {def:#?}");
+    };
+    assert_eq!(name, "where_x_binding");
+    assert_eq!(
+        description.as_deref(),
+        Some("where X is the greatest amount of damage dealt by a source to a permanent or player this turn")
+    );
+}
+
+/// CR 120.1 + CR 608.2i: the supported opponent-recipient noncombat total
+/// binds X to the historical sum, without turning the turn scope into a duration.
+#[test]
+fn supported_damage_history_quantity_still_binds_where_x() {
+    let text = "Draw X cards, where X is the total amount of noncombat damage dealt to your opponents this turn.";
+    let parsed = corpus_card(text, "Supported damage quantity control", &["Sorcery"]);
+    corpus_assert_no_unimplemented(&parsed);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let def = &parsed.abilities[0];
+    assert_eq!(def.kind, AbilityKind::Spell);
+    let Effect::Draw { count, .. } = def.effect.as_ref() else {
+        panic!("expected supported draw instruction, got {def:#?}");
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
+                channel: DamageChannel::Total,
+            },
+        }
+    );
+    assert!(def.duration.is_none(), "{def:#?}");
+    let face = CardFace {
+        name: "Supported damage quantity control".to_string(),
+        oracle_text: Some(text.to_string()),
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        ..Default::default()
+    };
+    assert!(!card_face_has_unimplemented_parts(&face), "{face:#?}");
+}
+
+/// CR 120.1 + CR 608.2c: full Impact Resonance remains unsupported;
+/// this does not certify divided targeting, historical grouping, or X timing.
+#[test]
+fn impact_resonance_quantity_remains_explicitly_unsupported() {
+    let text = "Impact Resonance deals X damage divided as you choose among any number of target creatures, where X is the greatest amount of damage dealt by a source to a permanent or player this turn.";
+    let parsed = corpus_card(text, "Impact Resonance", &["Instant"]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let def = &parsed.abilities[0];
+    assert_eq!(def.kind, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "{def:#?}"
+    );
+    let face = CardFace {
+        name: "Impact Resonance".to_string(),
+        oracle_text: Some(text.to_string()),
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        ..Default::default()
+    };
+    assert!(card_face_has_unimplemented_parts(&face), "{face:#?}");
 }
 
 /// CR 205.1b + CR 613.1d/e: the contracted plural copula "They're black Zombies
