@@ -89513,31 +89513,42 @@ fn unsupported_source_recipient_damage_quantity_reaches_where_x_gap() {
         super::lower::parse_where_x_quantity_expression(expression),
         None
     );
-    let parsed = corpus_card(
-        "Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player this turn.",
-        "Unsupported damage quantity isolation",
-        &["Sorcery"],
-    );
+    let text = "Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player this turn.";
+    let parsed = corpus_card(text, "Unsupported damage quantity isolation", &["Sorcery"]);
     assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
     let def = &parsed.abilities[0];
     assert_eq!(def.kind, AbilityKind::Spell);
     let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
         panic!("expected a quantity gap on the draw instruction, got {def:#?}");
     };
-    // The draw count slot rejects the unrepresentable definition before a Draw
-    // is emitted; the imperative fallback records the rejected clause verbatim.
+    // The draw count slot rejects before a Draw is emitted. Even the shell's
+    // original-text retry reaches the inner imperative duration stripper, so
+    // the recorded gap fragment omits "this turn"; it is not the full source.
     assert_eq!(name, "unparsed_quantity");
     assert_eq!(
         description.as_deref(),
-        Some("Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player this turn")
+        Some("Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player")
     );
+    assert_eq!(def.description.as_deref(), Some(text));
+    // Diagnose the complete source separately to retain the full operand.
     assert!(
         matches!(
-            diagnose_clause_gap(description.as_deref().expect("rejected draw clause")),
+            diagnose_clause_gap(text),
             ClauseGap::Quantity { ref operand } if operand == expression
         ),
-        "the gap must identify the rejected maximum: {def:#?}"
+        "the original source must identify the complete rejected maximum: {def:#?}"
     );
+    let face = CardFace {
+        name: "Unsupported damage quantity isolation".to_string(),
+        oracle_text: Some(text.to_string()),
+        abilities: vec![def.clone()],
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        ..Default::default()
+    };
+    assert!(card_face_has_unimplemented_parts(&face), "{face:#?}");
 }
 
 /// CR 120.1 + CR 608.2i: the supported opponent-recipient noncombat total
