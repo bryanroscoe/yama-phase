@@ -48388,11 +48388,7 @@ mod resolution_progress_contract_tests {
             assert_eq!(outcome.state().objects[&card].controller, player);
             assert_eq!(outcome.state().objects[&card].owner, player);
         }
-        assert!(outcome
-            .state()
-            .players
-            .iter()
-            .all(|player| player.exile.is_empty()));
+        assert!(outcome.state().exile.is_empty());
         assert_eq!(outcome.state().battlefield.len(), 3);
         assert!(outcome.state().stack.is_empty());
         assert!(outcome.state().resolution_stack.is_empty());
@@ -48695,8 +48691,25 @@ mod resolution_progress_contract_tests {
             assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
             assert_eq!(runner.state().objects[&id].controller, player);
         }
-        assert_eq!(runner.state().players[0].exile.len(), 2);
-        assert!(runner.state().players[1].exile.is_empty());
+        assert_eq!(runner.state().exile.len(), 2);
+        assert_eq!(
+            runner
+                .state()
+                .exile
+                .iter()
+                .filter(|&&id| runner.state().objects[&id].owner == P0)
+                .count(),
+            2
+        );
+        assert_eq!(
+            runner
+                .state()
+                .exile
+                .iter()
+                .filter(|&&id| runner.state().objects[&id].owner == P1)
+                .count(),
+            0
+        );
         assert!(runner
             .state()
             .pending_player_scope_sacrifice_choice
