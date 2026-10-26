@@ -89423,9 +89423,12 @@ fn elided_put_counter_conjuncts_split_into_placements() {
 fn shaile_entered_under_your_control_this_turn_stays_explicit_gap() {
     let text = "Flying, vigilance\n{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.";
     let parsed = corpus_card(text, "Shaile, Dean of Radiance", &["Creature"]);
-    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
-    let def = &parsed.abilities[0];
-    assert_eq!(def.kind, AbilityKind::Activated);
+    let mut activated = parsed
+        .abilities
+        .iter()
+        .filter(|def| def.kind == AbilityKind::Activated);
+    let def = activated.next().expect("Shaile's counter activation");
+    assert!(activated.next().is_none(), "{parsed:#?}");
     let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
         panic!(
             "expected a gap on the counter placement, got {:?}",
@@ -89435,12 +89438,21 @@ fn shaile_entered_under_your_control_this_turn_stays_explicit_gap() {
     assert_eq!(name, "put_counter_tail");
     assert_eq!(
         description.as_deref(),
-        Some("Put a +1/+1 counter on each creature that entered the battlefield under your control this turn")
+        Some(
+            "Put a +1/+1 counter on each creature that entered the battlefield under your control"
+        )
+    );
+    // The generic duration stripper peels "this turn" from the gap fragment;
+    // the activation's source description must retain the complete qualifier.
+    assert_eq!(
+        def.description.as_deref(),
+        Some("{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.")
     );
     let face = CardFace {
         name: "Shaile, Dean of Radiance".to_string(),
         oracle_text: Some(text.to_string()),
-        abilities: parsed.abilities,
+        // Isolate the affected operation so the keyword-line gap cannot supply proof.
+        abilities: vec![def.clone()],
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
@@ -89510,12 +89522,21 @@ fn unsupported_source_recipient_damage_quantity_reaches_where_x_gap() {
     let def = &parsed.abilities[0];
     assert_eq!(def.kind, AbilityKind::Spell);
     let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
-        panic!("expected a where-X gap on the draw instruction, got {def:#?}");
+        panic!("expected a quantity gap on the draw instruction, got {def:#?}");
     };
-    assert_eq!(name, "where_x_binding");
+    // The draw count slot rejects the unrepresentable definition before a Draw
+    // is emitted; the imperative fallback records the rejected clause verbatim.
+    assert_eq!(name, "unparsed_quantity");
     assert_eq!(
         description.as_deref(),
-        Some("where X is the greatest amount of damage dealt by a source to a permanent or player this turn")
+        Some("Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player this turn")
+    );
+    assert!(
+        matches!(
+            diagnose_clause_gap(description.as_deref().expect("rejected draw clause")),
+            ClauseGap::Quantity { ref operand } if operand == expression
+        ),
+        "the gap must identify the rejected maximum: {def:#?}"
     );
 }
 
