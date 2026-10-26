@@ -8941,7 +8941,7 @@ fn effect_references_tracked_set_for_cause(
 
     // Filter positions — the effect's primary target filter may be TrackedSet.
     if let Some(filter) = effect.target_filter() {
-        if filter_references_tracked_set(filter, producer_cause) {
+        if filter_references_tracked_set_for_cause(filter, producer_cause) {
             return true;
         }
     }
@@ -8951,26 +8951,26 @@ fn effect_references_tracked_set_for_cause(
         // "exile the rest" uses `Not(InTrackedSet)` inside its typed filter;
         // the search choice must publish its chosen set before this effect
         // resolves or that complement would include the chosen cards too.
-        if filter_references_tracked_set(target, producer_cause)
+        if filter_references_tracked_set_for_cause(target, producer_cause)
             || filter_properties_reference_tracked_membership(target)
         {
             return true;
         }
     }
     if let Effect::PutCounterAll { target, .. } = effect {
-        if filter_references_tracked_set(target, producer_cause) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
     if let Effect::SearchLibrary { filter, .. } = effect {
-        if filter_references_tracked_set(filter, producer_cause)
+        if filter_references_tracked_set_for_cause(filter, producer_cause)
             || filter_properties_reference_tracked_quantity(filter, producer_cause)
         {
             return true;
         }
     }
     if let Effect::GoadAll { target } = effect {
-        if filter_references_tracked_set(target, producer_cause) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -8988,7 +8988,7 @@ fn effect_references_tracked_set_for_cause(
         // chosen card as the fresh chain set, the `InTrackedSet(0)` sentinel
         // stays bound to the exile-batch set, and `Not` over the batch empties
         // the window (Plargg and Nassari's cast offer silently skipped).
-        if filter_references_tracked_set(filter, producer_cause)
+        if filter_references_tracked_set_for_cause(filter, producer_cause)
             || filter_properties_reference_tracked_membership(filter)
         {
             return true;
@@ -9000,7 +9000,7 @@ fn effect_references_tracked_set_for_cause(
         ..
     } = effect
     {
-        if filter_references_tracked_set(target, producer_cause) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -9009,7 +9009,7 @@ fn effect_references_tracked_set_for_cause(
     // not spell/ability targets). Inspect directly so "the rest" / "those
     // cards" sub-abilities chained off exile-all effects still record the set.
     if let Effect::GrantCastingPermission { target, .. } = effect {
-        if filter_references_tracked_set(target, producer_cause) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -9018,7 +9018,7 @@ fn effect_references_tracked_set_for_cause(
     // sources). Sin, Spira's Punishment — random exile publishes the set for
     // the chained copy.
     if let Effect::CopyTokenOf { target, .. } = effect {
-        if filter_references_tracked_set(target, producer_cause) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -9032,10 +9032,9 @@ fn effect_references_tracked_set_for_cause(
         // `grant_affects_parent_target`, which the caller applies only when no
         // nearer antecedent intervenes. That function's doc carries why.
         if static_abilities.iter().any(|static_def| {
-            static_def
-                .affected
-                .as_ref()
-                .is_some_and(|filter| filter_references_tracked_set(filter, producer_cause))
+            static_def.affected.as_ref().is_some_and(|filter| {
+                filter_references_tracked_set_for_cause(filter, producer_cause)
+            })
         }) {
             return true;
         }
@@ -9191,7 +9190,11 @@ fn player_filter_references_tracked_set_for_cause(
     }
 }
 
-fn filter_references_tracked_set(
+fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
+    filter_references_tracked_set_for_cause(filter, None)
+}
+
+fn filter_references_tracked_set_for_cause(
     filter: &TargetFilter,
     producer_cause: Option<ThisWayCause>,
 ) -> bool {
@@ -9204,10 +9207,12 @@ fn filter_references_tracked_set(
         TargetFilter::TrackedSetFiltered { caused_by, .. } => {
             tracked_reader_accepts_cause(*caused_by, producer_cause)
         }
-        TargetFilter::Not { filter } => filter_references_tracked_set(filter, producer_cause),
+        TargetFilter::Not { filter } => {
+            filter_references_tracked_set_for_cause(filter, producer_cause)
+        }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
-            .any(|filter| filter_references_tracked_set(filter, producer_cause)),
+            .any(|filter| filter_references_tracked_set_for_cause(filter, producer_cause)),
         _ => false,
     }
 }
