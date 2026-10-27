@@ -1,5 +1,18 @@
 # CLAUDE.md
 
+## Yama private fork
+
+This checkout belongs to `bryanroscoe/yama-phase`; keep it private. `origin` is the private
+repository and `upstream` is `phase-rs/phase`. Read [the fork guide](docs/YAMA.md).
+Ordinary contributions target the private repository's `main`. Publishing upstream PRs or
+enabling upstream release/deployment workflows is a separate action requiring Bryan's instruction.
+The upstream architecture, rules and review requirements below still apply. Shared AI decision
+plumbing also uses the fresh-context `engine-implementer` plan/implementation/review workflow.
+Use `CARGO_BUILD_JOBS=4` and low debug info. Yama consumes a published full commit SHA from this
+repository; its former patch-export workflow is retired. GitHub Actions is disabled here because
+the inherited workflows target upstream infrastructure. Private-fork publishing does not use
+upstream's release bots or merge queue.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
