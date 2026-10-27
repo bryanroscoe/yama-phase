@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use engine::ai_support::AiDecisionContract;
 use engine::game::engine::{
     apply_interaction, apply_verified_ai_priority_pass, verified_ai_stack_pass_player, EngineError,
 };
@@ -14,7 +13,7 @@ use rand::Rng;
 use std::sync::Arc;
 
 use crate::config::AiConfig;
-use crate::search::choose_action_with_session;
+use crate::search::PreparedAiDecision;
 use crate::session::AiSession;
 
 /// Maximum AI actions before forcing a stop (safety invariant — not CR-derived).
@@ -266,8 +265,10 @@ pub fn run_ai_action(
             return std::ops::ControlFlow::Break(AiActionsStop::MissingAiConfig { player: actor });
         }
     };
-    let contract = AiDecisionContract::issue(state, semantic_owner);
-    let action = match choose_action_with_session(state, semantic_owner, config, rng, session) {
+    let decision = PreparedAiDecision::new(state, semantic_owner);
+    let action = decision.choose_action_with_session(config, rng, session);
+    let contract = decision.into_contract();
+    let action = match action {
         Some(action) => action,
         None => {
             tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
@@ -807,6 +808,148 @@ mod tests {
         }
         .is_safety_cap());
         assert!(ActionLimit::SafetyCap.is_safety_cap());
+    }
+
+    fn native_prepared_rng_observation(
+        rng: &engine::types::game_state::GameRng,
+    ) -> (u128, u64, [u64; 8]) {
+        use rand::RngCore;
+        let mut future = rng.clone();
+        (
+            rng.get_word_pos(),
+            rng.outcome_draws(),
+            std::array::from_fn(|_| {
+                future
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u64()
+            }),
+        )
+    }
+
+    #[test]
+    fn native_prepared_decision_removes_the_outer_issue() {
+        use engine::ai_support::AiDecisionContract;
+        use engine::game::perf_counters::{reset, snapshot};
+        use rand::RngCore;
+
+        let owner = PlayerId(0);
+        let mut original = GameState::new_two_player(42);
+        original.turn_number = 2;
+        original.phase = Phase::PreCombatMain;
+        original.active_player = owner;
+        original.priority_player = owner;
+        original.waiting_for = WaitingFor::Priority { player: owner };
+        assert!(original.objects.is_empty() && original.stack.is_empty());
+        let ai_players = HashSet::from([owner]);
+        let config = AiConfig::default().into_measurement(7);
+        let ai_configs = HashMap::from([(owner, config.clone())]);
+        assert_eq!(
+            eligible_ai_decision(&original, &ai_players),
+            Some((owner, owner))
+        );
+        assert!(verified_ai_stack_pass_player(&original, &GameAction::PassPriority).is_none());
+
+        let mut advanced = original.rng.clone();
+        advanced
+            .draw(engine::types::game_state::RandomDraw::Outcome)
+            .next_u64();
+        let observation = native_prepared_rng_observation(&original.rng);
+        let advanced_observation = native_prepared_rng_observation(&advanced);
+        assert_ne!(observation.0, advanced_observation.0);
+        assert_eq!(observation.1 + 1, advanced_observation.1);
+        assert_ne!(
+            observation.2, advanced_observation.2,
+            "live RNG positive control"
+        );
+
+        reset();
+        let independent = AiDecisionContract::issue(&original, owner);
+        let issue_work = snapshot().restriction_static_mode_gate_scans;
+        assert_eq!(issue_work, 1, "positive root-issuance witness");
+        assert!(independent.contains_action(&original, &GameAction::PassPriority));
+
+        // The former production composition: issue independently, choose, then
+        // classify, verify and apply through the same host boundaries.
+        let mut legacy_state = original.clone();
+        let mut legacy_rng = rand::rngs::SmallRng::seed_from_u64(7);
+        let legacy_session = AiSession::arc_from_game(&legacy_state);
+        reset();
+        let legacy_contract = AiDecisionContract::issue(&legacy_state, owner);
+        let legacy_action = crate::search::choose_action_with_session(
+            &legacy_state,
+            owner,
+            &config,
+            &mut legacy_rng,
+            &legacy_session,
+        )
+        .expect("legacy route must choose");
+        let stack_pass = verified_ai_stack_pass_player(&legacy_state, &legacy_action).is_some();
+        assert!(
+            !stack_pass,
+            "this fixture reaches ordinary interaction apply"
+        );
+        assert!(legacy_contract.permits(&legacy_state, owner, &legacy_action));
+        let legacy_applied = if stack_pass {
+            apply_verified_ai_priority_pass(
+                &mut legacy_state,
+                owner,
+                &legacy_contract,
+                legacy_action.clone(),
+            )
+        } else {
+            apply_interaction(&mut legacy_state, owner, owner, legacy_action.clone())
+        }
+        .expect("legacy issued action must apply");
+        let legacy_work = snapshot().restriction_static_mode_gate_scans;
+
+        let mut native_state = original;
+        let mut native_rng = rand::rngs::SmallRng::seed_from_u64(7);
+        let native_session = AiSession::arc_from_game(&native_state);
+        reset();
+        let std::ops::ControlFlow::Continue(native) = run_ai_action(
+            &mut native_state,
+            &ai_players,
+            &ai_configs,
+            &mut native_rng,
+            &native_session,
+        ) else {
+            panic!("native route must continue with its applied pass");
+        };
+        let native_work = snapshot().restriction_static_mode_gate_scans;
+        assert_eq!(legacy_action, GameAction::PassPriority);
+        assert_eq!(native.action, legacy_action);
+        assert!(legacy_work >= 2 * issue_work);
+        assert_eq!(
+            native_work + issue_work,
+            legacy_work,
+            "native removes exactly one positive root issue"
+        );
+        assert_eq!(
+            serde_json::to_value(&native_state).unwrap(),
+            serde_json::to_value(&legacy_state).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&native.state).unwrap(),
+            serde_json::to_value(&legacy_state).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&native.events).unwrap(),
+            serde_json::to_value(&legacy_applied.events).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&native.log_entries).unwrap(),
+            serde_json::to_value(&legacy_applied.log_entries).unwrap()
+        );
+        let legacy_tail: [u64; 8] = std::array::from_fn(|_| legacy_rng.next_u64());
+        assert_eq!(legacy_tail, std::array::from_fn(|_| native_rng.next_u64()));
+        assert_eq!(
+            native_prepared_rng_observation(&native_state.rng),
+            native_prepared_rng_observation(&legacy_state.rng)
+        );
+        assert_eq!(
+            native_prepared_rng_observation(&native.state.rng),
+            native_prepared_rng_observation(&legacy_state.rng)
+        );
     }
 
     #[test]

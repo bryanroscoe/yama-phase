@@ -243,6 +243,78 @@ fn lowest_value_issued_sacrifice<'a>(
         .map(|(_, action)| action.clone())
 }
 
+/// One engine-issued decision bound to its immutable source state.
+///
+/// Choosing and inspecting the contract share the same semantic enumeration.
+/// Consume the preparation with [`Self::into_contract`] before applying an action
+/// or otherwise mutating the source state; prepare again for the next decision.
+///
+/// ```
+/// use engine::game::engine::apply_interaction;
+/// use engine::types::game_state::{GameState, WaitingFor};
+/// use engine::types::phase::Phase;
+/// use engine::types::player::PlayerId;
+/// use phase_ai::{config::AiConfig, search::PreparedAiDecision, session::AiSession};
+/// use rand::{rngs::SmallRng, SeedableRng};
+///
+/// let owner = PlayerId(0);
+/// let mut state = GameState::new_two_player(42);
+/// state.turn_number = 2;
+/// state.phase = Phase::PreCombatMain;
+/// state.active_player = owner;
+/// state.priority_player = owner;
+/// state.waiting_for = WaitingFor::Priority { player: owner };
+/// let session = AiSession::arc_from_game(&state);
+/// let mut rng = SmallRng::seed_from_u64(7);
+/// let decision = PreparedAiDecision::new(&state, owner);
+/// assert_eq!(decision.contract().semantic_owner, owner);
+/// let actor = decision.contract().authorized_actor;
+/// let action = decision
+///     .choose_action_with_session(&AiConfig::default(), &mut rng, &session)
+///     .expect("priority supplies a pass");
+/// let contract = decision.into_contract(); // Releases the source-state borrow.
+/// assert!(contract.permits(&state, actor, &action));
+/// apply_interaction(&mut state, actor, owner, action).expect("issued action applies");
+/// ```
+pub struct PreparedAiDecision<'state> {
+    state: &'state GameState,
+    semantic: engine::ai_support::SemanticCandidates,
+    contract: AiDecisionContract,
+}
+
+impl<'state> PreparedAiDecision<'state> {
+    /// Enumerate and issue once for this state and semantic owner.
+    pub fn new(state: &'state GameState, semantic_owner: PlayerId) -> Self {
+        let semantic = engine::ai_support::SemanticCandidates::enumerate(state);
+        let contract = AiDecisionContract::issue_from(state, semantic_owner, &semantic);
+        Self {
+            state,
+            semantic,
+            contract,
+        }
+    }
+
+    /// Inspect the same contract used by the chooser.
+    pub fn contract(&self) -> &AiDecisionContract {
+        &self.contract
+    }
+
+    /// End preparation and retain the contract for the host's apply boundary.
+    pub fn into_contract(self) -> AiDecisionContract {
+        self.contract
+    }
+
+    /// Choose using the caller-owned per-game session and this issued domain.
+    pub fn choose_action_with_session(
+        &self,
+        config: &AiConfig,
+        rng: &mut impl Rng,
+        session: &Arc<AiSession>,
+    ) -> Option<GameAction> {
+        choose_action_with_session_inner(self, config, rng, session, true, false).action
+    }
+}
+
 /// Choose the best action for the AI player given the current game state.
 ///
 /// - For 0 or 1 legal actions, returns immediately.
@@ -256,7 +328,8 @@ pub fn choose_action(
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
     let session = AiSession::arc_from_game(state);
-    choose_action_with_session_inner(state, ai_player, config, rng, &session, false, false).action
+    let decision = PreparedAiDecision::new(state, ai_player);
+    choose_action_with_session_inner(&decision, config, rng, &session, false, false).action
 }
 
 /// Choose the best action using a caller-owned per-game session cache.
@@ -267,7 +340,8 @@ pub fn choose_action_with_session(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> Option<GameAction> {
-    choose_action_with_session_inner(state, ai_player, config, rng, session, true, false).action
+    let decision = PreparedAiDecision::new(state, ai_player);
+    choose_action_with_session_inner(&decision, config, rng, session, true, false).action
 }
 
 /// Select once using the canonical chooser and retain an optional, read-only
@@ -279,7 +353,8 @@ pub fn choose_action_with_session_diagnostic(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> AiDecisionSelection {
-    choose_action_with_session_inner(state, ai_player, config, rng, session, true, true)
+    let decision = PreparedAiDecision::new(state, ai_player);
+    choose_action_with_session_inner(&decision, config, rng, session, true, true)
 }
 
 #[derive(Clone, Debug)]
@@ -288,30 +363,29 @@ pub struct AiDecisionSelection {
     pub receipt: Option<crate::decision_receipt::AiDecisionDiagnosticReceipt>,
 }
 
-/// The one decision routine behind every `choose_action*` entry point: issue
-/// the engine's decision contract for `ai_player`, answer the prompts that need
+/// The one decision routine behind every `choose_action*` entry point: use
+/// the prepared engine decision, answer the prompts that need
 /// no search directly, and otherwise score the issued candidates and pick one.
-/// The contract issued here and the outcome of the priority shortcut are handed
+/// The prepared contract and the outcome of the priority shortcut are handed
 /// to the scorer so it does not derive them a second time for the same state.
 fn choose_action_with_session_inner(
-    state: &GameState,
-    ai_player: PlayerId,
+    decision: &PreparedAiDecision<'_>,
     config: &AiConfig,
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
     durable_pact_routes: bool,
     diagnostics: bool,
 ) -> AiDecisionSelection {
-    // One semantic enumeration serves both the contract and the priority
-    // shortcut's flat action list below.
-    let semantic = engine::ai_support::SemanticCandidates::enumerate(state);
-    let contract = AiDecisionContract::issue_from(state, ai_player, &semantic);
+    let state = decision.state;
+    let ai_player = decision.contract.semantic_owner;
+    let semantic = &decision.semantic;
+    let contract = &decision.contract;
     let direct = |action: Option<GameAction>| AiDecisionSelection {
         receipt: diagnostics
             .then(|| {
-                action.as_ref().map(|action| {
-                    crate::decision_receipt::direct_receipt(&contract, action.clone())
-                })
+                action
+                    .as_ref()
+                    .map(|action| crate::decision_receipt::direct_receipt(contract, action.clone()))
             })
             .flatten(),
         action,
@@ -395,7 +469,7 @@ fn choose_action_with_session_inner(
             issued_domain()
                 .into_iter()
                 .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
-                .or_else(|| fallback_action(state, config, &contract))
+                .or_else(|| fallback_action(state, config, contract))
                 .and_then(&bind_specialist),
         );
     }
@@ -506,10 +580,10 @@ fn choose_action_with_session_inner(
     // Answer its finite engine-issued consent domain directly so tactical
     // scoring cannot randomly select Decline when Grant is available.
     if matches!(state.waiting_for, WaitingFor::ResolveAllConsent { .. }) {
-        return direct(fallback_action(state, config, &contract).and_then(&bind_specialist));
+        return direct(fallback_action(state, config, contract).and_then(&bind_specialist));
     }
 
-    let fast_priority = fast_priority_action_from(state, ai_player, config, session, &semantic);
+    let fast_priority = fast_priority_action_from(state, ai_player, config, session, semantic);
     // Only an absent shortcut is reusable: a present one may be filtered out or
     // followed by session writes below, so the scorer recomputes it.
     let priority_shortcut = match &fast_priority {
@@ -539,7 +613,7 @@ fn choose_action_with_session_inner(
         config,
         session,
         RootReuse::FromChooser {
-            contract: &contract,
+            contract,
             priority_shortcut,
         },
     );
@@ -552,7 +626,7 @@ fn choose_action_with_session_inner(
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
         return direct(
-            fallback_action(state, config, &contract)
+            fallback_action(state, config, contract)
                 .filter(|action| root_action_is_allowed(state, ai_player, action))
                 .filter(|action| {
                     durable_pact_routes || !is_certified_pact_root(state, ai_player, action)
@@ -583,7 +657,7 @@ fn choose_action_with_session_inner(
             .then(|| {
                 action.as_ref().map(|selected| {
                     crate::decision_receipt::ranked_receipt(
-                        &contract,
+                        contract,
                         &scored,
                         selected_index,
                         config.temperature,
@@ -5638,6 +5712,554 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn prepared_rng_observation(rng: &engine::types::game_state::GameRng) -> (u128, u64, [u64; 8]) {
+        let mut future = rng.clone();
+        (
+            rng.get_word_pos(),
+            rng.outcome_draws(),
+            std::array::from_fn(|_| {
+                future
+                    .draw(engine::types::game_state::RandomDraw::Outcome)
+                    .next_u64()
+            }),
+        )
+    }
+
+    fn assert_prepared_contract_matches(left: &AiDecisionContract, right: &AiDecisionContract) {
+        assert_eq!(left.semantic_owner, right.semantic_owner);
+        assert_eq!(left.authorized_actor, right.authorized_actor);
+        assert_eq!(left.state_revision, right.state_revision);
+        let domain = |contract: &AiDecisionContract| {
+            contract
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.action.clone(),
+                        candidate.metadata.semantic_owner,
+                        candidate.metadata.actor,
+                        candidate.metadata.tactical_class,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(domain(left), domain(right), "ordered domain and metadata");
+    }
+
+    #[test]
+    fn prepared_decision_enumerates_root_once() {
+        use engine::ai_support::SemanticCandidates;
+        use engine::game::perf_counters::{reset, snapshot};
+
+        let state = make_state();
+        let config = root_reuse_config();
+        let session = AiSession::arc_from_game(&state);
+        assert!(state.objects.is_empty());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+
+        reset();
+        let _semantic = SemanticCandidates::enumerate(&state);
+        let enumeration_work = snapshot().restriction_static_mode_gate_scans;
+        assert_eq!(enumeration_work, 1, "positive enumeration witness");
+        reset();
+        let independent = AiDecisionContract::issue(&state, P0);
+        let issue_work = snapshot().restriction_static_mode_gate_scans;
+        assert_eq!(issue_work, enumeration_work, "positive issuance witness");
+        assert!(!independent.candidates.is_empty());
+        assert!(independent.contains_action(&state, &GameAction::PassPriority));
+
+        reset();
+        let decision = PreparedAiDecision::new(&state, P0);
+        assert_eq!(snapshot().restriction_static_mode_gate_scans, issue_work);
+        reset_root_witnesses();
+        let chosen =
+            decision.choose_action_with_session(&config, &mut SmallRng::seed_from_u64(7), &session);
+        assert_eq!(chosen, Some(GameAction::PassPriority));
+        assert_eq!(snapshot().restriction_static_mode_gate_scans, issue_work);
+        assert_eq!(
+            root_witnesses(),
+            (0, 0),
+            "the direct pass needs no scorer rerun"
+        );
+        assert_prepared_contract_matches(&independent, decision.contract());
+        let contract = decision.into_contract();
+        assert!(contract.permits(&state, P0, chosen.as_ref().unwrap()));
+        assert_eq!(snapshot().restriction_static_mode_gate_scans, issue_work);
+
+        reset();
+        let legacy_contract = AiDecisionContract::issue(&state, P0);
+        let legacy_action = choose_action_with_session(
+            &state,
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(7),
+            &AiSession::arc_from_game(&state),
+        );
+        assert_eq!(legacy_action, chosen);
+        assert_prepared_contract_matches(&contract, &legacy_contract);
+        assert_eq!(
+            snapshot().restriction_static_mode_gate_scans,
+            2 * issue_work
+        );
+    }
+
+    #[test]
+    fn prepared_decision_keeps_reducer_validation_once() {
+        use engine::game::perf_counters::{reset, snapshot};
+
+        let targets = vec![TargetRef::Player(P0), TargetRef::Player(P1)];
+        let mut state = spell_target_selection_state(make_state(), targets.clone(), targets, false);
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            panic!("fixture must reach target selection");
+        };
+        pending_cast.ability.effect = Effect::unimplemented(
+            "unsupported_targeted_spell",
+            "Choose a target for an unsupported spell.",
+        );
+        assert!(target_selection_has_no_modeled_effect(&state));
+        let config = root_reuse_config();
+
+        reset();
+        let independent = AiDecisionContract::issue(&state, P0);
+        let issue_work = snapshot().state_clone_for_legality;
+        assert_eq!(
+            issue_work, 3,
+            "two targets and CancelCast cross the reducer"
+        );
+        assert_eq!(
+            independent
+                .candidates
+                .iter()
+                .filter(|candidate| matches!(
+                    candidate.action,
+                    GameAction::ChooseTarget { target: Some(_) }
+                ))
+                .count(),
+            2,
+            "both legal targets survive validation"
+        );
+        assert!(independent.contains_action(&state, &GameAction::CancelCast));
+
+        reset();
+        let decision = PreparedAiDecision::new(&state, P0);
+        assert_prepared_contract_matches(&independent, decision.contract());
+        assert_eq!(snapshot().state_clone_for_legality, issue_work);
+        let chosen = decision
+            .choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&state),
+            )
+            .expect("validated target route must answer");
+        assert!(matches!(
+            chosen,
+            GameAction::ChooseTarget { target: Some(_) }
+        ));
+        assert!(decision.contract().contains_action(&state, &chosen));
+        assert_eq!(snapshot().state_clone_for_legality, issue_work);
+
+        reset();
+        let _legacy_contract = AiDecisionContract::issue(&state, P0);
+        let legacy_chosen = choose_action_with_session(
+            &state,
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(7),
+            &AiSession::arc_from_game(&state),
+        );
+        assert_eq!(legacy_chosen, Some(chosen));
+        assert_eq!(snapshot().state_clone_for_legality, 2 * issue_work);
+    }
+
+    fn assert_prepared_selection_parity(
+        state: &GameState,
+        owner: PlayerId,
+        config: &AiConfig,
+        seed: u64,
+    ) {
+        let legacy_state = state.clone();
+        let prepared_state = state.clone();
+        let legacy_before = prepared_rng_observation(&legacy_state.rng);
+        let prepared_before = prepared_rng_observation(&prepared_state.rng);
+        let independent = AiDecisionContract::issue(&legacy_state, owner);
+        assert!(!independent.candidates.is_empty());
+        assert_eq!(prepared_rng_observation(&legacy_state.rng), legacy_before);
+        let decision = PreparedAiDecision::new(&prepared_state, owner);
+        assert_prepared_contract_matches(&independent, decision.contract());
+        assert_eq!(
+            prepared_rng_observation(&prepared_state.rng),
+            prepared_before
+        );
+
+        let mut legacy_rng = SmallRng::seed_from_u64(seed);
+        let mut prepared_rng = SmallRng::seed_from_u64(seed);
+        let mut diagnostic_rng = SmallRng::seed_from_u64(seed);
+        let legacy = choose_action_with_session(
+            &legacy_state,
+            owner,
+            config,
+            &mut legacy_rng,
+            &AiSession::arc_from_game(&legacy_state),
+        );
+        let selected = decision.choose_action_with_session(
+            config,
+            &mut prepared_rng,
+            &AiSession::arc_from_game(&prepared_state),
+        );
+        assert!(selected.is_some(), "an owed nonempty domain must answer");
+        assert_eq!(selected, legacy);
+        assert!(decision
+            .contract()
+            .contains_action(&prepared_state, selected.as_ref().unwrap()));
+        let diagnostic = choose_action_with_session_diagnostic(
+            state,
+            owner,
+            config,
+            &mut diagnostic_rng,
+            &AiSession::arc_from_game(state),
+        );
+        assert_eq!(diagnostic.action, selected);
+        let receipt = diagnostic.receipt.expect("selected action has a receipt");
+        assert_eq!(receipt.semantic_owner, independent.semantic_owner.0);
+        assert_eq!(receipt.authorized_actor, independent.authorized_actor.0);
+        assert_eq!(receipt.selected_action, selected.clone().unwrap());
+        assert_eq!(
+            receipt
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.is_selected)
+                .count(),
+            1
+        );
+        for candidate in &receipt.candidates {
+            assert!(independent.contains_action(state, &candidate.action));
+        }
+        match receipt.status {
+            crate::decision_receipt::AiDecisionReceiptStatus::Direct => {
+                assert!(receipt.sampling_temperature.is_none());
+                assert_eq!(
+                    receipt
+                        .candidates
+                        .iter()
+                        .map(|candidate| &candidate.action)
+                        .collect::<Vec<_>>(),
+                    independent
+                        .candidates
+                        .iter()
+                        .map(|candidate| &candidate.action)
+                        .collect::<Vec<_>>()
+                );
+                assert!(receipt
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.rank.is_none() && candidate.score.is_none()));
+            }
+            crate::decision_receipt::AiDecisionReceiptStatus::Ranked => {
+                assert_eq!(receipt.sampling_temperature, Some(config.temperature));
+                assert!(receipt
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.rank.is_some()));
+                assert!(receipt
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.is_top_ranked));
+                assert!(receipt
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.score.is_some()));
+            }
+        }
+        let prepared_diagnostic = choose_action_with_session_inner(
+            &decision,
+            config,
+            &mut SmallRng::seed_from_u64(seed),
+            &AiSession::arc_from_game(&prepared_state),
+            true,
+            true,
+        );
+        assert_eq!(prepared_diagnostic.action, selected);
+        assert_eq!(
+            serde_json::to_value(prepared_diagnostic.receipt).unwrap(),
+            serde_json::to_value(Some(receipt)).unwrap()
+        );
+
+        let legacy_tail: [u64; 8] = std::array::from_fn(|_| legacy_rng.next_u64());
+        assert_eq!(
+            legacy_tail,
+            std::array::from_fn(|_| prepared_rng.next_u64())
+        );
+        assert_eq!(
+            legacy_tail,
+            std::array::from_fn(|_| diagnostic_rng.next_u64())
+        );
+        assert_eq!(prepared_rng_observation(&legacy_state.rng), legacy_before);
+        assert_eq!(
+            prepared_rng_observation(&prepared_state.rng),
+            prepared_before
+        );
+        assert_eq!(
+            prepared_rng_observation(&legacy_state.rng),
+            prepared_rng_observation(&prepared_state.rng)
+        );
+
+        // The stateless wrapper retains its own non-durable route mode.
+        let mut stateless_rng = SmallRng::seed_from_u64(seed);
+        let mut non_durable_rng = SmallRng::seed_from_u64(seed);
+        let stateless = choose_action(state, owner, config, &mut stateless_rng);
+        let non_durable_session = AiSession::arc_from_game(state);
+        let non_durable = PreparedAiDecision::new(state, owner);
+        assert_eq!(
+            stateless,
+            choose_action_with_session_inner(
+                &non_durable,
+                config,
+                &mut non_durable_rng,
+                &non_durable_session,
+                false,
+                false,
+            )
+            .action
+        );
+        let stateless_tail: [u64; 8] = std::array::from_fn(|_| stateless_rng.next_u64());
+        assert_eq!(
+            stateless_tail,
+            std::array::from_fn(|_| non_durable_rng.next_u64())
+        );
+    }
+
+    #[test]
+    fn prepared_decision_matches_unshared_selection_and_rng() {
+        let state = make_state();
+        let observation = prepared_rng_observation(&state.rng);
+        let mut advanced = state.rng.clone();
+        advanced
+            .draw(engine::types::game_state::RandomDraw::Outcome)
+            .next_u64();
+        let advanced_observation = prepared_rng_observation(&advanced);
+        assert_ne!(observation.0, advanced_observation.0);
+        assert_eq!(observation.1 + 1, advanced_observation.1);
+        assert_ne!(
+            observation.2, advanced_observation.2,
+            "live RNG positive control"
+        );
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+        let rows: Vec<_> = contract_membership_rows()
+            .into_iter()
+            .chain(specialist_arm_rows())
+            .collect();
+        assert!(rows.len() > 20, "retain the domain and specialist families");
+        for (name, state, owner) in rows {
+            assert!(
+                state.waiting_for.acting_players().contains(&owner),
+                "{name}"
+            );
+            assert_prepared_selection_parity(&state, owner, &config, 7);
+        }
+        for (name, state, owner) in specialist_arm_rows().into_iter().filter(|(name, _, _)| {
+            matches!(*name, "NamedChoice::card_predicate_guess" | "OpponentGuess")
+        }) {
+            let contract = AiDecisionContract::issue(&state, owner);
+            assert_eq!(contract.candidates.len(), 2, "{name}: two random answers");
+            let mut picks = Vec::new();
+            for seed in 0..16 {
+                assert_prepared_selection_parity(&state, owner, &config, seed);
+                let decision = PreparedAiDecision::new(&state, owner);
+                let pick = decision
+                    .choose_action_with_session(
+                        &config,
+                        &mut SmallRng::seed_from_u64(seed),
+                        &AiSession::arc_from_game(&state),
+                    )
+                    .unwrap();
+                if !picks.contains(&pick) {
+                    picks.push(pick);
+                }
+            }
+            assert_eq!(
+                picks.len(),
+                2,
+                "{name}: fixed seeds reach both random answers"
+            );
+        }
+
+        let state = searchable_state();
+        let searched = root_reuse_config();
+        let mut heuristic = searched.clone();
+        heuristic.search.enabled = false;
+        let mut sampled = searched.clone();
+        sampled.search.determinization_samples = 2;
+        for config in [&heuristic, &searched, &sampled] {
+            assert!(config.temperature > 0.0);
+            let session = AiSession::arc_from_game(&state);
+            assert!(fast_priority_action(&state, P0, config, &session).is_none());
+            let scored = score_candidates_with_session(&state, P0, config, &session);
+            assert!(
+                scored.len() > 1 && has_cast(&scored),
+                "branching scored-root reach guard"
+            );
+            reset_root_witnesses();
+            assert_prepared_selection_parity(&state, P0, config, 11);
+            if config.search.determinization_samples > 0 {
+                let (issues, reruns) = root_witnesses();
+                assert!(
+                    issues >= 2 && reruns >= 2,
+                    "samples must derive fresh roots"
+                );
+            } else {
+                assert_eq!(root_witnesses(), (0, 0), "real root retains chooser reuse");
+            }
+            let diagnostic = choose_action_with_session_diagnostic(
+                &state,
+                P0,
+                config,
+                &mut SmallRng::seed_from_u64(11),
+                &AiSession::arc_from_game(&state),
+            );
+            let receipt = diagnostic.receipt.expect("scored root has a receipt");
+            assert_eq!(
+                receipt.status,
+                crate::decision_receipt::AiDecisionReceiptStatus::Ranked
+            );
+            assert!(
+                receipt.candidates.len() > 1,
+                "softmax has multiple scored candidates"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_decision_preserves_owner_and_actor_authority() {
+        use engine::types::game_state::{MulliganBottomEntry, OpeningHandBottomReason};
+        let config = root_reuse_config();
+        let mut state = make_state();
+        two_player_bottom_fixture(&mut state, 4, 3);
+        state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: vec![
+                MulliganBottomEntry {
+                    player: P0,
+                    count: 1,
+                },
+                MulliganBottomEntry {
+                    player: P1,
+                    count: 3,
+                },
+            ],
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+        assert_eq!(state.waiting_for.acting_players(), vec![P0, P1]);
+        let first = AiDecisionContract::issue(&state, P0);
+        let independent = AiDecisionContract::issue(&state, P1);
+        assert!(!first.candidates.is_empty() && !independent.candidates.is_empty());
+        assert!(first.candidates.iter().all(|left| independent
+            .candidates
+            .iter()
+            .all(|right| left.action != right.action)));
+        let decision = PreparedAiDecision::new(&state, P1);
+        assert_prepared_contract_matches(&independent, decision.contract());
+        let action = decision
+            .choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&state),
+            )
+            .unwrap();
+        let contract = decision.into_contract();
+        assert!(
+            matches!(&action, GameAction::SelectCards { cards } if cards.len() == 3 && cards.iter().all(|id| state.objects[id].owner == P1))
+        );
+        assert!(contract.permits(&state, P1, &action));
+        assert!(!contract.permits(&state, P0, &action));
+        assert!(!first.permits(&state, P0, &action));
+        let mut stale = state.clone();
+        stale.state_revision += 1;
+        assert!(!contract.permits(&stale, P1, &action));
+
+        let (mut controlled, _, _) = mindslaver_discard_state(P0, P1, 10, 6);
+        let decision = PreparedAiDecision::new(&controlled, P1);
+        assert_eq!(decision.contract().semantic_owner, P1);
+        assert_eq!(decision.contract().authorized_actor, P0);
+        assert_prepared_contract_matches(
+            &AiDecisionContract::issue(&controlled, P1),
+            decision.contract(),
+        );
+        let action = decision
+            .choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&controlled),
+            )
+            .unwrap();
+        let contract = decision.into_contract();
+        assert!(contract.permits(&controlled, P0, &action));
+        assert!(!contract.permits(&controlled, P1, &action));
+        controlled.turn_decision_controller = None;
+        assert!(!contract.permits(&controlled, P0, &action));
+
+        let (_, tribute, owner) = specialist_arm_rows()
+            .into_iter()
+            .find(|(name, _, _)| *name == "TributeChoice")
+            .unwrap();
+        let owed = PreparedAiDecision::new(&tribute, owner);
+        let action = owed
+            .choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&tribute),
+            )
+            .unwrap();
+        assert!(owed.contract().permits(&tribute, owner, &action));
+        let bystander = PreparedAiDecision::new(&tribute, P0);
+        assert!(bystander.contract().candidates.is_empty());
+        assert_eq!(
+            bystander.choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&tribute),
+            ),
+            None
+        );
+
+        let mut empty = make_state();
+        empty.waiting_for = WaitingFor::DiscardToHandSize {
+            player: P0,
+            count: 3,
+            cards: Vec::new(),
+        };
+        let decision = PreparedAiDecision::new(&empty, P0);
+        assert!(empty.waiting_for.acting_players().contains(&P0));
+        assert!(decision.contract().candidates.is_empty());
+        assert_eq!(
+            decision.choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&empty),
+            ),
+            None
+        );
+        let mut nonempty = empty.clone();
+        let cards = hand_pool(&mut nonempty, P0, 3);
+        nonempty.waiting_for = WaitingFor::DiscardToHandSize {
+            player: P0,
+            count: 3,
+            cards,
+        };
+        let decision = PreparedAiDecision::new(&nonempty, P0);
+        assert!(!decision.contract().candidates.is_empty());
+        let action = decision
+            .choose_action_with_session(
+                &config,
+                &mut SmallRng::seed_from_u64(7),
+                &AiSession::arc_from_game(&nonempty),
+            )
+            .unwrap();
+        assert!(decision.contract().permits(&nonempty, P0, &action));
     }
 
     /// Regression: the equip announcement opens a real
