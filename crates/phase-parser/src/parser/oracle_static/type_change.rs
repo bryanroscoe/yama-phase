@@ -1717,9 +1717,15 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
             _ => None,
         })
         .collect();
-    let keep_additive_core_types = core_types.len() == 2
+    // CR 205.1a + CR 205.1b: only a descriptor that NAMES a core type sets the
+    // card types. A creature type with a base P/T ("becomes a blue Frog with
+    // base power and toughness 1/1") infers Creature for the animation spec but
+    // sets only the creature types, so an artifact creature stays an artifact
+    // (Turn to Frog, Snakeform, Polymorphist's Jest rulings).
+    let keep_additive_core_types = (core_types.len() == 2
         && core_types.contains(&CoreType::Artifact)
-        && core_types.contains(&CoreType::Creature);
+        && core_types.contains(&CoreType::Creature))
+        || !descriptor_names_core_type(descriptor_lower);
 
     let mut modifications = Vec::new();
     let mut set_core_types = false;
@@ -1949,6 +1955,28 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     Some(def)
 }
 
+/// CR 205.1a: whether a type-change descriptor explicitly names a core card
+/// type ("is an Insect artifact creature", "becomes a land"), as opposed to a
+/// creature type whose Creature core type is only inferred from a P/T
+/// ("becomes a blue Frog with base power and toughness 1/1"). Only the
+/// conjunct-free descriptor before any "with"/"where" tail is read.
+fn descriptor_names_core_type(body_lower: &str) -> bool {
+    let descriptor = super::oracle_effect::animation::split_animation_conjunct_clause(body_lower)
+        .map_or(body_lower, |(descriptor, _)| descriptor);
+    let descriptor = nom_primitives::scan_split_at_phrase(descriptor, |input| {
+        alt((tag("with "), tag("where "))).parse(input)
+    })
+    .map_or(descriptor, |(descriptor, _)| descriptor);
+    nom_primitives::scan_at_word_boundaries(descriptor, |input| {
+        terminated(
+            nom_primitives::parse_core_type,
+            alt((space1, eof, tag("."), tag(","))),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 /// CR 205.1a / CR 205.1b: Decide whether a self type-change is a REPLACEMENT or
 /// an additive grant. A set of `AddType` modifications is replaced by a single
 /// `SetCardTypes` when the descriptor explicitly names a core type, unless the
@@ -1977,21 +2005,7 @@ pub(super) fn maybe_replace_card_types(
     {
         return modifications;
     }
-    let descriptor = super::oracle_effect::animation::split_animation_conjunct_clause(body_lower)
-        .map_or(body_lower, |(descriptor, _)| descriptor);
-    let descriptor = nom_primitives::scan_split_at_phrase(descriptor, |input| {
-        alt((tag("with "), tag("where "))).parse(input)
-    })
-    .map_or(descriptor, |(descriptor, _)| descriptor);
-    if nom_primitives::scan_at_word_boundaries(descriptor, |input| {
-        terminated(
-            nom_primitives::parse_core_type,
-            alt((space1, eof, tag("."), tag(","))),
-        )
-        .parse(input)
-    })
-    .is_none()
-    {
+    if !descriptor_names_core_type(body_lower) {
         return modifications;
     }
     std::iter::once(ContinuousModification::SetCardTypes { core_types })
