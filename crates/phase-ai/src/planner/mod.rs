@@ -4,9 +4,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use engine::ai_support::{
-    build_decision_context, classify_payment_continuation, witness_payment_continuations,
-    AiDecisionContext, CandidateAction, PaymentContinuationBatchStatus, PaymentContinuationState,
-    TacticalClass,
+    build_decision_context, classify_payment_continuation, structurally_valid_named_choice_answer,
+    witness_payment_continuations, AiDecisionContext, CandidateAction,
+    PaymentContinuationBatchStatus, PaymentContinuationState, TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -1174,6 +1174,9 @@ impl<'a> PlannerServices<'a> {
     }
 
     fn candidate_is_valid(state: &GameState, candidate: &CandidateAction) -> bool {
+        if structurally_valid_named_choice_answer(state, &candidate.action) {
+            return true;
+        }
         // PassPriority is always legal during Priority (skip simulation for perf),
         // but during ManaPayment it means "finalize payment" which can fail if the
         // player can't actually pay the cost (e.g., Thalia tax makes it unaffordable).
@@ -2916,6 +2919,561 @@ mod tests {
         obj.card_types.subtypes.push("Forest".to_string());
         obj.controller = PlayerId(0);
         state
+    }
+
+    const NAMED_CHOICE_GROVE: &str = "This land enters tapped. As it enters, choose a color other than green.\n{T}: Add {G} or one mana of the chosen color.";
+    const NAMED_CHOICE_MELODY: &str =
+        "Choose a creature type. Draw a card for each permanent you control of that type.";
+    const NAMED_CHOICE_BRAVE: &str = "Choose a color. White creatures you control gain protection from the chosen color until end of turn.";
+
+    fn named_choice_answer(choice: &str) -> GameAction {
+        GameAction::ChooseOption {
+            choice: choice.to_string(),
+        }
+    }
+
+    fn named_choice_options(state: &GameState) -> &[String] {
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => options,
+            other => panic!("expected NamedChoice, got {other:?}"),
+        }
+    }
+
+    fn named_choice_source(
+        state: &GameState,
+    ) -> Option<&engine::types::game_state::NamedChoiceSource> {
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { source, .. } => source.as_ref(),
+            other => panic!("expected NamedChoice, got {other:?}"),
+        }
+    }
+
+    fn named_choice_grove_prompt() -> (engine::game::scenario::GameRunner, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let grove = scenario
+            .add_land_to_hand(P0, "Thriving Grove")
+            .from_oracle_text(NAMED_CHOICE_GROVE)
+            .id();
+        let mut runner = scenario.build();
+        named_choice_play_grove(&mut runner, grove);
+        (runner, grove)
+    }
+
+    fn named_choice_play_grove(runner: &mut engine::game::scenario::GameRunner, grove: ObjectId) {
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let card_id = state.objects[&grove].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: grove,
+                card_id,
+            })
+            .unwrap();
+        assert!(!runner.state().battlefield.contains(&grove));
+        let source = named_choice_source(runner.state()).unwrap();
+        assert_eq!(
+            source.binding,
+            engine::types::game_state::NamedChoiceSourceBinding::PendingEntry
+        );
+        assert!(source.context.is_some());
+        assert!(source.has_matching_context());
+        assert_eq!(source.prompt.identity.reference.object_id, grove);
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .candidates
+                .len(),
+            1
+        );
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .candidates[0]
+                .source,
+            grove
+        );
+    }
+
+    // CandidateAction intentionally has no PartialEq: compare every field so
+    // legality shortcuts cannot silently change ordering or actor provenance.
+    fn assert_named_choice_candidate_eq(actual: &CandidateAction, expected: &CandidateAction) {
+        assert_eq!(actual.action, expected.action);
+        assert_eq!(actual.metadata.actor, expected.metadata.actor);
+        assert_eq!(
+            actual.metadata.semantic_owner,
+            expected.metadata.semantic_owner
+        );
+        assert_eq!(
+            actual.metadata.tactical_class,
+            expected.metadata.tactical_class
+        );
+    }
+
+    fn assert_named_choice_validation_without_work(state: &GameState) {
+        let options = named_choice_options(state);
+        assert!(!options.is_empty());
+        assert!(!state.withholds_priority());
+        let candidates = engine::ai_support::candidate_actions(state);
+        assert_eq!(candidates.len(), options.len());
+        let offered: std::collections::BTreeSet<_> = candidates
+            .iter()
+            .map(|candidate| match &candidate.action {
+                GameAction::ChooseOption { choice } => choice.as_str(),
+                other => panic!("expected ChooseOption, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(offered, options.iter().map(String::as_str).collect());
+        for candidate in &candidates {
+            assert!(matches!(candidate.action, GameAction::ChooseOption { .. }));
+            assert!(structurally_valid_named_choice_answer(
+                state,
+                &candidate.action
+            ));
+            // Independent production application, outside the measured windows.
+            let mut reference = state.clone();
+            apply_as_current_for_simulation(&mut reference, candidate.action.clone()).unwrap();
+        }
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+
+        perf_counters::reset();
+        let raw = services.validate_candidates(state, candidates.clone());
+        let counters = perf_counters::snapshot();
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "raw validator must consume engine proof"
+        );
+        assert_eq!(counters.layers_full_eval, 0);
+        assert_eq!(raw.len(), candidates.len());
+        for (actual, expected) in raw.iter().zip(&candidates) {
+            assert_named_choice_candidate_eq(actual, expected);
+        }
+
+        let prepared = candidates
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(source_index, candidate)| PreparedCandidate {
+                source_index,
+                candidate,
+                payment_successor: None,
+            })
+            .collect();
+        perf_counters::reset();
+        let validated = services.validate_prepared_candidates(state, prepared);
+        let counters = perf_counters::snapshot();
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "prepared validator must consume engine proof"
+        );
+        assert_eq!(counters.layers_full_eval, 0);
+        assert_eq!(validated.len(), candidates.len());
+        for (index, (actual, expected)) in validated.iter().zip(&candidates).enumerate() {
+            assert_eq!(actual.source_index, index);
+            assert!(actual.payment_successor.is_none());
+            assert_named_choice_candidate_eq(&actual.candidate, expected);
+        }
+    }
+
+    /// CR 614.12a + CR 607.2d: each entrant receives its own pre-entry color.
+    #[test]
+    fn named_choice_validation_reuses_engine_certificate() {
+        let (runner, grove) = named_choice_grove_prompt();
+        let state = runner.state();
+        let options: std::collections::BTreeSet<_> = named_choice_options(state)
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            options,
+            std::collections::BTreeSet::from(["White", "Blue", "Black", "Red"])
+        );
+        assert_named_choice_validation_without_work(state);
+        for (choice, color) in [
+            ("White", ManaColor::White),
+            ("Blue", ManaColor::Blue),
+            ("Black", ManaColor::Black),
+            ("Red", ManaColor::Red),
+        ] {
+            let mut answer = engine::game::scenario::GameRunner::from_state(state.clone());
+            answer.act(named_choice_answer(choice)).unwrap();
+            assert!(answer.state().battlefield.contains(&grove));
+            assert!(answer.state().objects[&grove].tapped);
+            assert_eq!(answer.state().objects[&grove].chosen_color(), Some(color));
+        }
+    }
+
+    /// CR 608.2d + CR 205.3m: Melody counts only controlled permanents of the chosen type.
+    #[test]
+    fn named_choice_validation_resolution_creature_types() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Elf", 1, 1)
+            .with_subtypes(vec!["Elf"]);
+        scenario
+            .add_creature(P0, "Goblin", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        scenario
+            .add_creature(P1, "Other Elf", 1, 1)
+            .with_subtypes(vec!["Elf"]);
+        scenario.with_library_top(P0, &["Forest", "Island", "Plains"]);
+        let melody = scenario
+            .add_spell_to_hand_from_oracle(P0, "Distant Melody", false, NAMED_CHOICE_MELODY)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        let mut pool: Vec<_> = (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, melody, false, vec![]))
+            .collect();
+        pool.push(ManaUnit::new(ManaType::Blue, melody, false, vec![]));
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        let outcome = runner.cast(melody).resolve();
+        let state = outcome.state();
+        let source = named_choice_source(state).unwrap();
+        assert!(source.has_matching_context());
+        assert_eq!(
+            source.binding,
+            engine::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+        );
+        assert!(state.resolving_stack_entry.is_some());
+        assert!(named_choice_options(state).iter().any(|o| o == "Elf"));
+        assert!(named_choice_options(state).iter().any(|o| o == "Goblin"));
+        assert_named_choice_validation_without_work(state);
+        assert!(!assert_named_choice_fallback(
+            state,
+            named_choice_answer("Not A Creature Type")
+        ));
+        let hands = [state.players[0].hand.len(), state.players[1].hand.len()];
+        runner.act(named_choice_answer("Elf")).unwrap();
+        assert_eq!(runner.state().players[0].hand.len(), hands[0] + 1);
+        assert_eq!(runner.state().players[1].hand.len(), hands[1]);
+    }
+
+    /// CR 608.2d: Brave's non-persisting color choice affects only white creatures you control.
+    #[test]
+    fn named_choice_validation_source_less_colors() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::keywords::ProtectionTarget;
+        use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let white = scenario
+            .add_creature(P0, "White creature", 2, 2)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let green = scenario
+            .add_creature(P0, "Green creature", 2, 2)
+            .with_color(vec![ManaColor::Green])
+            .id();
+        let opponent = scenario
+            .add_creature(P1, "Other white creature", 2, 2)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let brave = scenario
+            .add_spell_to_hand_from_oracle(P0, "Brave the Elements", true, NAMED_CHOICE_BRAVE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::White, brave, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        let outcome = runner.cast(brave).resolve();
+        let state = outcome.state();
+        assert!(named_choice_source(state).is_none());
+        let options: std::collections::BTreeSet<_> = named_choice_options(state)
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            options,
+            std::collections::BTreeSet::from(["White", "Blue", "Black", "Red", "Green"])
+        );
+        assert_named_choice_validation_without_work(state);
+        runner.act(named_choice_answer("White")).unwrap();
+        let protection = Keyword::Protection(ProtectionTarget::Color(ManaColor::White));
+        assert!(runner.state().objects[&white]
+            .keywords
+            .contains(&protection));
+        assert!(!runner.state().objects[&green]
+            .keywords
+            .contains(&protection));
+        assert!(!runner.state().objects[&opponent]
+            .keywords
+            .contains(&protection));
+    }
+
+    // A refusal means defer to the ORIGINAL apply verdict, never reject merely
+    // because the certificate is unavailable. Measure one answer/API at a time.
+    fn assert_named_choice_fallback(state: &GameState, action: GameAction) -> bool {
+        assert!(!structurally_valid_named_choice_answer(state, &action));
+        let mut reference = state.clone();
+        let expected = apply_as_current_for_simulation(&mut reference, action.clone()).is_ok();
+        let candidate = CandidateAction {
+            action,
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
+        };
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        perf_counters::reset();
+        let raw = services.validate_candidates(state, vec![candidate.clone()]);
+        assert_eq!(perf_counters::snapshot().state_clone_for_legality, 1);
+        assert_eq!(!raw.is_empty(), expected);
+        if expected {
+            assert_named_choice_candidate_eq(&raw[0], &candidate);
+        }
+        perf_counters::reset();
+        let prepared = services.validate_prepared_candidates(
+            state,
+            vec![PreparedCandidate {
+                source_index: 7,
+                candidate: candidate.clone(),
+                payment_successor: None,
+            }],
+        );
+        assert_eq!(perf_counters::snapshot().state_clone_for_legality, 1);
+        assert_eq!(!prepared.is_empty(), expected);
+        if expected {
+            assert_eq!(prepared[0].source_index, 7);
+            assert!(prepared[0].payment_successor.is_none());
+            assert_named_choice_candidate_eq(&prepared[0].candidate, &candidate);
+        }
+        expected
+    }
+
+    #[test]
+    fn named_choice_validation_refusals_keep_simulation() {
+        use engine::types::ability::{ChoiceType, NumberDistinctness};
+        let (runner, _) = named_choice_grove_prompt();
+        let grove = runner.state();
+        assert_named_choice_validation_without_work(grove);
+        assert!(!assert_named_choice_fallback(
+            grove,
+            named_choice_answer("Not A Creature Type")
+        ));
+        let mut no_context = grove.clone();
+        if let WaitingFor::NamedChoice {
+            source: Some(source),
+            ..
+        } = &mut no_context.waiting_for
+        {
+            source.context = None;
+        }
+        assert!(!assert_named_choice_fallback(
+            &no_context,
+            named_choice_answer("White")
+        ));
+        let mut no_entry = grove.clone();
+        no_entry.pending_replacement = None;
+        assert!(!assert_named_choice_fallback(
+            &no_entry,
+            named_choice_answer("White")
+        ));
+
+        // ROUTING fixtures: these altered prompts are not abilities of Grove.
+        // CR 201.4 + CR 107.1b: names and unbounded numbers use rule validation.
+        for (choice_type, valid, invalid) in [
+            (ChoiceType::CardName, "Forest", "Not An Oracle Card"),
+            (
+                ChoiceType::NumberRange {
+                    min: 0,
+                    max: None,
+                    distinctness: NumberDistinctness::Repeatable,
+                },
+                "0",
+                "-1",
+            ),
+        ] {
+            let mut by_rule = grove.clone();
+            by_rule.pending_replacement = None;
+            by_rule.all_card_names = Arc::from(["Forest".to_string()]);
+            if let WaitingFor::NamedChoice {
+                choice_type: kind,
+                source,
+                options,
+                ..
+            } = &mut by_rule.waiting_for
+            {
+                *kind = choice_type;
+                *source = None;
+                *options = vec![valid.to_string()];
+            }
+            assert!(assert_named_choice_fallback(
+                &by_rule,
+                named_choice_answer(valid)
+            ));
+            assert!(!assert_named_choice_fallback(
+                &by_rule,
+                named_choice_answer(invalid)
+            ));
+        }
+        let mut empty = grove.clone();
+        if let WaitingFor::NamedChoice { options, .. } = &mut empty.waiting_for {
+            options.clear();
+        }
+        assert!(engine::ai_support::candidate_actions(&empty).is_empty());
+        assert!(!assert_named_choice_fallback(
+            &empty,
+            named_choice_answer("White")
+        ));
+        let ordinary = make_state_with_land();
+        assert!(!assert_named_choice_fallback(
+            &ordinary,
+            named_choice_answer("White")
+        ));
+        let land = engine::ai_support::candidate_actions(&ordinary)
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::PlayLand { .. }))
+            .unwrap();
+        assert!(assert_named_choice_fallback(&ordinary, land.action));
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        for state in [grove, &empty, &ordinary] {
+            assert!(services.validate_candidates(state, vec![]).is_empty());
+            assert!(services
+                .validate_prepared_candidates(state, vec![])
+                .is_empty());
+        }
+    }
+
+    /// CR 601.2f + CR 601.2h + CR 602.2b: pending activation retains simulation authority.
+    #[test]
+    fn named_choice_validation_pending_payment_keeps_simulation() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::{QuantityExpr, QuantityRef, TargetFilter};
+        // ROUTING fixture, not a new card-support claim. Enter the existing
+        // variable-speed payment helper through the public activation pipeline.
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        ability.cost = Some(AbilityCost::PaySpeed {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        });
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Forest", "Island"]);
+        let source = scenario
+            .add_creature(P0, "Speed routing fixture", 2, 2)
+            .with_ability_definition(ability)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        runner.state_mut().players[0].speed = Some(2);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .unwrap();
+        let paying = runner.state();
+        assert!(paying.withholds_priority());
+        assert!(paying.pending_cast.is_some());
+        assert_eq!(named_choice_options(paying), ["0", "1", "2"]);
+        for option in named_choice_options(paying) {
+            let action = named_choice_answer(option);
+            let mut finite_sibling = paying.clone();
+            finite_sibling.pending_cast = None;
+            assert!(!finite_sibling.withholds_priority());
+            assert!(
+                structurally_valid_named_choice_answer(&finite_sibling, &action),
+                "pending payment must be the refusing guard"
+            );
+            // Preserve the actual reducer verdict; this fixture does not claim
+            // that a naturally occurring speed answer can be unpayable.
+            assert_named_choice_fallback(paying, action);
+        }
+    }
+
+    /// CR 614.12a + CR 607.2d: A's coherent source cannot answer B's parked entry.
+    #[test]
+    fn named_choice_validation_does_not_reuse_other_entry_authority() {
+        use engine::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario
+            .add_land_to_hand(P0, "Thriving Grove")
+            .from_oracle_text(NAMED_CHOICE_GROVE)
+            .id();
+        let b = scenario
+            .add_land_to_hand(P0, "Thriving Grove")
+            .from_oracle_text(NAMED_CHOICE_GROVE)
+            .id();
+        assert_ne!(a, b);
+        let mut runner = scenario.build();
+        named_choice_play_grove(&mut runner, a);
+        let source_a = named_choice_source(runner.state()).unwrap().clone();
+        runner.act(named_choice_answer("White")).unwrap();
+        // Fixture allowance for a second land play; no gameplay rule is changed.
+        runner.state_mut().lands_played_this_turn = 0;
+        named_choice_play_grove(&mut runner, b);
+        assert_named_choice_validation_without_work(runner.state());
+        let source_b = named_choice_source(runner.state()).unwrap().clone();
+        assert_ne!(
+            source_a.prompt.identity.reference.object_id,
+            source_b.prompt.identity.reference.object_id
+        );
+        assert!(source_a.has_matching_context());
+        assert!(source_b.has_matching_context());
+        let mut hostile = runner.state().clone();
+        if let WaitingFor::NamedChoice { source, .. } = &mut hostile.waiting_for {
+            *source = Some(source_a);
+        }
+        assert!(named_choice_source(&hostile)
+            .unwrap()
+            .has_matching_context());
+        assert!(!assert_named_choice_fallback(
+            &hostile,
+            named_choice_answer("Blue")
+        ));
+        runner.act(named_choice_answer("Blue")).unwrap();
+        assert_eq!(
+            runner.state().objects[&a].chosen_color(),
+            Some(ManaColor::White)
+        );
+        assert_eq!(
+            runner.state().objects[&b].chosen_color(),
+            Some(ManaColor::Blue)
+        );
     }
 
     // T1: planner_evaluation must not clone-and-apply per candidate for legality
