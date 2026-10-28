@@ -95763,3 +95763,51 @@ fn live_control_and_unqualified_entry_filters_remain_supported() {
         assert!(def.duration.is_none(), "{def:#?}");
     }
 }
+
+/// CR 109.5 + CR 109.4: "for each opponent who controls fewer creatures than
+/// you" counts the opponents whose creature count is below the controller's.
+#[test]
+fn voice_of_many_counts_opponents_with_fewer_creatures() {
+    let parsed = parse_card(
+        "When this creature enters, draw a card for each opponent who controls fewer creatures than you.",
+        "Voice of Many",
+        &[],
+        &["Creature"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let Effect::Draw { count, .. } = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .unwrap()
+        .effect
+        .as_ref()
+    else {
+        panic!("expected Draw");
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    comparator: Comparator::LT,
+                    ..
+                }
+            }
+        }
+    ));
+}
+
+/// CR 608.2c + CR 109.5: a leading "Then for each opponent who …," iterates a
+/// count when the body names no per-player anaphor.
+#[test]
+fn then_for_each_opponent_attribute_prefix_repeats_body() {
+    let parsed = parse_card(
+        "At the beginning of your end step, each opponent loses 2 life. Then for each opponent who has less life than you, create a 1/3 black Demon creature token.",
+        "Test Card",
+        &[],
+        &["Creature"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let json = serde_json::to_string(&parsed.triggers).expect("serialize");
+    assert!(json.contains("\"PlayerAttribute\""), "{json}");
+}
