@@ -95459,3 +95459,44 @@ fn card_that_was_put_into_a_graveyard_this_way_reads_the_tracked_set() {
         "got {filter:?}"
     );
 }
+
+/// CR 708.2 + CR 608.2c + CR 120.1: "Choose target creature you control. Turn
+/// it face up if it's face down. Then it deals damage equal to its power to
+/// each other creature." "If it's face down" tests the target, and that
+/// conditional clause doesn't hide the target from the damage clause: the
+/// chosen creature is the source of the damage.
+#[test]
+fn turn_it_face_up_if_face_down_keeps_the_damage_source_bound() {
+    let def = parse_effect_chain(
+        "Choose target creature you control. Turn it face up if it's face down. \
+         Then it deals damage equal to its power to each other creature.",
+        AbilityKind::Spell,
+    );
+    let turn = def.sub_ability.as_ref().expect("turn face up chained");
+    assert!(
+        matches!(
+            &*turn.effect,
+            Effect::TurnFaceUp {
+                target: TargetFilter::ParentTarget
+            }
+        ),
+        "got {:?}",
+        turn.effect
+    );
+    assert!(
+        matches!(
+            &turn.condition,
+            Some(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                ..
+            }) if typed.properties.contains(&FilterProp::FaceDown)
+        ),
+        "got {:?}",
+        turn.condition
+    );
+    let damage = turn.sub_ability.as_ref().expect("damage chained");
+    let Effect::DamageAll { damage_source, .. } = &*damage.effect else {
+        panic!("expected DamageAll, got {:?}", damage.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+}

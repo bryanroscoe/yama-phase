@@ -1194,10 +1194,15 @@ mod tests {
     #[test]
     fn a_rejected_trailing_guard_is_a_condition_gap() {
         assert_eq!(
-            diagnose_clause_gap("turn it face up if it's face down"),
+            diagnose_clause_gap("turn it face up if it's spring"),
             ClauseGap::Condition {
-                guard: "it's face down".to_string()
+                guard: "it's spring".to_string()
             }
+        );
+        // CR 708.2: face-down status is a readable guard, so it is not the gap.
+        assert_ne!(
+            kind("turn it face up if it's face down"),
+            ClauseGapKind::Condition
         );
     }
 
