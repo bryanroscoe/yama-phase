@@ -54,6 +54,12 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// The negative half of `projection_cache`: keys whose projection bailed
+    /// for a deterministic reason (`BailReason::is_deterministic`). Such a key
+    /// bails the same way on every call, so the bail is served without
+    /// re-running the traversal. Kept apart from `projection_cache` so that
+    /// map holds only completed projections.
+    pub projection_bail_cache: Arc<RwLock<HashMap<ProjectionKey, BailReason>>>,
     /// Test-only record of every `deadline` argument `get_or_project` has
     /// received, in call order. Lets a policy test observe the projection
     /// budget its caller hands over directly, instead of inferring it from
@@ -95,6 +101,7 @@ impl std::fmt::Debug for AiSession {
             .field("synergy", &self.synergy)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
+            .field("projection_bail_cache", &self.projection_bail_cache)
             .field("prospective_fetch_prompt", &self.prospective_fetch_prompt)
             .field(
                 "prospective_fetch_follow_up",
@@ -151,6 +158,7 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            projection_bail_cache: Arc::default(),
             prospective_fetch_prompt: Arc::default(),
             prospective_fetch_follow_up: Arc::default(),
             prospective_fetch_proposals: Arc::default(),
@@ -244,8 +252,11 @@ impl AiSession {
     /// key means stale entries never match. Read-path is lock-free;
     /// write-path briefly acquires a write lock.
     ///
-    /// `deadline` bounds only the cache-miss computation; a cache HIT is
-    /// returned regardless of expiry. Callers holding an `AiConfig` must pass
+    /// A deterministic bail is cached as well and returned as the same `Err`
+    /// without re-running `project_to`; the wall-clock bail is never cached.
+    ///
+    /// `deadline` bounds only the cache-miss computation; a cache HIT (of
+    /// either kind) is returned regardless of expiry. Callers holding an `AiConfig` must pass
     /// `projection::projection_deadline(config.execution_mode)` — evaluated
     /// inline at the call, never hoisted into a `let` that spans multiple
     /// projections.
@@ -280,13 +291,23 @@ impl AiSession {
             }
         }
 
-        let projection = Arc::new(project_to(
-            base,
-            ai_player,
-            target_opponent,
-            horizon,
-            deadline,
-        )?);
+        if let Ok(bails) = self.projection_bail_cache.read() {
+            if let Some(bail) = bails.get(&key) {
+                return Err(bail.clone());
+            }
+        }
+
+        let projection = match project_to(base, ai_player, target_opponent, horizon, deadline) {
+            Ok(projection) => Arc::new(projection),
+            Err(bail) => {
+                if bail.is_deterministic() {
+                    if let Ok(mut bails) = self.projection_bail_cache.write() {
+                        bails.insert(key, bail.clone());
+                    }
+                }
+                return Err(bail);
+            }
+        };
 
         if let Ok(mut cache) = self.projection_cache.write() {
             cache.insert(key, Arc::clone(&projection));
@@ -697,6 +718,73 @@ mod tests {
             bailing.projection_cache.read().unwrap().len(),
             0,
             "arm 2: a bail must not be cached"
+        );
+        assert!(
+            bailing.projection_bail_cache.read().unwrap().is_empty(),
+            "arm 2: the wall-clock bail must not enter the bail cache"
+        );
+    }
+
+    /// A deterministic bail is cached and served without re-running
+    /// `project_to`; the wall-clock bail still is not.
+    ///
+    /// The fixture sits at `GameOver`, so `project_to` bails with
+    /// `GameOverDuringProjection` on its first step. The second call passes a
+    /// pre-expired deadline: a recomputation would bail with `TimeCapExceeded`
+    /// instead, so getting `GameOverDuringProjection` back proves the cached
+    /// bail was served.
+    #[test]
+    fn get_or_project_caches_a_deterministic_bail() {
+        let mut s = GameState::new_two_player(42);
+        s.turn_number = 2;
+        s.active_player = PlayerId(0);
+        s.stack.clear();
+        s.waiting_for = WaitingFor::GameOver { winner: None };
+
+        let session = AiSession::empty();
+        let first = session.get_or_project(
+            &s,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentBeginCombat,
+            Deadline::none(),
+        );
+        assert!(
+            matches!(first, Err(BailReason::GameOverDuringProjection)),
+            "fixture precondition: the projection must bail on the game being over; got {first:?}"
+        );
+        assert_eq!(
+            session.projection_bail_cache.read().unwrap().len(),
+            1,
+            "a deterministic bail must be cached"
+        );
+        assert!(
+            session.projection_cache.read().unwrap().is_empty(),
+            "a bail must not enter the completed-projection cache"
+        );
+        assert!(
+            session
+                .cached_projection(
+                    &s,
+                    PlayerId(0),
+                    PlayerId(1),
+                    ProjectionHorizon::OpponentBeginCombat
+                )
+                .is_none(),
+            "cached_projection serves completed projections only"
+        );
+
+        let second = session.get_or_project(
+            &s,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentBeginCombat,
+            Deadline::after(0),
+        );
+        assert!(
+            matches!(second, Err(BailReason::GameOverDuringProjection)),
+            "the second call must return the cached bail, not recompute (a recomputation \
+             under the expired deadline bails with TimeCapExceeded); got {second:?}"
         );
     }
 
