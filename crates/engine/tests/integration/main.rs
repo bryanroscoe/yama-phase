@@ -2137,6 +2137,7 @@ mod search_result_missing_referent;
 
 mod activate_only_restriction_list;
 mod any_one_color_multi_mana_castability;
+mod blood_moon_urborg_layer4_dependency;
 mod celes_kotis_graveyard_origin_batch;
 mod commanders_plate_protection;
 mod display_identity_serde;
