@@ -198,6 +198,14 @@ pub enum AttackTargetFilter {
     /// `PlayerOrPlaneswalker`, which excludes battles. Control of the defended
     /// planeswalker/battle is compared per CR 109.4.
     PlayerOrPermanents,
+    /// CR 508.1c + CR 205.3j: "<planeswalker type>s you control", the
+    /// planeswalkers of one planeswalker type that the scope's anchor player
+    /// controls ("creatures they control can't attack Jaces you control").
+    /// Like `Planeswalker`, a restriction scope: "you" is the restriction's
+    /// controller (CR 109.5). `subtype` is the canonical planeswalker type.
+    PlaneswalkerOfType {
+        subtype: String,
+    },
     /// CR 508.1a + CR 725.1: "attacks the monarch" — a Player-type attack whose
     /// defending player must currently hold the monarch designation
     /// (`state.monarch`). The monarch is a single dynamic player identity, so
