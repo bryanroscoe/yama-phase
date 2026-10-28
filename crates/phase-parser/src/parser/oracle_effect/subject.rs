@@ -8581,8 +8581,23 @@ pub(super) fn try_parse_each_source_deals_damage(
             } => (amount, target, damage_source),
             _ => return None,
         };
-    // The source set comes from the filter, never a `Target` damage source.
-    if damage_source.is_some() {
+    // CR 120.1 + CR 120.3e: "each <filter> deals [N] damage to itself [equal to
+    // its power]" (Wave of Reckoning) — every matching object deals damage to
+    // itself. The shared damage parser reads "itself" as one declared object
+    // dealing damage to itself (its "its power" bound to `Target`); under an
+    // "each" subject that object is each batch source, so the recipient is
+    // per-source and "its power" goes back to the deferred pronoun, which the
+    // per-source binding below reads from each source.
+    let itself = recipient_phrase.is_some_and(is_itself_recipient);
+    if itself {
+        super::rebind_object_scope_amount(
+            &mut amount,
+            ObjectScope::Target,
+            ObjectScope::Anaphoric,
+            super::SourceRefRebind::AllObjectRefs,
+        );
+    } else if damage_source.is_some() {
+        // The source set comes from the filter, never a `Target` damage source.
         return None;
     }
     // CR 120.1 + CR 608.2: a per-source amount ("deals damage equal to its
@@ -8607,6 +8622,8 @@ pub(super) fn try_parse_each_source_deals_damage(
         EachDamageRecipient::OtherBatchSource { source_filters }
     } else if recipient_phrase.is_some_and(is_its_controller_recipient) {
         EachDamageRecipient::EachController
+    } else if itself {
+        EachDamageRecipient::Itself
     } else {
         EachDamageRecipient::Shared(target)
     };
@@ -8676,6 +8693,18 @@ fn is_its_controller_recipient(recipient_phrase: &str) -> bool {
     all_consuming(tag::<_, _, OracleError<'_>>("its controller"))
         .parse(recipient_phrase)
         .is_ok()
+}
+
+/// CR 120.1 + CR 120.3e: the recipient phrase is "itself", alone ("deals 1
+/// damage to itself") or followed by its amount ("deals damage to itself equal
+/// to its power"). Anchored at both ends so "itself and ..." stays out.
+fn is_itself_recipient(recipient_phrase: &str) -> bool {
+    all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("itself"),
+        opt(preceded(tag(" equal to "), rest)),
+    ))
+    .parse(recipient_phrase)
+    .is_ok()
 }
 
 /// CR 120.3: exact pairwise recipient phrase used after a two-object anaphoric
@@ -10029,6 +10058,54 @@ mod tests {
         assert!(
             !matches!(effect, Effect::EachSourceDealsDamage { .. }),
             "granted-ability damage wrongly captured: {effect:?}"
+        );
+    }
+
+    // CR 120.1 + CR 120.3e: Wave of Reckoning — "Each creature deals damage to
+    // itself equal to its power." Every creature is the source of damage to
+    // itself; the amount is each source's own power.
+    #[test]
+    fn each_source_deals_damage_to_itself_is_per_source_itself_recipient() {
+        let effect =
+            super::super::parse_effect("Each creature deals damage to itself equal to its power");
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(
+            matches!(&sources, TargetFilter::Typed(typed) if typed.controller.is_none()),
+            "sources must be every creature, got {sources:?}"
+        );
+        assert_eq!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource
+                }
+            }
+        );
+        assert_eq!(recipient, EachDamageRecipient::Itself);
+    }
+
+    // A fixed amount to itself takes the same recipient.
+    #[test]
+    fn each_source_deals_fixed_damage_to_itself() {
+        let effect =
+            super::super::parse_effect("Each creature you control deals 1 damage to itself");
+        assert!(
+            matches!(
+                effect,
+                Effect::EachSourceDealsDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    recipient: EachDamageRecipient::Itself,
+                    ..
+                }
+            ),
+            "got {effect:?}"
         );
     }
 

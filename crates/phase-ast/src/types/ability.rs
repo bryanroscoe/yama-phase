@@ -20769,6 +20769,12 @@ pub enum EachDamageRecipient {
     /// ("each creature deals 1 damage to its controller"). A per-source recipient
     /// computed at resolution — surfaces no player-selectable target slot.
     EachController,
+    /// CR 120.1 + CR 120.3: each source deals damage to itself ("each creature
+    /// deals damage to itself equal to its power" — Wave of Reckoning). A
+    /// per-source recipient computed at resolution; the source is both the
+    /// source and the recipient of its own damage, so it surfaces no
+    /// selectable target slot.
+    Itself,
     /// CR 120.1 + CR 608.2c: in an exactly two-object targeted batch, each
     /// source deals to the other source ("each of those creatures ... to the
     /// other"). Zero or one surviving/chosen object has no "other" and deals
@@ -31228,13 +31234,15 @@ impl Effect {
             // "up to two" sources slot is driven by the ability's `multi_target`
             // spec, the recipient is one mandatory slot), not by `target_filter()`.
             | Effect::EachDealsDamageEqualToPower { .. }
-            // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
-            // resolver; `OtherBatchSource` reuses the preceding declared object
-            // slots. Neither surfaces another selectable slot. Exhaustive match
-            // ensures future recipient variants are explicitly decided here.
+            // CR 109.4 + CR 120.3a: `EachController` and `Itself` resolve
+            // per-source at the resolver; `OtherBatchSource` reuses the
+            // preceding declared object slots. None surfaces another selectable
+            // slot. Exhaustive match ensures future recipient variants are
+            // explicitly decided here.
             | Effect::EachSourceDealsDamage {
                 recipient:
                     EachDamageRecipient::EachController
+                        | EachDamageRecipient::Itself
                         | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
@@ -31715,7 +31723,9 @@ impl Effect {
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage {
                 recipient:
-                    EachDamageRecipient::EachController | EachDamageRecipient::OtherBatchSource { .. },
+                    EachDamageRecipient::EachController
+                    | EachDamageRecipient::Itself
+                    | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
             | Effect::ExchangeLifeTotals { .. }

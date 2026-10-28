@@ -346,3 +346,5 @@ mod independent_game_state_conditional_sentences;
 mod addendum_those_creatures_relay;
 
 mod put_into_graveyard_this_way_return;
+
+mod each_creature_deals_damage_to_itself;
