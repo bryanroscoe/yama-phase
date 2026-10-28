@@ -1586,6 +1586,17 @@ pub(crate) fn parse_self_subject_is_color_cda_line(
         rest,
     ))
     .parse(after_subject)?;
+    // CR 903.4: "This ability doesn't affect its color identity." (Fallaji
+    // Wayfarer) excludes this color-defining ability from the card's color
+    // identity. Color identity is a deck-construction property read from the
+    // card's printed identity (`deck_validation::card_color_identity`), never
+    // from this static, so the rider has no in-game effect and is consumed with
+    // the color line.
+    let (after_predicate, _) = opt((
+        tag::<_, _, OracleError<'_>>(" this ability doesn't affect its color identity"),
+        opt(tag(".")),
+    ))
+    .parse(after_predicate)?;
     eof::<_, OracleError<'_>>(after_predicate)?;
     let Some(colors) = parse_color_predicate(predicate_lower) else {
         return Err(nom::Err::Error(nom::error::Error::new(

@@ -480,14 +480,38 @@ fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) ->
     }
 
     let lower = text.to_lowercase();
-    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
-        alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
-    })?;
-    let subject_text = text[..subject_lower.len()].trim();
+    // CR 205.1b: the contracted plural copula "They're <descriptor> in addition
+    // to their other [colors and] types" (Grimoire of the Dead, The War in
+    // Heaven) is the "they are" form with the subject and copula fused, so the
+    // copula scan below cannot split it. Decontract and reuse the same builder.
+    let decontracted = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, VE>("they"),
+                alt((tag("'"), tag("\u{2019}"))),
+                tag("re "),
+            ),
+        )
+        .parse(input)
+    })
+    .map(|((), descriptor)| format!("are {descriptor}"));
+    let (subject_text, predicate) = match &decontracted {
+        Some(predicate) => ("they", predicate.as_str()),
+        None => {
+            let (subject_lower, predicate_lower) =
+                nom_primitives::scan_split_at_phrase(&lower, |i| {
+                    alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
+                })?;
+            (
+                text[..subject_lower.len()].trim(),
+                &text[text.len() - predicate_lower.len()..],
+            )
+        }
+    };
     if subject_text.eq_ignore_ascii_case("you") {
         return None;
     }
-    let predicate = &text[text.len() - predicate_lower.len()..];
     let application = additive_type_subject_application(subject_text, ctx)?;
     let clause = build_additive_type_continuous_clause(&application, predicate)?;
 
@@ -505,7 +529,7 @@ fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) ->
             duration: clause.duration,
             sub_ability: clause.sub_ability,
             // CR 611.2e: the copula "is/are … in addition" applies with the entry.
-            onset: predicate_onset(predicate_lower),
+            onset: predicate_onset(&predicate.to_lowercase()),
         }),
     })
 }
@@ -633,8 +657,18 @@ fn try_parse_contracted_subject_additive_type_clause(
     // types" form above is unaffected (it is a type *addition* and stays on the
     // referenced subject regardless).
     let affected = static_affected_for_application(&application);
+    // CR 400.7 + CR 603.6 + CR 603.10a: inside a proven dies trigger the "it"
+    // of "return it to the battlefield … It's a Spirit Detective" (Otherworldly
+    // Escort) is the card that died and was returned — the trigger's own source
+    // on a self-dies head (`SelfRef`) or the triggering card (`TriggeringSource`),
+    // the same returned-object referent the type-replacement arm above accepts.
+    let returned_by_dies_trigger = ctx.trigger_zone_change.as_pair().is_some();
     let binds_honestly = match pronoun {
-        ContractedSubjectPronoun::It => matches!(affected, TargetFilter::ParentTarget),
+        ContractedSubjectPronoun::It => match affected {
+            TargetFilter::ParentTarget => true,
+            TargetFilter::TriggeringSource | TargetFilter::SelfRef => returned_by_dies_trigger,
+            _ => false,
+        },
         ContractedSubjectPronoun::He | ContractedSubjectPronoun::She => {
             matches!(affected, TargetFilter::SelfRef)
         }
