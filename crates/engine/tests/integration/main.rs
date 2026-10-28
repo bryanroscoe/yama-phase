@@ -354,3 +354,5 @@ mod entered_under_your_control_counter_gap_coverage;
 mod damage_history_quantity_gap_coverage;
 
 mod nonpersisting_color_choice_grants;
+
+mod windgraces_judgment_one_per_opponent;
