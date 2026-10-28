@@ -5,6 +5,10 @@
 //! at the time of resolution. CR 701.8: destroy moves permanents to the
 //! graveyard. CR 701.13: exile removes them from the game entirely.
 
+use std::collections::HashMap;
+
+use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -13,7 +17,7 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::cast_facts::is_cast_family_action;
-use crate::features::control::{is_sweeper_parts, COMMITMENT_FLOOR};
+use crate::features::control::{sweeper_filters, COMMITMENT_FLOOR};
 use crate::features::DeckFeatures;
 #[cfg(test)]
 use engine::types::actions::GameAction;
@@ -55,14 +59,40 @@ impl TacticalPolicy for SweeperTimingPolicy {
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         // Only applies to sweeper spells. Non-sweepers get a neutral verdict.
-        if !candidate_is_sweeper(ctx) {
+        let Some(sweeper) = candidate_sweeper(ctx) else {
             return PolicyVerdict::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("sweeper_timing_na"),
             };
-        }
+        };
 
-        let opposing_creatures = count_opposing_creatures(ctx.state, ctx.ai_player);
+        let creatures = creatures_by_controller(ctx.state);
+        let creatures_of = |player: &PlayerId| creatures.get(player).copied().unwrap_or(0);
+        let opponents = players::opponents(ctx.state, ctx.ai_player);
+        let opposing_creatures: u32 = opponents.iter().map(creatures_of).sum();
+
+        // Free-for-all: the threshold counts one opponent's board. Summed over
+        // several opponents it is reached when each has a creature or two, and a
+        // wipe then resets every board, the caster's included. Apply it to the
+        // most developed opponent instead, and call a wipe that costs the caster
+        // as many creatures as it costs that opponent premature.
+        if opponents.len() >= 2 {
+            let leader = opponents.iter().map(creatures_of).max().unwrap_or(0);
+            let own_swept = own_creatures_swept(ctx.state, ctx.ai_player, sweeper);
+            let timely = leader >= SWEEPER_TIMELY_THRESHOLD && own_swept < leader;
+            let (delta, kind) = if timely {
+                (DELTA_TIMELY, "sweeper_timely")
+            } else {
+                (DELTA_PREMATURE, "sweeper_premature")
+            };
+            return PolicyVerdict::score(
+                delta,
+                PolicyReason::new(kind)
+                    .with_fact("opposing_creatures", opposing_creatures as i64)
+                    .with_fact("leading_opponent_creatures", leader as i64)
+                    .with_fact("own_creatures_swept", own_swept as i64),
+            );
+        }
 
         if opposing_creatures >= SWEEPER_TIMELY_THRESHOLD {
             PolicyVerdict::Score {
@@ -80,35 +110,53 @@ impl TacticalPolicy for SweeperTimingPolicy {
     }
 }
 
-/// True when the candidate action is casting a spell with sweeper-shaped effects.
-/// Delegates to the feature module's `is_sweeper_parts` — single structural
+/// The spell the candidate casts, when it has sweeper-shaped effects.
+/// Delegates to the feature module's `sweeper_filters` — single structural
 /// source of truth shared between detection and runtime policy scoring.
 ///
 /// CR 118.9: the whole cast family counts, not just the plain announcement — a
 /// Terminus cast off its CR 702.94a miracle cost wipes exactly the same board.
 /// The object comes from `CastFacts`, which resolves each variant's own object
 /// field through the engine's action→object map.
-fn candidate_is_sweeper(ctx: &PolicyContext<'_>) -> bool {
+fn candidate_sweeper<'a>(ctx: &PolicyContext<'a>) -> Option<&'a GameObject> {
     if !is_cast_family_action(&ctx.candidate.action) {
-        return false;
+        return None;
     }
-    let Some(facts) = ctx.cast_facts() else {
-        return false;
-    };
-    is_sweeper_parts(&facts.object.abilities)
+    let object = ctx.cast_facts()?.object;
+    (!sweeper_filters(&object.abilities).is_empty()).then_some(object)
 }
 
-/// Count the number of creature permanents controlled by opponents of `player`.
+/// Creature permanents on the battlefield, counted per controller.
 /// CR 608.2h: resolution checks the board state at the time of effect application.
-fn count_opposing_creatures(state: &GameState, player: PlayerId) -> u32 {
-    let opponents = players::opponents(state, player);
-    state
+fn creatures_by_controller(state: &GameState) -> HashMap<PlayerId, u32> {
+    let mut counts = HashMap::new();
+    for obj in state
         .battlefield
         .iter()
         .filter_map(|id| state.objects.get(id))
-        .filter(|obj| {
-            opponents.contains(&obj.controller)
-                && obj.card_types.core_types.contains(&CoreType::Creature)
+    {
+        if obj.card_types.core_types.contains(&CoreType::Creature) {
+            *counts.entry(obj.controller).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// The creatures `player` controls that `sweeper`'s mass effects would reach.
+/// A one-sided wipe ("destroy all creatures your opponents control") reaches
+/// none of the caster's own.
+fn own_creatures_swept(state: &GameState, player: PlayerId, sweeper: &GameObject) -> u32 {
+    let filters = sweeper_filters(&sweeper.abilities);
+    let filter_ctx = FilterContext::from_source(state, sweeper.id);
+    state
+        .battlefield
+        .iter()
+        .filter(|&&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature)
+            }) && filters
+                .iter()
+                .any(|filter| matches_target_filter(state, id, filter, &filter_ctx))
         })
         .count() as u32
 }
@@ -123,7 +171,9 @@ mod tests {
     use crate::session::AiSession;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, TargetFilter, TypedFilter,
+    };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -270,6 +320,111 @@ mod tests {
             .is_some());
     }
 
+    fn make_creature_for(state: &mut GameState, owner: PlayerId, idx: u64) -> ObjectId {
+        let oid = create_object(
+            state,
+            CardId(9000 + idx),
+            owner,
+            format!("Creature {idx}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&oid).unwrap();
+        obj.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: Vec::new(),
+        };
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        oid
+    }
+
+    /// The verdict for a four-player free-for-all with `per_opponent` creatures
+    /// on each opponent's board and `own` on the AI's, casting `sweeper_target`
+    /// as a `DestroyAll` filter.
+    fn multiplayer_verdict(
+        per_opponent: [u64; 3],
+        own: u64,
+        sweeper_target: TargetFilter,
+    ) -> (f64, String) {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 4, 42);
+        let mut idx = 0;
+        for (seat, &n) in per_opponent.iter().enumerate() {
+            for _ in 0..n {
+                make_creature_for(&mut state, PlayerId(seat as u8 + 1), idx);
+                idx += 1;
+            }
+        }
+        for _ in 0..own {
+            make_creature_for(&mut state, AI, idx);
+            idx += 1;
+        }
+        let sweeper_id = make_sweeper_spell(&mut state, 0);
+        let sweeper = state.objects.get_mut(&sweeper_id).unwrap();
+        Arc::make_mut(&mut sweeper.abilities)[0] = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DestroyAll {
+                target: sweeper_target,
+                cant_regenerate: false,
+            },
+        );
+        let candidate = cast_candidate(sweeper_id, CardId(6000));
+        let decision = priority_decision();
+        let (context, config) = context_with_features(control_features_with_sweepers(3, 0.8));
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        match SweeperTimingPolicy.verdict(&ctx) {
+            PolicyVerdict::Score { delta, reason } => (delta, reason.kind.to_string()),
+            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
+        }
+    }
+
+    #[test]
+    fn free_for_all_threshold_applies_to_the_leading_opponent() {
+        // One creature each across three opponents meets the threshold in
+        // total, but no single opponent has a board worth a wipe.
+        assert_eq!(
+            multiplayer_verdict([1, 1, 1], 0, TargetFilter::Any).1,
+            "sweeper_premature"
+        );
+        // One opponent with three creatures against an empty board: timely.
+        let (delta, kind) = multiplayer_verdict([3, 1, 0], 0, TargetFilter::Any);
+        assert_eq!(kind, "sweeper_timely");
+        assert!(delta > 0.0);
+    }
+
+    #[test]
+    fn free_for_all_wipe_that_costs_the_caster_as_much_is_premature() {
+        assert_eq!(
+            multiplayer_verdict([3, 2, 2], 3, TargetFilter::Any).1,
+            "sweeper_premature"
+        );
+        assert_eq!(
+            multiplayer_verdict([4, 2, 2], 3, TargetFilter::Any).1,
+            "sweeper_timely"
+        );
+    }
+
+    #[test]
+    fn free_for_all_one_sided_wipe_does_not_count_the_casters_creatures() {
+        // "Destroy all creatures your opponents control" costs the caster
+        // nothing, so its own board doesn't make the wipe premature.
+        let opponents_creatures =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        assert_eq!(
+            multiplayer_verdict([3, 2, 2], 3, opponents_creatures).1,
+            "sweeper_timely"
+        );
+    }
+
     #[test]
     fn premature_penalty_under_threshold() {
         // 2 opposing creatures < 3 → premature.
@@ -377,7 +532,7 @@ mod tests {
     /// registered, so the assertion is about routing + the widened gate rather
     /// than the sum of thirty unrelated policies. Revert-failing on either half:
     /// without the routing change the accept never reaches `SweeperTiming`;
-    /// without the widened gate `candidate_is_sweeper` rejects the miracle
+    /// without the widened gate `candidate_sweeper` rejects the miracle
     /// action and returns `sweeper_timing_na`.
     #[test]
     fn miracle_accept_outscores_decline_for_affordable_sweeper_with_opposing_creatures() {
