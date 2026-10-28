@@ -3965,32 +3965,15 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
 
         if !layer_bucket.is_empty() {
             let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
-            if *layer == Layer::Ability && layer_effects.iter().any(|e| is_referenced_grant(e)) {
-                apply_ability_effects_with_referenced_grants(
-                    state,
-                    &layer_effects,
-                    None,
-                    &mut abilities_suppressed,
-                    &mut zone_cache,
-                    &mut started_effect_sets,
-                );
-            } else {
-                let ordered = if layer.has_dependency_ordering() {
-                    order_with_dependencies(&layer_effects, state)
-                } else {
-                    order_by_timestamp(&layer_effects)
-                };
-
-                for effect in &ordered {
-                    apply_continuous_effect(
-                        state,
-                        effect,
-                        &mut abilities_suppressed,
-                        &mut zone_cache,
-                        &mut started_effect_sets,
-                    );
-                }
-            }
+            apply_layer_bucket(
+                state,
+                *layer,
+                &layer_effects,
+                None,
+                &mut abilities_suppressed,
+                &mut zone_cache,
+                &mut started_effect_sets,
+            );
         }
 
         // CR 613.1f: "Effects that say an object can't have an ability" are
@@ -7300,32 +7283,15 @@ fn apply_layers_incremental(
         }
         if !layer_bucket.is_empty() {
             let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
-            if *layer == Layer::Ability && layer_effects.iter().any(|e| is_referenced_grant(e)) {
-                apply_ability_effects_with_referenced_grants(
-                    state,
-                    &layer_effects,
-                    Some(&recipient_ids),
-                    &mut abilities_suppressed,
-                    &mut zone_cache,
-                    &mut started_effect_sets,
-                );
-            } else {
-                let ordered = if layer.has_dependency_ordering() {
-                    order_with_dependencies(&layer_effects, state)
-                } else {
-                    order_by_timestamp(&layer_effects)
-                };
-                for effect in &ordered {
-                    apply_continuous_effect_to(
-                        state,
-                        effect,
-                        &recipient_ids,
-                        &mut abilities_suppressed,
-                        &mut zone_cache,
-                        &mut started_effect_sets,
-                    );
-                }
-            }
+            apply_layer_bucket(
+                state,
+                *layer,
+                &layer_effects,
+                Some(&recipient_ids),
+                &mut abilities_suppressed,
+                &mut zone_cache,
+                &mut started_effect_sets,
+            );
         }
         // CR 613.1f: mirror the full-pass end-of-Layer-6 denial hook for the
         // incremental path, restricted to the freshly-entered objects that were
@@ -10002,9 +9968,11 @@ fn order_with_dependencies(
         in_degree[dependent] += 1;
     }
 
-    // CR 613.8c: This fixed graph serves buckets without a referenced-provider grant;
+    // CR 613.8c: This fixed graph serves buckets without a referenced-provider grant
+    // and without a pair whose dependency needs the board (`dependency_needs_board`);
     // its predicate is state-blind, so computing it once equals re-evaluating after each
-    // application. Buckets with a live provider read use the one-at-a-time selector below.
+    // application. Buckets with a live provider read, or with a pair the board must
+    // settle, use the one-at-a-time selectors below.
     // CR 613.7a: an effect's modifications apply contiguously in written order.
     dependency_application_order(dependencies, in_degree)
         .into_iter()
@@ -10521,7 +10489,16 @@ fn apply_ability_effects_with_referenced_grants(
                             }
                         }
                     } else {
-                        depends_on(&pending[i], &pending[j], state)
+                        depends_on_in_state(
+                            state,
+                            &pending[i],
+                            &pending[j],
+                            &DependencyPreview {
+                                restrict_to,
+                                abilities_suppressed,
+                                started_effect_sets,
+                            },
+                        )
                     };
                     if dependent {
                         edges[i].push(j);
@@ -10586,10 +10563,39 @@ fn granted_static_dependency(
 /// This makes it both over-broad (any type/ability/PT change is treated as a
 /// dependency whenever `a`'s filter merely references that axis, even if `b` can't
 /// change `a`'s membership) and under-broad (it ignores existence/value/color
-/// dependencies the rule covers). The referenced-provider reader uses the
-/// state-aware preview above, with one-at-a-time CR 613.8c reevaluation. This
-/// predicate remains the state-blind relation for other effect pairs.
+/// dependencies the rule covers). [`depends_on_in_state`] is the board-aware
+/// relation that settles the type axis and existence by preview; layer buckets
+/// that contain such a pair take [`apply_effects_with_dependency_reevaluation`].
+/// This predicate remains the fixed-graph relation for every other bucket.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
+    matches!(
+        shape_dependency(a, b),
+        ShapeDependency::Dependent | ShapeDependency::MayChangeAffectedSet
+    )
+}
+
+/// CR 613.8a: what the state-blind shape of two effects says about whether the
+/// first depends on the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShapeDependency {
+    /// The pair can never be dependent: one static ability's own clauses, the
+    /// suppressed reverse of a granted-static edge, or effects of different CDA
+    /// classes (CR 613.8a(c)).
+    Never,
+    /// The shape establishes the dependency outright.
+    Dependent,
+    /// The provider changes types and the dependent's affected filter reads
+    /// types, so the provider may change what the dependent applies to; only
+    /// the board can say whether it does.
+    MayChangeAffectedSet,
+    /// No shape axis links the pair. Only existence (CR 305.7 / CR 613.1f
+    /// ability removal) can still make the dependent depend on the provider.
+    NoShapeAxis,
+}
+
+/// CR 613.8a: classify the pair (`a` the possible dependent, `b` the possible
+/// provider) by the shape of `b`'s modification and `a`'s affected filter.
+fn shape_dependency(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect) -> ShapeDependency {
     // CR 613.7a + CR 613.8a: A single static ability's modifications share one
     // timestamp and apply in the order written (613.7a). "Depend on" (613.8a) is a
     // relationship between an effect and ANOTHER effect (distinct generators) — it
@@ -10599,39 +10605,22 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     // AddSubtype survives, exactly as written.
     if a.source_id == b.source_id && a.def_index == b.def_index && a.transient_id == b.transient_id
     {
-        return false;
+        return ShapeDependency::Never;
     }
     if let Some(dependent) = granted_static_dependency(a, b) {
-        return dependent;
+        return if dependent {
+            ShapeDependency::Dependent
+        } else {
+            ShapeDependency::Never
+        };
     }
+    // CR 613.8a(c): only effects of the same CDA class can depend on each other.
     if a.characteristic_defining != b.characteristic_defining {
-        return false;
+        return ShapeDependency::Never;
     }
 
     if matches!(b.modification, ContinuousModification::CopyValues { .. }) {
-        return true;
-    }
-
-    // If b changes types (AddType/RemoveType) and a's filter references a type
-    let b_changes_types = matches!(
-        &b.modification,
-        ContinuousModification::AddType { .. }
-            | ContinuousModification::RemoveType { .. }
-            | ContinuousModification::AddSubtype { .. }
-            | ContinuousModification::RemoveSubtype { .. }
-            | ContinuousModification::AddSupertype { .. }
-            | ContinuousModification::RemoveSupertype { .. }
-            | ContinuousModification::AddAllCreatureTypes
-            | ContinuousModification::AddAllBasicLandTypes
-            | ContinuousModification::AddAllLandTypes
-            | ContinuousModification::AddAllNonbasicLandTypes
-            | ContinuousModification::AddChosenSubtype { .. }
-            | ContinuousModification::SetBasicLandType { .. }
-            | ContinuousModification::SetChosenBasicLandType
-    );
-
-    if b_changes_types && filter_references_type(&a.affected_filter) {
-        return true;
+        return ShapeDependency::Dependent;
     }
 
     // If b adds/removes abilities and a's filter checks for abilities
@@ -10655,7 +10644,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
-        return true;
+        return ShapeDependency::Dependent;
     }
 
     // CR 613.8a: b modifies power/toughness and a's filter compares P/T.
@@ -10674,10 +10663,279 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     );
 
     if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
-        return true;
+        return ShapeDependency::Dependent;
     }
 
-    false
+    // If b changes types (AddType/RemoveType) and a's filter references a type
+    let b_changes_types = matches!(
+        &b.modification,
+        ContinuousModification::AddType { .. }
+            | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::AddSubtype { .. }
+            | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::AddSupertype { .. }
+            | ContinuousModification::RemoveSupertype { .. }
+            | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddAllBasicLandTypes
+            | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddAllNonbasicLandTypes
+            | ContinuousModification::AddChosenSubtype { .. }
+            | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
+    );
+
+    if b_changes_types && filter_references_type(&a.affected_filter) {
+        return ShapeDependency::MayChangeAffectedSet;
+    }
+
+    ShapeDependency::NoShapeAxis
+}
+
+/// CR 613.8a: whether settling the pair needs the board — the shape leaves the
+/// affected set open, or the provider removes rules-text abilities from objects
+/// and the dependent is generated by an object's ability, so applying the
+/// provider might end the dependent's existence (CR 305.7 / CR 613.1f).
+fn dependency_needs_board(
+    dependent: &ActiveContinuousEffect,
+    provider: &ActiveContinuousEffect,
+) -> bool {
+    match shape_dependency(dependent, provider) {
+        ShapeDependency::Never | ShapeDependency::Dependent => false,
+        ShapeDependency::MayChangeAffectedSet => true,
+        ShapeDependency::NoShapeAxis => {
+            modification_removes_rules_text_abilities(&provider.modification)
+                && effect_generator_is_removable(dependent)
+        }
+    }
+}
+
+/// The layer pass's working state that a CR 613.8a preview starts from.
+struct DependencyPreview<'a> {
+    restrict_to: Option<&'a BTreeSet<ObjectId>>,
+    abilities_suppressed: &'a HashSet<ObjectId>,
+    started_effect_sets: &'a StartedContinuousEffectSets,
+}
+
+/// CR 613.8a: does `dependent` depend on `provider` on the board as it stands
+/// (re-asked after each application, CR 613.8c)? The shape decides where it
+/// can; otherwise `provider` is applied to a scratch board and the dependency
+/// exists when that would end `dependent`'s existence or change what it
+/// applies to.
+fn depends_on_in_state(
+    state: &GameState,
+    dependent: &ActiveContinuousEffect,
+    provider: &ActiveContinuousEffect,
+    preview: &DependencyPreview<'_>,
+) -> bool {
+    match shape_dependency(dependent, provider) {
+        ShapeDependency::Never => false,
+        ShapeDependency::Dependent => true,
+        ShapeDependency::MayChangeAffectedSet => previewed_dependency(
+            state,
+            dependent,
+            provider,
+            preview,
+            AffectedSetCheck::Compare,
+        ),
+        ShapeDependency::NoShapeAxis => {
+            dependency_needs_board(dependent, provider)
+                && previewed_dependency(state, dependent, provider, preview, AffectedSetCheck::Skip)
+        }
+    }
+}
+
+/// Whether a CR 613.8a preview also compares the dependent's affected set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AffectedSetCheck {
+    Compare,
+    Skip,
+}
+
+/// CR 613.8a: apply `provider` to a scratch copy of the board and report
+/// whether that would change `dependent`'s existence (its generating ability
+/// removed, CR 305.7 / CR 613.1f) or, when asked, what it applies to.
+fn previewed_dependency(
+    state: &GameState,
+    dependent: &ActiveContinuousEffect,
+    provider: &ActiveContinuousEffect,
+    preview: &DependencyPreview<'_>,
+    affected_set: AffectedSetCheck,
+) -> bool {
+    // CR 613.6: an effect that has started applying keeps its set of objects
+    // and continues even if the ability generating it is removed.
+    if continuous_effect_group_key(state, dependent)
+        .is_some_and(|key| preview.started_effect_sets.contains_key(&key))
+    {
+        return false;
+    }
+    // An effect whose generator is already gone applies to nothing; it has
+    // nothing to wait for.
+    if unstarted_effect_generator_is_suppressed(dependent, preview.abilities_suppressed) {
+        return false;
+    }
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = preview.abilities_suppressed.clone();
+    let mut scratch_started = preview.started_effect_sets.clone();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        provider,
+        preview.restrict_to,
+        &mut scratch_suppressed,
+        &mut LayerZoneObjectCache::default(),
+        &mut scratch_started,
+    );
+    // CR 613.8a "existence" + CR 305.7 / CR 613.1f: the provider removes the
+    // ability that generates the dependent.
+    if unstarted_effect_generator_is_suppressed(dependent, &scratch_suppressed) {
+        return true;
+    }
+    // CR 613.8a "what it applies to".
+    affected_set == AffectedSetCheck::Compare
+        && scan_effect_affected_ids(
+            state,
+            dependent,
+            preview.restrict_to,
+            &mut LayerZoneObjectCache::default(),
+        ) != scan_effect_affected_ids(
+            &scratch,
+            dependent,
+            preview.restrict_to,
+            &mut LayerZoneObjectCache::default(),
+        )
+}
+
+/// CR 613.8b-c: apply one layer's effects one at a time, choosing each next
+/// effect from the dependencies among those still waiting and re-deciding them
+/// against the board after every application (CR 613.8c). An effect waits for
+/// the effects it depends on; a dependency loop falls back to timestamp order
+/// among its members. Each effect's modifications in this layer apply together
+/// in written order (CR 613.7a).
+fn apply_effects_with_dependency_reevaluation(
+    state: &mut GameState,
+    effects: &[&ActiveContinuousEffect],
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
+) {
+    // CR 613.3 + CR 613.7: timestamp rank, CDAs first; `select_next_effect`
+    // reads node indices as that rank.
+    let sorted = order_by_timestamp(effects);
+    let sorted_refs: Vec<&ActiveContinuousEffect> = sorted.iter().collect();
+    let mut pending: Vec<Vec<&ActiveContinuousEffect>> = effect_nodes(&sorted_refs, state)
+        .into_iter()
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| sorted_refs[entry])
+                .collect()
+        })
+        .collect();
+    while !pending.is_empty() {
+        let next = {
+            let preview = DependencyPreview {
+                restrict_to,
+                abilities_suppressed,
+                started_effect_sets,
+            };
+            let edges: Vec<Vec<usize>> = pending
+                .iter()
+                .enumerate()
+                .map(|(i, dependent)| {
+                    pending
+                        .iter()
+                        .enumerate()
+                        .filter(|&(j, provider)| {
+                            i != j
+                                && dependent.iter().any(|d| {
+                                    provider
+                                        .iter()
+                                        .any(|p| depends_on_in_state(state, d, p, &preview))
+                                })
+                        })
+                        .map(|(j, _)| j)
+                        .collect()
+                })
+                .collect();
+            select_next_effect(&edges)
+        };
+        for effect in pending.remove(next) {
+            apply_continuous_effect_filtered(
+                state,
+                effect,
+                restrict_to,
+                abilities_suppressed,
+                zone_cache,
+                started_effect_sets,
+            );
+        }
+    }
+}
+
+/// CR 613.3 + CR 613.7 + CR 613.8: apply one layer's bucket of effects in
+/// order. Shared by the full and incremental passes (`restrict_to`).
+fn apply_layer_bucket(
+    state: &mut GameState,
+    layer: Layer,
+    layer_effects: &[&ActiveContinuousEffect],
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
+) {
+    if layer == Layer::Ability && layer_effects.iter().any(|e| is_referenced_grant(e)) {
+        apply_ability_effects_with_referenced_grants(
+            state,
+            layer_effects,
+            restrict_to,
+            abilities_suppressed,
+            zone_cache,
+            started_effect_sets,
+        );
+        return;
+    }
+    if !layer.has_dependency_ordering() {
+        for effect in &order_by_timestamp(layer_effects) {
+            apply_continuous_effect_filtered(
+                state,
+                effect,
+                restrict_to,
+                abilities_suppressed,
+                zone_cache,
+                started_effect_sets,
+            );
+        }
+        return;
+    }
+    // CR 613.8a: when some pair's dependency turns on the board, decide the
+    // whole bucket one application at a time (CR 613.8c); otherwise the
+    // state-blind relation's fixed graph gives the same order.
+    let needs_board = layer_effects.iter().any(|dependent| {
+        layer_effects
+            .iter()
+            .any(|provider| dependency_needs_board(dependent, provider))
+    });
+    if needs_board {
+        apply_effects_with_dependency_reevaluation(
+            state,
+            layer_effects,
+            restrict_to,
+            abilities_suppressed,
+            zone_cache,
+            started_effect_sets,
+        );
+        return;
+    }
+    for effect in &order_with_dependencies(layer_effects, state) {
+        apply_continuous_effect_filtered(
+            state,
+            effect,
+            restrict_to,
+            abilities_suppressed,
+            zone_cache,
+            started_effect_sets,
+        );
+    }
 }
 
 /// Check if a TargetFilter references a card type (used for dependency ordering).
@@ -11342,6 +11600,33 @@ fn unstarted_effect_generator_is_suppressed(
         || abilities_suppressed.contains(&source.object_id)
 }
 
+/// CR 613.1f + CR 613.8a: whether removing an object's abilities can end this
+/// effect's existence — the effects [`unstarted_effect_generator_is_suppressed`]
+/// can ever report suppressed: printed and granted statics, not resolution
+/// transients or synthesized effects without a static origin.
+fn effect_generator_is_removable(effect: &ActiveContinuousEffect) -> bool {
+    effect.def_index.is_some()
+        || (effect.transient_id.is_none()
+            && matches!(
+                effect.trigger_producer_origin,
+                Some(TriggerProducerOrigin::Static { .. })
+            ))
+}
+
+/// CR 305.7 + CR 613.1f: modifications whose application removes the
+/// rules-text abilities of the objects they apply to — setting a land's subtype
+/// to a basic land type, or removing all abilities. Exactly the
+/// `apply_continuous_effect_filtered` arms that add the recipient to
+/// `abilities_suppressed`.
+fn modification_removes_rules_text_abilities(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
+            | ContinuousModification::RemoveAllAbilities
+    )
+}
+
 /// CR 611.3a + CR 611.3b: computes the set of zones `apply_continuous_effect_filtered`
 /// must scan for `filter`'s affected population. A bare filter (or a filter
 /// with a single explicit zone marker) yields exactly one zone, identical to
@@ -11501,6 +11786,77 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
     }
 }
 
+/// CR 611.3a + CR 613.1: the objects an effect that has not started applying
+/// would apply to on the board as it stands — its affected filter and enabling
+/// condition, narrowed to `restrict_to` on the incremental path. The apply path
+/// and the CR 613.8a dependency preview share this one reading.
+fn scan_effect_affected_ids(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    zone_cache: &mut LayerZoneObjectCache,
+) -> Vec<ObjectId> {
+    let scan_ids =
+        declared_zone_self_static_candidates(state, effect, zone_cache).unwrap_or_else(|| {
+            effect_candidate_ids(state, &effect.affected_filter, effect.source_id, zone_cache)
+        });
+    // CR 109.5 + CR 611.2c: a continuous effect created by a RESOLVED spell
+    // or ability reads "you"/"your" as that spell or ability's controller,
+    // not as whoever controls the source object at the moment of some later
+    // layer pass. CR 109.5 fixes this for EVERY resolution-created case:
+    // "The words 'you' and 'your' on an object refer to the object's
+    // controller" (so, for a spell, the spell's controller); "For an
+    // activated ability, this is the player who activated the ability";
+    // "For a triggered ability, this is the controller of the object when
+    // the ability triggered". `effect.controller` is that player in all
+    // three cases. CR 611.2c makes only "the set of objects" dynamic for a
+    // rules-modifying continuous effect; the PLAYER reference stays fixed,
+    // so a controller-relative `affected` filter ("creatures your opponents
+    // control") must be evaluated against the snapshot the TCE already
+    // carries. A PRINTED static keeps the live reading (CR 109.5: "For a
+    // static ability, this is the current controller of the object it's
+    // on"), which is exactly what `transient_id` discriminates: `Some(..)`
+    // for resolution-created transients (`gather_transient_continuous_effects`),
+    // `None` for printed static-definition entries.
+    //
+    // Second half of the CR 611.2c migration that keeps the
+    // `MustAttackAwayFromSource` affected filter intact
+    // (`effects/effect.rs`) — see the T13 regression
+    // (`affected_population_does_not_follow_a_stolen_source`).
+    let condition_controller = active_effect_condition_controller(state, effect);
+    let ctx = FilterContext::from_source_with_controller(effect.source_id, condition_controller);
+    let condition_uses_recipient = effect
+        .condition
+        .as_ref()
+        .is_some_and(condition_uses_recipient_context);
+    let non_recipient_condition_passes = effect.condition.as_ref().is_none_or(|condition| {
+        condition_uses_recipient
+            || evaluate_condition(state, condition, condition_controller, effect.source_id)
+    });
+    scan_ids
+        .iter()
+        // Incremental fast path: re-apply only to the freshly-entered objects.
+        // The rest of the battlefield was not reset and keeps its prior derived
+        // values, so re-applying to it would double-apply.
+        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
+        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+        .filter(|&&id| {
+            non_recipient_condition_passes
+                && effect.condition.as_ref().is_none_or(|condition| {
+                    !condition_uses_recipient
+                        || evaluate_condition_with_recipient(
+                            state,
+                            condition,
+                            condition_controller,
+                            effect.source_id,
+                            id,
+                        )
+                })
+        })
+        .copied()
+        .collect()
+}
+
 fn apply_continuous_effect_filtered(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -11545,66 +11901,7 @@ fn apply_continuous_effect_filtered(
     let affected_ids: &[ObjectId] = if let Some(retained) = retained_affected_ids {
         retained
     } else {
-        let scan_ids = declared_zone_self_static_candidates(state, effect, zone_cache)
-            .unwrap_or_else(|| {
-                effect_candidate_ids(state, &effect.affected_filter, effect.source_id, zone_cache)
-            });
-        // CR 109.5 + CR 611.2c: a continuous effect created by a RESOLVED spell
-        // or ability reads "you"/"your" as that spell or ability's controller,
-        // not as whoever controls the source object at the moment of some later
-        // layer pass. CR 109.5 fixes this for EVERY resolution-created case:
-        // "The words 'you' and 'your' on an object refer to the object's
-        // controller" (so, for a spell, the spell's controller); "For an
-        // activated ability, this is the player who activated the ability";
-        // "For a triggered ability, this is the controller of the object when
-        // the ability triggered". `effect.controller` is that player in all
-        // three cases. CR 611.2c makes only "the set of objects" dynamic for a
-        // rules-modifying continuous effect; the PLAYER reference stays fixed,
-        // so a controller-relative `affected` filter ("creatures your opponents
-        // control") must be evaluated against the snapshot the TCE already
-        // carries. A PRINTED static keeps the live reading (CR 109.5: "For a
-        // static ability, this is the current controller of the object it's
-        // on"), which is exactly what `transient_id` discriminates: `Some(..)`
-        // for resolution-created transients (`gather_transient_continuous_effects`),
-        // `None` for printed static-definition entries.
-        //
-        // Second half of the CR 611.2c migration that keeps the
-        // `MustAttackAwayFromSource` affected filter intact
-        // (`effects/effect.rs`) — see the T13 regression
-        // (`affected_population_does_not_follow_a_stolen_source`).
-        let condition_controller = active_effect_condition_controller(state, effect);
-        let ctx =
-            FilterContext::from_source_with_controller(effect.source_id, condition_controller);
-        let condition_uses_recipient = effect
-            .condition
-            .as_ref()
-            .is_some_and(condition_uses_recipient_context);
-        let non_recipient_condition_passes = effect.condition.as_ref().is_none_or(|condition| {
-            condition_uses_recipient
-                || evaluate_condition(state, condition, condition_controller, effect.source_id)
-        });
-        newly_affected_ids = scan_ids
-            .iter()
-            // Incremental fast path: re-apply only to the freshly-entered objects.
-            // The rest of the battlefield was not reset and keeps its prior derived
-            // values, so re-applying to it would double-apply.
-            .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
-            .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
-            .filter(|&&id| {
-                non_recipient_condition_passes
-                    && effect.condition.as_ref().is_none_or(|condition| {
-                        !condition_uses_recipient
-                            || evaluate_condition_with_recipient(
-                                state,
-                                condition,
-                                condition_controller,
-                                effect.source_id,
-                                id,
-                            )
-                    })
-            })
-            .copied()
-            .collect();
+        newly_affected_ids = scan_effect_affected_ids(state, effect, restrict_to, zone_cache);
         if let Some(key) = group_key {
             started_effect_sets
                 .entry(key)
