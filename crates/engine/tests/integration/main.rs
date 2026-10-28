@@ -1806,6 +1806,7 @@ mod edgar_markov_eminence_command_zone;
 mod elixir_gain_life_cards_shuffled;
 mod end_blaze_epiphany_choose_exiled_this_way;
 mod end_combat_phase;
+mod entered_under_your_control_counter_gap_coverage;
 mod enters_tapped_this_turn;
 mod escape_to_wilds_2879;
 mod esper_terra_saga_token_lore;
