@@ -7449,11 +7449,13 @@ fn validate_x_mana_sacrifice_residual(
                     unsupported_sacrifice = true;
                 }
             }
+            // CR 107.3 + CR 602.2b: tapping or untapping the source is paid by
+            // the ordinary activation payment once the selected sacrifice is
+            // made ("{X}{2}, {T}, Sacrifice a Desert").
+            AbilityCost::Tap | AbilityCost::Untap => {}
             AbilityCost::Sacrifice(_)
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
-            | AbilityCost::Tap
-            | AbilityCost::Untap
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Discard { .. }
@@ -30170,8 +30172,6 @@ its replicate cost was paid.)\nDraw a card.";
                     quantity: QuantityExpr::Fixed { value: 1 },
                 },
             ),
-            ("tap", AbilityCost::Tap),
-            ("untap", AbilityCost::Untap),
             ("loyalty", AbilityCost::Loyalty { amount: -1 }),
             (
                 "self sacrifice",
