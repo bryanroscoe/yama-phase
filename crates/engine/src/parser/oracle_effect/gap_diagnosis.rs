@@ -1596,12 +1596,21 @@ mod tests {
         assert_eq!(
             swallowed_clause_gap(
                 SwallowedAxis::Quantity,
+                "creatures you control get +1/+0 until end of turn for each squirrel \
+                 bearing a tiny hat you control."
+            ),
+            Some(ClauseGap::Quantity {
+                operand: "squirrel bearing a tiny hat you control".to_string()
+            })
+        );
+        // CR 122.1: a counter total across a population is a readable operand.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Quantity,
                 "creatures you control get +1/+0 until end of turn for each lore counter \
                  among sagas you control."
             ),
-            Some(ClauseGap::Quantity {
-                operand: "lore counter among sagas you control".to_string()
-            })
+            None
         );
     }
 
