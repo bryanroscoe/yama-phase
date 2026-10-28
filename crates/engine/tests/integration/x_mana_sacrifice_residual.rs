@@ -480,8 +480,12 @@ fn x_mana_targeted_count_keeps_target_and_records_crime_once() {
     assert_eq!(runner.state().players[0].crimes_committed_this_turn, 1);
 }
 
+/// CR 107.3 + CR 601.2h + CR 602.2b: after the X mana, a {T} beside a
+/// counted sacrifice in the remaining cost is paid by the ordinary activation
+/// payment once the sacrifice is made (Lazotep Quarry's "{X}{2}, {T},
+/// Sacrifice a Desert"), instead of refusing the activation.
 #[test]
-fn x_mana_count_plus_tap_refuses_before_any_sacrifice() {
+fn x_mana_count_plus_tap_taps_after_the_sacrifice() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
@@ -521,26 +525,20 @@ fn x_mana_count_plus_tap_refuses_before_any_sacrifice() {
             .activation_residual,
         ActivationResidual::XMana
     ));
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        runner.act(GameAction::ChooseX { value: 1 })
-    }));
-    match result {
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied());
-            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
-        }
-        Ok(Err(EngineError::ActionNotAllowed(message))) => {
-            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
-        }
-        Ok(other) => panic!("mixed Tap suffix unexpectedly proceeded: {other:?}"),
-    }
-    assert!(runner.state().stack.is_empty());
-    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
-    assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
-    assert!(!runner.state().objects[&source].tapped);
+    choose_x_and_finish_mana(&mut runner, 1);
+    let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the counted sacrifice prompt: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(choices.contains(&other));
+    runner
+        .act(GameAction::SelectCards { cards: vec![other] })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1, "the ability is on the stack");
+    assert_eq!(runner.state().objects[&other].zone, Zone::Graveyard);
+    assert!(runner.state().objects[&source].tapped, "the {{T}} was paid");
 }
 
 #[test]
@@ -1574,8 +1572,6 @@ fn x_mana_mixed_requirement_life_tap_and_exile_shapes_refuse_atomically() {
             )),
             1,
         ),
-        ("tap after Count0", AbilityCost::Tap, 0),
-        ("tap after Count1", AbilityCost::Tap, 1),
         (
             "hand exile",
             AbilityCost::Exile {
