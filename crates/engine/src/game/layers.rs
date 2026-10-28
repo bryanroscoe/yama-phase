@@ -8141,6 +8141,81 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
     )
 }
 
+/// The static-source half of [`collect_shared_active_continuous_effects_matching`]:
+/// functioning statics and the Ring emblem, narrowed to the modifications
+/// `keep` accepts, without the stored transients.
+pub(crate) fn collect_static_source_continuous_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> (Vec<ActiveContinuousEffect>, GatherDependence) {
+    let mut pass = GatherPass::matching(keep);
+    let mut effects = Vec::new();
+    for_each_static_effect_source(state, |state, obj| {
+        effects.extend(static_source_effects_in_pass(state, obj, &mut pass));
+    });
+    gather_ring_emblem_continuous_effects(state, &mut effects, pass.admission());
+    (effects, pass.into_dependence())
+}
+
+/// The transient half of [`collect_shared_active_continuous_effects_matching`],
+/// read from the stored transients alone: every modification that could yield
+/// an effect `keep` accepts, whether or not the transient is live, paired with
+/// the one object the effect can apply to when the transient's affected filter
+/// names it ([`TargetFilter::SpecificObject`] matches that id alone). A
+/// modification a granted static would donate to its hosts' recipients names
+/// no object. Evaluates no liveness, condition or filter, so it is a
+/// conservative superset of the transient effects any gather can keep.
+pub(crate) fn transient_modifications_reaching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> Vec<(&ContinuousModification, Option<ObjectId>)> {
+    let mut reaching = Vec::new();
+    for tce in &state.transient_continuous_effects {
+        let recipient = match &tce.affected {
+            TargetFilter::SpecificObject { id } => Some(*id),
+            _ => None,
+        };
+        for modification in &tce.modifications {
+            if keep(modification) {
+                reaching.push((modification, recipient));
+            } else if let ContinuousModification::GrantStaticAbility { definition: inner } =
+                modification
+            {
+                reaching.extend(
+                    inner
+                        .modifications
+                        .iter()
+                        .filter(|granted| keep(granted))
+                        .map(|granted| (granted, None)),
+                );
+            }
+        }
+    }
+    reaching
+}
+
+/// Whether [`active_continuous_effects_from_base_static_source`] could return
+/// any effect for `source` under `keep`, decided from the definitions alone:
+/// that builder admits only the definitions this one admits, and produces an
+/// effect only for a modification that is not skipped and that
+/// [`ModificationAdmission::reaches_admitted`] accepts. A `false` is exact; a
+/// `true` may still produce nothing once conditions and filters are read.
+pub(crate) fn base_static_source_may_reach(
+    source: &crate::game::game_object::GameObject,
+    keep: fn(&ContinuousModification) -> bool,
+) -> bool {
+    let admission = ModificationAdmission::Matching(keep);
+    source
+        .base_static_definitions
+        .iter()
+        .filter(|def| base_static_can_source_off_zone_keyword_query(def, source.zone))
+        .any(|def| {
+            def.modifications.iter().any(|modification| {
+                !continuous_gather_skips(modification) && admission.reaches_admitted(modification)
+            })
+        })
+}
+
 fn base_static_can_source_off_zone_keyword_query(
     def: &StaticDefinition,
     source_zone: Zone,
