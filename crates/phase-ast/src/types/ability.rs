@@ -29948,6 +29948,9 @@ impl TargetFilter {
                 filters.iter().find_map(|f| f.extract_in_zone())
             }
             TargetFilter::Not { filter } => filter.extract_in_zone(),
+            // CR 608.2c: a tracked set narrowed by a filter lives where that
+            // filter says ("a creature card put into a graveyard this way").
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.extract_in_zone(),
             TargetFilter::ExiledBySource => Some(crate::types::zones::Zone::Exile),
             // CR 109.2: a stack-spell/stack-ability filter denotes an object on
             // the stack by construction — mirrors the `ExiledBySource` arm above
@@ -29999,6 +30002,7 @@ impl TargetFilter {
                 }
             }
             TargetFilter::Not { filter } => filter.collect_zones(out),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.collect_zones(out),
             TargetFilter::ExiledBySource if !out.contains(&crate::types::zones::Zone::Exile) => {
                 out.push(crate::types::zones::Zone::Exile);
             }

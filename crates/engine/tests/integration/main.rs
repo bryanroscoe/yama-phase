@@ -344,3 +344,5 @@ mod chosen_player_anaphor_quantities;
 mod independent_game_state_conditional_sentences;
 
 mod addendum_those_creatures_relay;
+
+mod put_into_graveyard_this_way_return;
