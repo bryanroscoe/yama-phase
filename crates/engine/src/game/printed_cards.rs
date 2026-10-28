@@ -1670,7 +1670,7 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // "choose a land card name") leaves the AI with zero legal candidates after a
     // game is restored from a persisted snapshot, deadlocking the session.
     if state.all_card_names.is_empty() {
-        state.all_card_names = db.card_names().into();
+        state.all_card_names = db.shared_card_names();
     }
 
     // CR 400.11 + CR 400.11b: stock the sealed-booster shelf for a game that can
