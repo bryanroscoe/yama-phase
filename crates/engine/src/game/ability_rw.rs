@@ -2267,7 +2267,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::VoteCount { .. }
@@ -6598,6 +6598,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_player_of(StateKind::PlayerLife)
         }
         QuantityRef::StartingLifeTotal { player } => rw_player_scope(player),
+        // CR 903.8: reads the per-commander cast ledger for `player`; the ledger
+        // is written only by casting, so only the player binding is relevant.
+        QuantityRef::CommanderCastFromCommandZoneCount { player } => rw_player_scope(player),
         // CR 701.57a: reads the transient last-discover scalar, written only by
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
@@ -6770,8 +6773,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
-        | QuantityRef::CommanderManaValue { .. }
+                | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::Speed { .. } => RwProfile::empty(),
         QuantityRef::ZoneCardCount {
             zone,
