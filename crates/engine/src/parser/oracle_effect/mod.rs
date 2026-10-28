@@ -43736,6 +43736,43 @@ fn for_any_number_of_opponents_equivalent(text: &str) -> Option<String> {
     ))
 }
 
+/// CR 115.1 + CR 601.2c + CR 608.2c: "For each opponent, you may put up to
+/// one target <card> from that player's graveyard <rest>" (Sepulchral
+/// Primordial) is up to one target from each opponent's graveyard: any number
+/// of targets from opponents' graveyards, no two owned by the same player (a
+/// card in a graveyard is controlled by its owner, CR 108.4a). Its equivalent
+/// wording, or `None` for any other text. See `parse_effect_chain_ir_body`.
+fn for_each_opponent_graveyard_target_equivalent(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let head = "for each opponent, ";
+    let (_, (_, may, verb, _, thing, _, rest)) = (
+        tag::<_, _, OracleError<'_>>(head),
+        opt(tag("you may ")),
+        take_until(" up to one target "),
+        tag(" up to one target "),
+        take_until(" from that player's graveyard"),
+        tag(" from that player's graveyard"),
+        nom::combinator::rest,
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    // Only the put-onto-the-battlefield instruction: a per-opponent free cast
+    // ("you may cast up to one target … from that player's graveyard without
+    // paying its mana cost") keeps its own paired fan-out.
+    if verb != "put" {
+        return None;
+    }
+    let mut at = head.len() + may.map_or(0, str::len);
+    let verb_original = &text[at..at + verb.len()];
+    at += verb.len() + " up to one target ".len();
+    let thing_original = &text[at..at + thing.len()];
+    let rest_original = &text[text.len() - rest.len()..];
+    let may = if may.is_some() { "you may " } else { "" };
+    Some(format!(
+        "{may}{verb_original} any number of target {thing_original} from an opponent's graveyard controlled by different players{rest_original}"
+    ))
+}
+
 /// Parse an effect chain into its IR. A thin wrapper around
 /// [`parse_effect_chain_ir_body`] so every one of its return paths passes
 /// through the per-opponent choice tail rule
@@ -43802,7 +43839,9 @@ fn parse_effect_chain_ir_body(
     // the "any number of target" and "controlled by different players" grammar
     // already lowers (an unbounded multi-target with
     // `TargetSelectionConstraint::DifferentObjectControllers`).
-    if let Some(equivalent) = for_any_number_of_opponents_equivalent(text) {
+    if let Some(equivalent) = for_any_number_of_opponents_equivalent(text)
+        .or_else(|| for_each_opponent_graveyard_target_equivalent(text))
+    {
         return parse_effect_chain_ir_body(&equivalent, kind, ctx, already_chosen_players);
     }
     let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
