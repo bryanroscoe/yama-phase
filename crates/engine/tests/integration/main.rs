@@ -20,6 +20,7 @@ mod ad_nauseam_repeat;
 mod adamant_enters_with_leading_if_gate;
 mod adapter_contract_fixtures;
 mod added_untap_step_is_not_a_turn_start;
+mod addendum_those_creatures_relay;
 mod additional_combat_anchor_and_recipient;
 mod additional_phase_recipient_kinds;
 mod advanced_reconstruction_regression;
