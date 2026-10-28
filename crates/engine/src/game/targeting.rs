@@ -1452,10 +1452,18 @@ pub fn resolved_targets(
     }
     // CR 608.2c: `None` and unresolved `ParentTarget` (no event referent, no
     // propagated targets) fall back to the source object.
+    // CR 115.6 + CR 608.2c: an ability that declared its own optional targets
+    // ("choose up to one target creature ..., then return that creature") and
+    // chose none has no referent for its anaphor; it does nothing rather than
+    // act on its source.
+    let declined_own_optional_targets = matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.targeting_is_optional()
+        && ability.target_choice_timing != TargetChoiceTiming::Resolution;
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget
-    ) && ability.targets.is_empty();
+    ) && ability.targets.is_empty()
+        && !declined_own_optional_targets;
     if use_self {
         return vec![TargetRef::Object(ability.source_id)];
     }
@@ -7877,6 +7885,29 @@ mod tests {
             "re-validation must not admit an opponent-owned card that selection \
              refused: {resolved_foreign:?}"
         );
+    }
+
+    /// CR 115.6 + CR 608.2c: an ability that declared "up to one" targets and
+    /// chose none has no referent for `ParentTarget`; it must not fall back to
+    /// its source. An ability with no optional targets of its own keeps the
+    /// source fallback.
+    #[test]
+    fn resolved_targets_parent_target_after_declined_optional_targets_is_empty() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Stack,
+        );
+        let mut ability = make_resolved_with_targets(vec![], source);
+        assert_eq!(
+            resolved_targets(&ability, &TargetFilter::ParentTarget, &state),
+            vec![TargetRef::Object(source)]
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 1));
+        assert!(resolved_targets(&ability, &TargetFilter::ParentTarget, &state).is_empty());
     }
 
     fn make_resolved_with_targets(
