@@ -95348,3 +95348,72 @@ fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
         })
     ));
 }
+
+/// CR 608.2c + CR 400.7j: Necromantic Selection — "Destroy all creatures, then
+/// return a creature card put into a graveyard this way to the battlefield under
+/// your control." The returned card must come from the cards this spell put into
+/// a graveyard (the chain's tracked set), never a card already there.
+#[test]
+fn return_card_put_into_a_graveyard_this_way_reads_the_tracked_set() {
+    let def = parse_effect_chain(
+        "Destroy all creatures, then return a creature card put into a graveyard this way \
+         to the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::DestroyAll { .. }),
+        "head is the destroy, got {:?}",
+        def.effect
+    );
+    let ret = def.sub_ability.as_ref().expect("return clause chained");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*ret.effect
+    else {
+        panic!("expected ChangeZone, got {:?}", ret.effect);
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    // The tracked set may be intersected with the graveyard zone filter the
+    // return's origin adds.
+    let tracked = match target {
+        TargetFilter::And { filters } => filters
+            .iter()
+            .find(|f| matches!(f, TargetFilter::TrackedSetFiltered { .. }))
+            .unwrap_or_else(|| panic!("return target must read the tracked set, got {target:?}")),
+        other => other,
+    };
+    let TargetFilter::TrackedSetFiltered {
+        filter, caused_by, ..
+    } = tracked
+    else {
+        panic!("return target must be the tracked set, got {target:?}");
+    };
+    assert_eq!(*caused_by, None);
+    assert!(
+        matches!(&**filter, TargetFilter::Typed(typed)
+            if typed.type_filters.contains(&TypeFilter::Creature)),
+        "the tracked set is narrowed to creature cards, got {filter:?}"
+    );
+}
+
+/// The relative-clause form "that was put into a graveyard this way" reads the
+/// same tracked set.
+#[test]
+fn card_that_was_put_into_a_graveyard_this_way_reads_the_tracked_set() {
+    let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(
+        "creature card that was put into a graveyard this way",
+    );
+    assert_eq!(rest.trim(), "");
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::TrackedSetFiltered {
+                caused_by: None,
+                ..
+            }
+        ),
+        "got {filter:?}"
+    );
+}

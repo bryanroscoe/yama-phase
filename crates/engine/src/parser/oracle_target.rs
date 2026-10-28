@@ -4238,6 +4238,30 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += counters_offset + (remaining_counters.len() - rest.len());
     }
 
+    // CR 608.2c + CR 400.7j: "[that was|that were] put into a graveyard this
+    // way" — the cards an earlier instruction of the same ability put into a
+    // graveyard (Necromantic Selection: "Destroy all creatures, then return a
+    // creature card put into a graveyard this way"). The producer publishes the
+    // cards it moved into the chain's tracked set; `TrackedSetFiltered`
+    // intersects it with the type filter, so a card that was already in a
+    // graveyard is never offered. Not action-discriminated (`caused_by: None`),
+    // like the "put into a graveyard this way" count.
+    let mut put_into_graveyard_this_way = false;
+    let remaining_graveyard = lower[pos..].trim_start();
+    let graveyard_offset = lower[pos..].len() - remaining_graveyard.len();
+    if let Ok((rest, _)) = preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("that was "),
+            tag("that were "),
+        ))),
+        tag("put into a graveyard this way"),
+    )
+    .parse(remaining_graveyard)
+    {
+        put_into_graveyard_this_way = true;
+        pos += graveyard_offset + (remaining_graveyard.len() - rest.len());
+    }
+
     // CR 201.2a + CR 201.4: "<type-phrase> with the chosen name" / "<type-phrase>
     // with a name chosen for ~" — restrict the object class to objects whose name
     // equals the source's ChosenAttribute::CardName (bound by a preceding
@@ -4585,6 +4609,16 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             filter: Box::new(filter),
             // "counters put this way" names objects that received counters but
             // did not change zones — a selection set with no zone binding.
+            caused_by: None,
+        }
+    } else {
+        filter
+    };
+
+    let filter = if put_into_graveyard_this_way {
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(filter),
             caused_by: None,
         }
     } else {
