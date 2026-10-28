@@ -43,7 +43,8 @@ use engine::game::players;
 use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::copy_value::{
-    copy_effect_strips_legendary, copy_target_penalties, score_legend_rule_keep,
+    copy_effect_strips_legendary, copy_target_penalties, is_self_copy_effect,
+    score_legend_rule_keep,
 };
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_polarity_for_source,
@@ -1300,11 +1301,32 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
             4.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 8.0
         }
         TargetRef::Object(object_id) => {
+            // CR 707.2: "~ becomes a copy of target X" changes only the source;
+            // X is read, not harmed or helped, so whose X it is doesn't matter
+            // here. CopyValuePolicy scores what the copy is worth.
+            if only_read_as_copy_source(ctx, *object_id) {
+                return 0.0;
+            }
             let object_beneficial =
                 slot_is_beneficial(ctx, targeted_object_impact(ctx, *object_id), beneficial);
             score_target_object(ctx, *object_id, object_beneficial)
         }
     }
+}
+
+/// Every effect that targets `object_id` is a self-copy ("~ becomes a copy of
+/// target ..."), so the target itself is unaffected.
+fn only_read_as_copy_source(ctx: &PolicyContext<'_>, object_id: ObjectId) -> bool {
+    let mut targeted = false;
+    for effect in ctx.effects() {
+        if effect_targets_object(ctx, effect, object_id) {
+            if !is_self_copy_effect(effect) {
+                return false;
+            }
+            targeted = true;
+        }
+    }
+    targeted
 }
 
 fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial: bool) -> f64 {
