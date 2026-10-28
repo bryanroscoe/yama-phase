@@ -18149,6 +18149,10 @@ pub enum ParsedCondition {
     /// speed-is-4 test and the CR 101.1 card-over-rule override that raises that
     /// cap cannot diverge between the static and restriction readings.
     HasMaxSpeed,
+    /// CR 725.1: "if you're the monarch" — the evaluating player holds the
+    /// monarch designation (Crown of Gondor: "Equip {4}. This ability costs {3}
+    /// less to activate if you're the monarch.").
+    IsMonarch,
     /// CR 102.1: "The active player is the player whose turn it is." True when
     /// the scoped player is the active player — gates a casting/restriction
     /// predicate on "if it's your turn". For "if it's not your turn" the parser

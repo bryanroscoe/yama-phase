@@ -304,6 +304,12 @@ fn static_condition_to_restriction_condition(
         // `game::speed::has_max_speed`, so the restriction cannot drift from the
         // static one this condition also feeds.
         StaticCondition::HasMaxSpeed => Some(ParsedCondition::HasMaxSpeed),
+        // CR 725.1: "you're the monarch" — a designation read off the scoped
+        // player, like the leaves above. Other players' monarchy (a defending
+        // player's) has no restriction evaluator and stays declined below.
+        StaticCondition::IsMonarch {
+            player: crate::types::ability::PlayerScope::Controller,
+        } => Some(ParsedCondition::IsMonarch),
         // CR 702.195b: The enduring story designation is available to restrictions.
         StaticCondition::HasEnduringStory => Some(ParsedCondition::HasEnduringStory),
         // CR 309.7 + CR 602.5b: dungeon completion is a player-status leaf of the

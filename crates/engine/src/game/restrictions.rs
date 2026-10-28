@@ -2019,6 +2019,8 @@ fn evaluate_condition_for_granter(
         // ("a player has max speed if their speed is 4") and the CR 101.1
         // card-over-rule override that lets a static raise that cap (Gomif) read
         // identically whether a card gates a static ability or an activation.
+        // CR 725.1: the player the condition is evaluated for is the monarch.
+        ParsedCondition::IsMonarch => state.monarch == Some(player),
         ParsedCondition::HasMaxSpeed => state.objects.get(&source_id).is_some_and(|object| {
             let whose_speed = if object.zone == Zone::Battlefield {
                 object.controller

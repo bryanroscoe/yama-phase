@@ -4906,6 +4906,19 @@ mod tests {
         assert_eq!(two.amount_per, 2);
     }
 
+    /// CR 725.1 + CR 601.2f: Crown of Gondor — "This ability costs {3} less to
+    /// activate if you're the monarch." gates on the monarch designation.
+    #[test]
+    fn cost_reduction_if_you_are_the_monarch() {
+        use crate::types::ability::ParsedCondition;
+        let r = try_parse_cost_reduction(
+            "this ability costs {3} less to activate if you're the monarch",
+        )
+        .expect("must parse");
+        assert_eq!(r.amount_per, 3);
+        assert_eq!(r.condition, Some(ParsedCondition::IsMonarch));
+    }
+
     /// CR 508.1a + CR 601.2f: the conditional flat form gated by "you attacked
     /// with a <filter>" extracts a filtered `AttackedThisTurn` quantity gate
     /// (GE 1). The trailing "this turn" is stripped upstream as a duration

@@ -10945,6 +10945,7 @@ fn parsed_condition_reads_filter_population(
         | ParsedCondition::HasEnduringStory
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed
+        | ParsedCondition::IsMonarch
         | ParsedCondition::IsYourTurn
         | ParsedCondition::IsOpponentsTurn
         | ParsedCondition::CurrentPhaseIs { .. }

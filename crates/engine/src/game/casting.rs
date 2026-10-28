@@ -32835,6 +32835,7 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead)
         | ParsedCondition::HasEnduringStory
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed
+        | ParsedCondition::IsMonarch
         | ParsedCondition::IsYourTurn
         | ParsedCondition::IsOpponentsTurn
         | ParsedCondition::CurrentPhaseIs { .. }
