@@ -27184,6 +27184,7 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
@@ -43017,6 +43018,8 @@ pub enum ContinuousModification {
     /// their mana abilities, additive. Distinct from AddAllBasicLandTypes
     /// (CR 305.6, 5 basic types). Omo, Queen of Vesuva. Layer 4.
     AddAllLandTypes,
+    /// CR 205.3i + CR 305.6: additive nonbasic land subtypes carry no intrinsic mana ability.
+    AddAllNonbasicLandTypes,
     /// Adds the source object's chosen subtype (creature type or basic land type).
     /// Resolved at layer evaluation time from the source's `chosen_attributes`.
     AddChosenSubtype {

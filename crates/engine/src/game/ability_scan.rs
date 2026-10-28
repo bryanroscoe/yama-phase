@@ -6689,6 +6689,7 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword

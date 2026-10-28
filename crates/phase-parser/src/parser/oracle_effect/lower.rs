@@ -13284,6 +13284,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
@@ -13388,6 +13389,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword

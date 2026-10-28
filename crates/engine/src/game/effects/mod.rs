@@ -10538,6 +10538,7 @@ fn continuous_modification_reads_filter_population(
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddAllNonbasicLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword

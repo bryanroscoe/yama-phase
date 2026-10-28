@@ -5508,6 +5508,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddAllLandTypes => "all land types".into(),
+        ContinuousModification::AddAllNonbasicLandTypes => "all nonbasic land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor { mode } => match mode {
             crate::types::ability::ColorChangeMode::Set => "set chosen color".into(),
