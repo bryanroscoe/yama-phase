@@ -46848,26 +46848,32 @@ pub mod tests {
             runner.advance_until_stack_empty();
         });
 
+        // The static part (the anchor's static, read through the frame's list)
+        // evaluates nothing, so the first query of a frame stores it and every
+        // later query reuses it; each query still gathers its own transients.
         assert!(
             scopes.iter().all(|scope| {
                 let counts = scope.counts;
+                let gathered = usize::from(counts.matched > 0);
                 counts.context_fall_opens == counts.matched
-                    && (counts.fills, counts.hits, counts.unmatched) == (0, 0, 0)
+                    && counts.fills == gathered
+                    && counts.hits == counts.matched - gathered
+                    && counts.unmatched == 0
             }),
-            "reach-guard: every keyword query in every frame asked the frame's state and fell \
-             open: {scopes:?}"
+            "reach-guard: every keyword query in every frame asked the frame's state, gathered \
+             its transients, and shared the frame's static part: {scopes:?}"
         );
         assert!(
             scopes.iter().any(|scope| scope.counts.matched >= 2),
             "reach-guard: a frame's first query took the Pending arm and a later one the \
              ContextDependent arm: {scopes:?}"
         );
+        // The collector's companion pre-check gathers the static part once per
+        // frame through the same list, so every frame walks exactly once.
         for scope in &scopes {
             assert_eq!(
-                scope.source_scans,
-                usize::from(scope.counts.matched > 0),
-                "one off-zone static-source walk per frame that gathered, not one per query: \
-                 {scope:?}"
+                scope.source_scans, 1,
+                "one off-zone static-source walk per frame, not one per query: {scope:?}"
             );
         }
 
