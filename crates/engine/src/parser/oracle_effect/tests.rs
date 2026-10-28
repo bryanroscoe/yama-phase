@@ -79955,20 +79955,20 @@ fn keeper_dispose_sentence_two_requires_a_bare_defended_scope() {
     );
 }
 
-/// N10 + N11 — the two sentence-two deferrals stay deferred, on
-/// rules-correctness grounds, driven on the REAL cards rather than a synthetic
-/// subject swap.
+/// N10 + N11 — sentence two of the broadcast and player-subject classes,
+/// driven on the REAL cards rather than a synthetic subject swap.
 ///
 /// A broadcast subject's affected set must stay LIVE (CR 611.2c, second
-/// sentence — which is what Chronomantic Escape's printed ruling says), and a
-/// player-scoped subject is not an object restriction at all (CR 508.1c).
-/// "Fixing" either by widening the subject match of the sentence-two branch is
-/// the failure this row exists to catch: each card must keep the
-/// `Effect::Unimplemented` gap it carries at BASE_SHA, so coverage stays
-/// honestly red. Paired positive: Promise of Loyalty's anaphoric subject IS
-/// claimed, in the same test, so a blanket decline cannot green this row.
+/// sentence — which is what Chronomantic Escape's printed ruling says). It is
+/// now claimed: the grant is emitted over the `Typed` population, and
+/// `register_transient_effect` installs it as one transient effect with the
+/// filter intact (Jace, Multiverse Architect's "creatures they control can't
+/// attack Jaces you control" is the same shape). A player-scoped subject is
+/// not an object restriction at all (CR 508.1c), so Champions of Minas
+/// Tirith keeps its honest `Effect::Unimplemented` gap. Paired positive:
+/// Promise of Loyalty's anaphoric subject is claimed too.
 #[test]
-fn sentence_two_broadcast_and_player_subjects_stay_declined() {
+fn sentence_two_broadcast_subjects_install_and_player_subjects_stay_declined() {
     fn has_cant_attack_gap(def: &AbilityDefinition) -> bool {
         let mut current = Some(def);
         while let Some(ability) = current {
@@ -79994,8 +79994,8 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined() {
         &[],
     );
     assert!(
-        escape.abilities.iter().any(has_cant_attack_gap),
-        "Chronomantic Escape's broadcast restriction must stay an honest gap: {:?}",
+        !escape.abilities.iter().any(has_cant_attack_gap),
+        "Chronomantic Escape's broadcast restriction is claimed: {:?}",
         escape.abilities
     );
 
@@ -80011,8 +80011,8 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined() {
         inertia
             .triggers
             .iter()
-            .any(|trigger| trigger.execute.as_deref().is_some_and(has_cant_attack_gap)),
-        "Web of Inertia's broadcast restriction must stay an honest gap: {:?}",
+            .all(|trigger| !trigger.execute.as_deref().is_some_and(has_cant_attack_gap)),
+        "Web of Inertia's broadcast restriction is claimed: {:?}",
         inertia.triggers
     );
 
