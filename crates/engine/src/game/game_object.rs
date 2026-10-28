@@ -4096,6 +4096,22 @@ impl GameObject {
         self.phase_status.is_phased_out()
     }
 
+    /// CR 113.6 + CR 113.6b + CR 604.3: Whether this object, outside the
+    /// battlefield and the command zone, may generate continuous effects from
+    /// where it is: it is phased in and carries a static that opts into a
+    /// non-battlefield zone or a characteristic-defining ability (which
+    /// functions in every zone). Battlefield and command-zone sources are
+    /// indexed separately; `false` here is exact, while each static's own zone
+    /// gate still decides whether it functions.
+    pub fn may_source_statics_off_battlefield(&self) -> bool {
+        !matches!(self.zone, Zone::Battlefield | Zone::Command)
+            && !self.is_phased_out()
+            && self
+                .static_definitions
+                .iter_all()
+                .any(|def| !def.active_zones.is_empty() || def.characteristic_defining)
+    }
+
     /// CR 702.26b: Only phased-out permanents on the battlefield are treated
     /// as though they do not exist.
     pub fn is_phased_out_permanent(&self) -> bool {
