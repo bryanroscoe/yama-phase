@@ -95764,6 +95764,50 @@ fn live_control_and_unqualified_entry_filters_remain_supported() {
     }
 }
 
+/// CR 205.1b + CR 613.1d/e: the contracted plural copula "They're black Zombies
+/// in addition to their other colors and types" adds the color and subtype.
+#[test]
+fn theyre_additive_type_clause_adds_color_and_subtype() {
+    let parsed = parse_card(
+        "{T}, Remove three study counters from Grimoire of the Dead and sacrifice it: Put all creature cards from all graveyards onto the battlefield under your control. They're black Zombies in addition to their other colors and types.",
+        "Grimoire of the Dead",
+        &[],
+        &["Artifact"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let json = serde_json::to_string(&parsed.abilities).expect("serialize");
+    assert!(json.contains("\"AddColor\""), "{json}");
+    assert!(json.contains("\"Zombie\""), "{json}");
+}
+
+/// CR 400.7 + CR 603.10a: inside a dies trigger, the "it" of "return it to the
+/// battlefield ... It's a Spirit Detective" is the returned card.
+#[test]
+fn dies_trigger_returned_card_takes_the_contracted_type_line() {
+    let parsed = parse_card(
+        "When this creature dies, if it's not a Spirit, return it to the battlefield under its owner's control with four charge counters on it. It's a Spirit Detective.",
+        "Otherworldly Escort",
+        &[],
+        &["Creature"],
+    );
+    assert_card_has_no_gap(&parsed);
+}
+
+/// CR 903.4: "This ability doesn't affect its color identity" is consumed with
+/// the "is all colors" characteristic-defining line; color identity is read
+/// from the printed card for deck building.
+#[test]
+fn color_identity_rider_is_consumed_with_the_color_line() {
+    let parsed = parse_card(
+        "Fallaji Wayfarer is all colors. This ability doesn't affect its color identity.",
+        "Fallaji Wayfarer",
+        &[],
+        &["Creature"],
+    );
+    assert_card_has_no_gap(&parsed);
+    assert!(!parsed.statics.is_empty(), "{parsed:#?}");
+}
+
 /// CR 109.5 + CR 109.4: "for each opponent who controls fewer creatures than
 /// you" counts the opponents whose creature count is below the controller's.
 #[test]
