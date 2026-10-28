@@ -5321,6 +5321,28 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     )
 }
 
+/// CR 608.2c: "<type> card among those cards" — the members of the set the
+/// preceding instruction acted on ("exile the top four cards of your library …
+/// put a +1/+1 counter on it for each creature card among those cards", Journey
+/// to the Lost City) that match the type phrase. The demonstrative names the
+/// chain's tracked set, so this is a `FilteredTrackedSetSize` with no
+/// producing-action restriction.
+fn parse_for_each_type_among_those_cards(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, type_text) =
+        terminated(take_until(" among those cards"), tag(" among those cards")).parse(input)?;
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(filter),
+            caused_by: None,
+        },
+    ))
+}
+
 /// Parse "for each differently named <type>" patterns.
 /// Used for patterns like "for each differently named dungeon you've completed".
 /// CR 201.2: Distinct-by-name population count.
@@ -5552,6 +5574,7 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
             alt((
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
+                parse_for_each_type_among_those_cards,
             )),
             parse_foretold_cards_owned_in_exile,
             parse_zone_card_count,
@@ -15127,5 +15150,18 @@ mod tests {
                 player: PlayerScope::Controller,
             })
         );
+    }
+
+    /// CR 608.2c: "<type> card among those cards" counts the matching members
+    /// of the chain's tracked set.
+    #[test]
+    fn type_among_those_cards_counts_tracked_set_members() {
+        assert!(matches!(
+            parse_for_each_clause("creature card among those cards"),
+            Some(QuantityRef::FilteredTrackedSetSize {
+                caused_by: None,
+                ..
+            })
+        ));
     }
 }
