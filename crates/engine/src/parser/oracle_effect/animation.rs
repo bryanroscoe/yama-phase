@@ -77,8 +77,14 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         let after_where_lower = after_where.to_lowercase();
         rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
 
-        let (_, qty) = nom_quantity::parse_quantity_ref_complete(&after_where_lower).ok()?;
-        let dynamic_qty = QuantityExpr::Ref { qty };
+        // CR 107.3c + CR 208.3: a bare count ("~'s power") is a plain
+        // reference; any other where-X expression ("twice the number of Gates
+        // you control") goes through the shared where-X quantity grammar,
+        // which owns multipliers and arithmetic.
+        let dynamic_qty = match nom_quantity::parse_quantity_ref_complete(&after_where_lower) {
+            Ok((_, qty)) => QuantityExpr::Ref { qty },
+            Err(_) => super::lower::parse_where_x_quantity_expression(after_where)?,
+        };
         spec.dynamic_power = Some(dynamic_qty.clone());
         spec.dynamic_toughness = Some(dynamic_qty);
     }
@@ -1147,6 +1153,30 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+    }
+
+    /// CR 107.3c + CR 208.3: Sage of the Maze's "target land you control
+    /// becomes an X/X Citizen creature with haste in addition to its other
+    /// types, where X is twice the number of Gates you control".
+    #[test]
+    fn animation_where_x_accepts_a_multiplied_count() {
+        let spec = parse_animation_spec(
+            "an X/X Citizen creature with haste in addition to its other types, where X is twice the number of Gates you control",
+            &mut ParseContext::default(),
+        )
+        .expect("Sage of the Maze's animation must parse");
+        assert!(
+            matches!(
+                spec.dynamic_power,
+                Some(QuantityExpr::Multiply { factor: 2, .. })
+            ),
+            "{:?}",
+            spec.dynamic_power
+        );
+        assert_eq!(spec.dynamic_power, spec.dynamic_toughness);
+        assert!(spec.keywords.contains(&Keyword::Haste));
+        assert!(spec.types.iter().any(|t| t == "Citizen"));
+        assert!(spec.types.iter().any(|t| t == "Creature"));
     }
 
     #[test]
