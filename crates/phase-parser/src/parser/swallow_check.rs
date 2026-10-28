@@ -7074,12 +7074,13 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// `DynamicQty` reports the rejected operand.
     #[test]
     fn dynamic_qty_swallow_carries_the_rejected_operand() {
-        // Chong and Lily, Nomads (second mode, standalone). The operand
-        // is spanned by the marker's own `OperandSpan` and bounded by its own
-        // `end_bounds`; a hand-rolled split would produce a different string.
+        // The shape of Chong and Lily, Nomads' second mode with an operand the
+        // quantity grammar can't read. The operand is spanned by the marker's
+        // own `OperandSpan` and bounded by its own `end_bounds`; a hand-rolled
+        // split would produce a different string.
         let parsed = parse_named(
             "Whenever one or more Bards you control attack, creatures you control get \
-             +1/+0 until end of turn for each lore counter among Sagas you control.",
+             +1/+0 until end of turn for each squirrel bearing a tiny hat you control.",
             "Chong and Lily, Nomads",
             &["Creature"],
         );
@@ -7088,9 +7089,24 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         assert_eq!(
             warning.gap(),
             Some(&ClauseGap::Quantity {
-                operand: "lore counter among sagas you control".to_string()
+                operand: "squirrel bearing a tiny hat you control".to_string()
             }),
             "full warning: {warning:?}"
+        );
+
+        // CR 122.1: the printed operand, "lore counter among Sagas you control",
+        // is a total of counters across a population, so the real card swallows
+        // nothing.
+        let printed = parse_named(
+            "Whenever one or more Bards you control attack, creatures you control get \
+             +1/+0 until end of turn for each lore counter among Sagas you control.",
+            "Chong and Lily, Nomads",
+            &["Creature"],
+        );
+        assert!(
+            swallows_for(&printed, "DynamicQty").is_empty(),
+            "{:?}",
+            printed.parse_warnings
         );
     }
 
