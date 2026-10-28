@@ -639,6 +639,71 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
         });
     }
 
+    // A free-for-all down to two players: the free-for-all comparison no longer
+    // runs, and the duel's certified-lethal alpha strike above is gated on a
+    // two-player game, so attacks fall back to the per-attacker verdicts, which
+    // meet every attacker with the defender's best blocker: one untapped
+    // creature stops a whole attack on paper. Re-score the attack as a whole,
+    // as the comparison does. Under Stabilize the re-scored attack is taken
+    // only if it kills the opponent; PushLethal already attacks with
+    // everything. A whole attack that kills the opponent skips the crackback
+    // pruning below, as PushLethal does: a player who has lost doesn't swing
+    // back. Duels are unchanged.
+    let mut whole_attack_kills = false;
+    if opponents.len() == 1
+        && state.players.len() > 2
+        && matches!(
+            objective,
+            CombatObjective::Race | CombatObjective::PreserveAdvantage | CombatObjective::Stabilize
+        )
+    {
+        let mut chosen = attacking_ids.clone();
+        for &id in &mandatory {
+            if !chosen.contains(&id) {
+                chosen.push(id);
+            }
+        }
+        // `DownsideWeighted` held some attackers back for a man-land the
+        // defender can animate to block (latent blockers); the whole-attack
+        // model doesn't see those, so it may not add them back.
+        let held_for_latent: Vec<ObjectId> = if latent_blocker_bodies.is_empty() {
+            Vec::new()
+        } else {
+            candidates
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    latent_defender_best_block(
+                        state,
+                        id,
+                        evaluate_creature(state, id),
+                        &latent_blocker_bodies,
+                    )
+                    .is_some_and(|block| block.defender_gain > 0.0)
+                })
+                .collect()
+        };
+        if let Some(whole) = two_player_whole_attack(
+            state,
+            player,
+            opponents[0],
+            TwoPlayerAttack {
+                candidates: &candidates,
+                chosen: &chosen,
+                excluded: &held_for_latent,
+                blockers: &opponent_blockers,
+            },
+            &slices,
+            targeting.valid_attack_targets_by_attacker,
+        ) {
+            let stabilizing = matches!(objective, CombatObjective::Stabilize);
+            if whole.attackers.len() > chosen.len() && (!stabilizing || whole.tally.finishes) {
+                whole_attack_kills = whole.tally.finishes;
+                attacking_ids = whole.attackers;
+            }
+        }
+    }
+
     // CR 508.1d / CR 701.15b: union the mandatory must-attack set. These
     // creatures are declared regardless of the value heuristic's verdict.
     for &id in &mandatory {
@@ -649,7 +714,10 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
 
     // Crackback analysis: if tapping our attackers leaves us dead on the swing-back,
     // hold back non-vigilance creatures (highest-value first) until we survive.
-    if !attacking_ids.is_empty() && !matches!(objective, CombatObjective::PushLethal) {
+    if !attacking_ids.is_empty()
+        && !matches!(objective, CombatObjective::PushLethal)
+        && !whole_attack_kills
+    {
         let my_life = state.players[player.0 as usize].life;
         // Project opponent's upcoming begin-combat + attacker declaration so
         // crackback_damage sees scaled creatures (Ouroboroid class) and
@@ -1860,7 +1928,8 @@ fn score_whole_attack(
 /// Re-score one defender's proposal as a whole attack (see [`score_whole_attack`])
 /// and consider adding the declined attackers, largest unblocked damage first:
 /// the attack with all of them is scored, then every prefix of that order, and
-/// the best is kept (ties keep the earlier, smaller attack). Prefixes, not
+/// the best is kept (ties keep the smaller attack, except among attacks that
+/// kill the defender, where the larger keeps a margin). Prefixes, not
 /// one-at-a-time additions, because overwhelming a defender's blockers takes a
 /// critical mass: one more attacker into a wall is worth nothing until there are
 /// more attackers than blockers. Declined commanders are never added: the
@@ -1884,6 +1953,16 @@ fn whole_attack_proposal(
         whole
             .as_ref()
             .map_or(0.0, |whole| whole.tally.utility(pressure))
+    };
+    // Candidates come smallest attack first. Ties keep the smaller attack,
+    // except between attacks that kill the defender, where the larger one keeps
+    // a margin against a miscounted block (damage past lethal scores nothing).
+    let better = |candidate: &Option<WholeAttack>, best: &Option<WholeAttack>| {
+        let finishes =
+            |whole: &Option<WholeAttack>| whole.as_ref().is_some_and(|whole| whole.tally.finishes);
+        candidate.is_some()
+            && (total(candidate) > total(best)
+                || (finishes(candidate) && finishes(best) && total(candidate) >= total(best)))
     };
     let mut best = score(chosen, &mut work);
     let mut order: Vec<(ObjectId, i32)> = declined
@@ -1916,14 +1995,96 @@ fn whole_attack_proposal(
         }
         trial.push(candidate);
         let scored = score(&trial, &mut work);
-        if scored.is_some() && total(&scored) > total(&best) {
+        if better(&scored, &best) {
             best = scored;
         }
     }
-    if all_in_score.is_some() && total(&all_in_score) > total(&best) {
+    if better(&all_in_score, &best) {
         best = all_in_score;
     }
     best
+}
+
+/// The attackers [`two_player_whole_attack`] re-scores: every candidate, the
+/// ones already chosen, the ones it may not add, and the defender's untapped
+/// blockers.
+struct TwoPlayerAttack<'a> {
+    candidates: &'a [ObjectId],
+    chosen: &'a [ObjectId],
+    excluded: &'a [ObjectId],
+    blockers: &'a [ObjectId],
+}
+
+/// [`whole_attack_proposal`] for a free-for-all down to two players: the single
+/// defender's legal blockers per attacker (minimum-blocker floors included),
+/// the creature values, and the comparison's pressure scale, built here
+/// because the free-for-all comparison that builds them otherwise doesn't run.
+fn two_player_whole_attack(
+    state: &GameState,
+    player: PlayerId,
+    defender: PlayerId,
+    attack: TwoPlayerAttack<'_>,
+    slices: &BlockLegalitySlices,
+    valid_attack_targets_by_attacker: Option<&HashMap<ObjectId, Vec<AttackTarget>>>,
+) -> Option<WholeAttack> {
+    let mut eligible_by_attacker: Vec<(ObjectId, Vec<ObjectId>)> = Vec::new();
+    let mut declined: Vec<ObjectId> = Vec::new();
+    for &id in attack.candidates {
+        if valid_attack_targets_by_attacker.is_some_and(|targets_by_attacker| {
+            !targets_by_attacker
+                .get(&id)
+                .is_some_and(|targets| targets.contains(&AttackTarget::Player(defender)))
+        }) {
+            continue;
+        }
+        let eligible: Vec<ObjectId> = attack
+            .blockers
+            .iter()
+            .copied()
+            .filter(|&blocker| slices.can_block_pair(state, blocker, id))
+            .collect();
+        // CR 509.1b + CR 702.111b: too few legal blockers can't block it at all.
+        let required = engine::game::combat::min_blockers_required_from_precomputed(
+            state,
+            id,
+            &slices.block_restriction,
+        ) as usize;
+        let damage_blockers = if eligible.len() >= required {
+            eligible
+        } else {
+            Vec::new()
+        };
+        eligible_by_attacker.push((id, damage_blockers));
+        if !attack.chosen.contains(&id) && !attack.excluded.contains(&id) {
+            declined.push(id);
+        }
+    }
+    if declined.is_empty() {
+        return None;
+    }
+    let mut values: HashMap<ObjectId, CombatValue> = HashMap::new();
+    for &id in attack.candidates.iter().chain(attack.blockers) {
+        values.entry(id).or_insert_with(|| {
+            let raw = evaluate_creature(state, id);
+            CombatValue {
+                raw,
+                normalized: raw.max(0.0) / 5.0,
+            }
+        });
+    }
+    let defender_life = state.players[defender.0 as usize].life.max(0);
+    let threat = threat_level(state, player, defender);
+    let pressure =
+        |damage: i32| 0.25 * f64::from(damage.max(0).min(defender_life)) * (0.5 + threat);
+    whole_attack_proposal(
+        state,
+        defender,
+        attack.chosen,
+        &declined,
+        &eligible_by_attacker,
+        &values,
+        &pressure,
+    )
 }
 
 fn commander_attack_finishes(
@@ -6073,6 +6234,76 @@ mod tests {
         let attacks = choose_attackers_with_targets(&state, PlayerId(0));
 
         assert_eq!(attacks.len(), 40, "five bears get through an all-in attack");
+    }
+
+    #[test]
+    fn endgame_attackers_outnumbering_a_wall_attack_through_it_but_duels_are_unchanged() {
+        // A free-for-all down to two players: one 2/4 wall stops one of three
+        // 3/3s, so two connect, but each 3/3's single-block verdict says no.
+        let mut state = setup_multiplayer(3);
+        state.players[2].is_eliminated = true;
+        let bears: Vec<_> = (0..3)
+            .map(|_| add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]))
+            .collect();
+        add_creature(&mut state, PlayerId(1), "Wall", 2, 4, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        assert_eq!(attacks.len(), 3, "{attacks:?}");
+        assert!(attacks
+            .iter()
+            .all(|(id, t)| bears.contains(id) && *t == AttackTarget::Player(PlayerId(1))));
+
+        // The same board in a duel keeps the duel's own verdicts.
+        let mut duel = setup();
+        for _ in 0..3 {
+            add_creature(&mut duel, PlayerId(0), "Bear", 3, 3, vec![]);
+        }
+        add_creature(&mut duel, PlayerId(1), "Wall", 2, 4, vec![]);
+        assert!(choose_attackers_with_targets(&duel, PlayerId(0)).is_empty());
+    }
+
+    #[test]
+    fn endgame_swarm_that_kills_through_blockers_attacks_and_ignores_crackback() {
+        // A four-player game down to two: ten 2/2s against three untapped 3/3s
+        // and 10 life. Each 2/2 alone dies to a 3/3, and at 5 life the attacker
+        // is in Stabilize with lethal crackback on board, but seven 2/2s get
+        // through for 14: the opponent dies, so nothing swings back.
+        let mut state = setup_multiplayer(3);
+        state.players[2].is_eliminated = true;
+        state.players[0].life = 5;
+        state.players[1].life = 10;
+        for _ in 0..10 {
+            add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        }
+        for _ in 0..3 {
+            add_creature(&mut state, PlayerId(1), "Guard", 3, 3, vec![]);
+        }
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        assert_eq!(attacks.len(), 10, "{attacks:?}");
+    }
+
+    #[test]
+    fn endgame_stabilize_takes_no_non_lethal_whole_attack() {
+        // Stabilize keeps its defensive meaning: three 3/3s could put 6 through a
+        // lone wall, but that doesn't kill a 40-life opponent whose board threatens
+        // lethal, so nothing attacks.
+        let mut state = setup_multiplayer(3);
+        state.players[2].is_eliminated = true;
+        state.players[0].life = 5;
+        state.players[1].life = 40;
+        for _ in 0..3 {
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        }
+        add_creature(&mut state, PlayerId(1), "Wall", 2, 4, vec![]);
+        for _ in 0..2 {
+            let giant = add_creature(&mut state, PlayerId(1), "Giant", 6, 6, vec![]);
+            state.objects.get_mut(&giant).unwrap().tapped = true;
+        }
+
+        assert!(choose_attackers_with_targets(&state, PlayerId(0)).is_empty());
     }
 
     #[test]
