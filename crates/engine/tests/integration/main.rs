@@ -324,3 +324,5 @@ mod token_attack_destination;
 mod venat_heros_sundering_transform_8071;
 
 mod any_one_color_multi_mana_castability;
+
+mod hashep_oasis_sacrifices_itself;

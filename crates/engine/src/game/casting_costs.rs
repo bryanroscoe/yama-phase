@@ -5111,6 +5111,21 @@ pub(crate) fn handle_sacrifice_for_cost(
     // block after `finish_pending_cost_or_cast`).
     let cost_event_start = events.len();
 
+    // CR 601.2h + CR 602.2b: the costs of an activation may be paid in any
+    // order. When the permanent sacrificed is the ability's own source and the
+    // cost also taps it ("{T}, Sacrifice a Desert" on a land that is itself a
+    // Desert), tap it first: once it has left the battlefield the {T} can't be
+    // paid.
+    if pending.activation_ability_index.is_some()
+        && chosen.contains(&pending.object_id)
+        && super::mana_sources::has_tap_component(&pending.activation_cost)
+    {
+        super::restrictions::tap_permanent_for_cost(state, pending.object_id, events)?;
+        pending.activation_cost = pending.activation_cost.take().and_then(|cost| {
+            remove_first_activation_cost_matching(cost, |c| matches!(c, AbilityCost::Tap))
+        });
+    }
+
     // CR 601.2h + CR 616.1: A selected cost sacrifice can pause at any
     // selected object. Keep the complete selection and event span on the
     // typed root; resumption starts after the object resolved by the chooser.
