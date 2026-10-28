@@ -1275,7 +1275,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_self_characteristic_ref,
             parse_attached_creature_pt_ref,
         )),
-        parse_damage_dealt_this_turn_ref,
+        alt((
+            parse_damage_dealt_this_turn_ref,
+            parse_event_damage_dealt_to_recipient_ref,
+        )),
         parse_life_lost_ref,
         parse_life_gained_ref,
         parse_starting_life_ref,
@@ -4173,25 +4176,7 @@ fn parse_attached_creature_pt_ref(input: &str) -> OracleResult<'_, QuantityRef> 
 fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = opt(tag("the ")).parse(input)?;
     alt((
-        value(
-            QuantityRef::DamageDealtThisTurn {
-                source: Box::new(TargetFilter::Any),
-                target: Box::new(TargetFilter::And {
-                    filters: vec![
-                        TargetFilter::Player,
-                        TargetFilter::Typed(
-                            TypedFilter::default().controller(ControllerRef::Opponent),
-                        ),
-                    ],
-                }),
-                aggregate: AggregateFunction::Sum,
-                group_by: None,
-                damage_kind: DamageKindFilter::NoncombatOnly,
-
-                channel: DamageChannel::Total,
-            },
-            tag("total amount of noncombat damage dealt to your opponents this turn"),
-        ),
+        parse_damage_dealt_to_your_opponents_this_turn,
         value(
             QuantityRef::DamageDealtThisTurn {
                 source: Box::new(TargetFilter::Any),
@@ -4211,8 +4196,115 @@ fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef
             },
             tag("damage dealt to target opponent this turn"),
         ),
+        parse_damage_dealt_to_object_by_controlled_sources,
     ))
     .parse(input)
+}
+
+/// CR 120.1 + CR 120.2a + CR 120.2b: "[total amount of ][noncombat ]damage dealt to your
+/// opponents this turn" — every source's damage this turn to the controller's
+/// opponents, summed (Chandra's Incinerator: "total amount of noncombat damage
+/// …"; Notorious Throng: "damage dealt to your opponents this turn"). The
+/// optional "noncombat" word is the damage-kind axis.
+fn parse_damage_dealt_to_your_opponents_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = opt(tag("total amount of ")).parse(input)?;
+    let (input, damage_kind) = opt(alt((
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
+        value(DamageKindFilter::CombatOnly, tag("combat ")),
+    )))
+    .parse(input)?;
+    let damage_kind = damage_kind.unwrap_or(DamageKindFilter::Any);
+    let (input, _) = tag("damage dealt to your opponents this turn").parse(input)?;
+    Ok((
+        input,
+        QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                ],
+            }),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind,
+            channel: DamageChannel::Total,
+        },
+    ))
+}
+
+/// CR 120.1 + CR 608.2i: "[the ]amount of damage dealt to <object> this turn by
+/// sources <player> controlled" (Grothama, All-Devouring: "each player draws
+/// cards equal to the amount of damage dealt to Grothama this turn by sources
+/// they controlled"). The source filter carries the controller axis, matched
+/// against each damage record's look-back source snapshot; "they" is the
+/// per-player iteration anaphor (`ScopedPlayer`) and "you" the controller.
+fn parse_damage_dealt_to_object_by_controlled_sources(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = opt(tag("amount of ")).parse(input)?;
+    let (input, _) = tag("damage dealt to ").parse(input)?;
+    let (input, target) =
+        value(TargetFilter::SelfRef, alt((tag("~"), tag("this creature")))).parse(input)?;
+    let (input, _) = tag(" this turn by sources ").parse(input)?;
+    let (input, controller) = alt((
+        value(ControllerRef::ScopedPlayer, tag("they controlled")),
+        value(ControllerRef::You, tag("you controlled")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Typed(
+                TypedFilter::default().controller(controller),
+            )),
+            target: Box::new(target),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: DamageKindFilter::Any,
+            channel: DamageChannel::Total,
+        },
+    ))
+}
+
+/// CR 120.1 + CR 120.9 + CR 608.2h: "[the ]amount of damage <source> dealt to
+/// <recipient>" in a damage-trigger body names the damage of the triggering
+/// event (Venerable Warsinger: "where X is the amount of damage this creature
+/// dealt to that player"; Quartzwood Crasher: "… those creatures dealt to that
+/// player"; Mask of the Schemer: "… it dealt to that player"), and the
+/// counting form "1 damage dealt to <recipient>" (Anowon, the Ruin Thief:
+/// "mills a card for each 1 damage dealt to them") is the same amount. Both
+/// resolve to the trigger's `EventContextAmount`, exactly like "that much
+/// damage".
+fn parse_event_damage_dealt_to_recipient_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = alt((
+        value(
+            (),
+            (
+                opt(tag("the ")),
+                tag("amount of damage "),
+                alt((
+                    tag("~ "),
+                    tag("this creature "),
+                    tag("that creature "),
+                    tag("those creatures "),
+                    tag("it "),
+                    tag("they "),
+                )),
+            ),
+        ),
+        value((), tag("1 damage ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("dealt to ").parse(input)?;
+    let (input, _) = alt((
+        tag("that player"),
+        tag("them"),
+        tag("that creature"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    Ok((input, QuantityRef::EventContextAmount))
 }
 
 /// CR 119.3 + CR 608.2c: "life they|that player <verb> [this turn]" — the
@@ -4253,15 +4345,14 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
                     aggregate: AggregateFunction::Sum,
                 },
             },
-            tag("the total amount of life your opponents have lost this turn"),
-        ),
-        value(
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Opponent {
-                    aggregate: AggregateFunction::Sum,
-                },
-            },
-            tag("total amount of life your opponents have lost this turn"),
+            // CR 119.3: "have lost" and the simple past "lost" (Florian,
+            // Voldaren Scion) name the same this-turn total.
+            (
+                opt(tag("the ")),
+                tag("total amount of life your opponents "),
+                opt(tag("have ")),
+                tag("lost this turn"),
+            ),
         ),
         value(
             QuantityRef::LifeLostThisTurn {
@@ -15150,6 +15241,125 @@ mod tests {
                 player: PlayerScope::Controller,
             })
         );
+    }
+
+    /// CR 120.1 + CR 120.9: "the amount of damage <source> dealt to <recipient>"
+    /// and "1 damage dealt to them" read the triggering damage event.
+    #[test]
+    fn event_damage_dealt_to_recipient_is_event_amount() {
+        for text in [
+            "the amount of damage ~ dealt to that player",
+            "the amount of damage this creature dealt to that player",
+            "the amount of damage those creatures dealt to that player",
+            "the amount of damage it dealt to that player",
+            "1 damage dealt to them",
+        ] {
+            assert_eq!(
+                parse_quantity_ref(text),
+                Ok(("", QuantityRef::EventContextAmount)),
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 120.1 + CR 608.2c: the source-to-recipient maximum can't be
+    /// represented by summing each source's damage across all recipients, so
+    /// it stays unparsed; the supported opponent-recipient totals still read.
+    #[test]
+    fn source_recipient_damage_maximum_stays_unsupported() {
+        for text in [
+            "the greatest amount of damage dealt by a source to a permanent or player this turn",
+            "greatest amount of damage dealt by a source to a permanent or player this turn",
+        ] {
+            assert!(parse_quantity_ref_complete(text).is_err(), "{text}");
+            assert!(parse_damage_dealt_this_turn_ref(text).is_err(), "{text}");
+        }
+
+        for (text, controller, damage_kind) in [
+            (
+                "damage dealt to target opponent this turn",
+                ControllerRef::TargetPlayer,
+                DamageKindFilter::Any,
+            ),
+            (
+                "the total amount of noncombat damage dealt to your opponents this turn",
+                ControllerRef::Opponent,
+                DamageKindFilter::NoncombatOnly,
+            ),
+            (
+                "damage dealt to your opponents this turn",
+                ControllerRef::Opponent,
+                DamageKindFilter::Any,
+            ),
+        ] {
+            let expected = QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::default().controller(controller)),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind,
+                channel: DamageChannel::Total,
+            };
+            assert_eq!(
+                parse_damage_dealt_this_turn_ref(text),
+                Ok(("", expected.clone())),
+                "{text}"
+            );
+            assert_eq!(
+                parse_quantity_ref_complete(text),
+                Ok(("", expected)),
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 120.1 + CR 608.2i: damage to an object this turn by sources a player
+    /// controlled carries the controller on the source filter.
+    #[test]
+    fn damage_to_self_by_controlled_sources() {
+        let (rest, qty) = parse_quantity_ref(
+            "the amount of damage dealt to ~ this turn by sources they controlled",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::DamageDealtThisTurn { source, target, .. } = qty else {
+            panic!("expected DamageDealtThisTurn, got {qty:?}");
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+        assert!(matches!(
+            *source,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::ScopedPlayer),
+                ..
+            })
+        ));
+    }
+
+    /// CR 119.3: "lost" and "have lost" name the same opponents' total.
+    #[test]
+    fn opponents_life_lost_simple_past() {
+        for text in [
+            "the total amount of life your opponents lost this turn",
+            "the total amount of life your opponents have lost this turn",
+        ] {
+            assert_eq!(
+                parse_quantity_ref(text),
+                Ok((
+                    "",
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }
+                )),
+                "{text}"
+            );
+        }
     }
 
     /// CR 608.2c: "<type> card among those cards" counts the matching members
