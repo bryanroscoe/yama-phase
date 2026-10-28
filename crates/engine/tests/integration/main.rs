@@ -2168,6 +2168,7 @@ mod event_window_trigger_gate;
 mod hashep_oasis_sacrifices_itself;
 mod lazotep_quarry_x_ability_with_tap;
 mod magnificent_end_tapped_target_cost;
+mod planar_nexus_every_nonbasic_land_type;
 mod put_target_count_entry_counters;
 mod risky_move_gain_control_trigger;
 mod squall_attack_batch_chosen_number;

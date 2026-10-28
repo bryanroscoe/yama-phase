@@ -451,6 +451,7 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddAllNonbasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::AddChosenColor { .. }
             | ContinuousModification::RemoveChosenKeyword

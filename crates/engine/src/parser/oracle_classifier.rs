@@ -513,6 +513,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // false-positive into other pattern classes.
     "is every creature type",
     "are every creature type",
+    // CR 205.3i + CR 604.3: "~ is every nonbasic land type" (Planar Nexus),
+    // the land-type sibling of the lines above; no other pattern class uses
+    // the phrase.
+    "is every nonbasic land type",
     // CR 502.3 + CR 113.6: Seedborn-class untap permission — "untap <subject>
     // during each other player's untap step" is always a continuous static, so
     // route it to `parse_static_line` regardless of subject (covers the self-ref
