@@ -4356,6 +4356,14 @@ fn parse_type_phrase_folding_unbound<'a>(
     // clause previously fell through, leaving every creature eligible. Checked
     // before `parse_that_clause_suffix` (mirrors the `that isn't` arm); it only
     // fires for real subtypes, so color/supertype "that's" clauses are unaffected.
+    // CR 205.2a + CR 205.3: a mixed card-type/subtype disjunction ("permanent you
+    // control that's a creature or Vehicle", Ao, the Dawn Sky) — one `AnyOf`
+    // adjective filter. Only claims lists that mix the two kinds, so the pure
+    // subtype and pure card-type arms below keep their own lowering.
+    if let Some((mixed_filter, consumed)) = parse_that_is_mixed_type_suffix(&lower[pos..]) {
+        adjective_type_filters.push(mixed_filter);
+        pos += consumed;
+    }
     if let Some((subtype_filter, consumed)) = parse_that_is_subtype_suffix(&lower[pos..]) {
         adjective_type_filters.push(subtype_filter);
         pos += consumed;
@@ -10808,6 +10816,53 @@ fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter
     }
 
     Ok((rest, type_filters))
+}
+
+/// One leg of a mixed relative type list: a card type or a subtype, each with
+/// an optional article.
+fn parse_relative_type_or_subtype_leg(input: &str) -> Option<(TypeFilter, &str)> {
+    if let Ok((rest, type_filter)) = parse_relative_core_type_leg(input) {
+        return Some((type_filter, rest));
+    }
+    parse_relative_subtype_leg(input).map(|(subtype, rest)| (TypeFilter::Subtype(subtype), rest))
+}
+
+/// CR 205.2a + CR 205.3: "that's a creature or Vehicle" (Ao, the Dawn Sky) — a
+/// relative type disjunction whose legs mix card types and subtypes. Any leg
+/// satisfies the clause, so the legs fold into one `AnyOf` adjective filter that
+/// AND-merges with the base type. Returns `None` unless the list really mixes
+/// the two kinds: a pure card-type list stays with
+/// `parse_that_is_core_type_suffix` (which distributes the legs as `Or`
+/// branches) and a pure subtype list with `parse_that_is_subtype_suffix`.
+fn parse_that_is_mixed_type_suffix(text: &str) -> Option<(TypeFilter, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    if negated {
+        return None;
+    }
+    let (first, mut rest) = parse_relative_type_or_subtype_leg(after_intro)?;
+    let mut legs = vec![first];
+    while let Ok((after_separator, _)) = alt((
+        tag::<_, _, OracleError<'_>>(", or "),
+        tag(" or "),
+        tag(", "),
+    ))
+    .parse(rest)
+    {
+        let Some((next, after_leg)) = parse_relative_type_or_subtype_leg(after_separator) else {
+            break;
+        };
+        legs.push(next);
+        rest = after_leg;
+    }
+    let has_card_type = legs.iter().any(is_relative_core_type_filter);
+    let has_subtype = legs.iter().any(|leg| matches!(leg, TypeFilter::Subtype(_)));
+    if !(has_card_type && has_subtype) {
+        return None;
+    }
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    Some((TypeFilter::AnyOf(legs), consumed))
 }
 
 /// Parses a positive relative card-type clause like
@@ -25376,6 +25431,95 @@ mod tests {
             ChosenColorQualifierScope::Unbound,
             "a freshly defaulted context leaves the gate closed"
         );
+    }
+    /// CR 205.2a + CR 205.3: a relative type list that mixes card types and
+    /// subtypes is one `AnyOf` adjective, AND-merged with the base type (Ao,
+    /// the Dawn Sky: "permanent you control that's a creature or Vehicle";
+    /// Paladin Danse, Steel Maverick: "creature you control that's an artifact
+    /// or Human").
+    #[test]
+    fn mixed_card_type_and_subtype_relative_list_is_one_any_of() {
+        for (text, base, legs) in [
+            (
+                "permanent you control that's a creature or Vehicle",
+                TypeFilter::Permanent,
+                vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Vehicle".to_string()),
+                ],
+            ),
+            (
+                "creature you control that's an artifact or Human",
+                TypeFilter::Creature,
+                vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Subtype("Human".to_string()),
+                ],
+            ),
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(text);
+            assert_eq!(rest, "", "{text:?}");
+            let TargetFilter::Typed(typed) = &filter else {
+                panic!("expected a typed filter for {text:?}, got {filter:?}");
+            };
+            assert_eq!(typed.controller, Some(ControllerRef::You), "{text:?}");
+            assert!(typed.type_filters.contains(&base), "{text:?}: {typed:?}");
+            assert!(
+                typed.type_filters.contains(&TypeFilter::AnyOf(legs)),
+                "{text:?}: {typed:?}"
+            );
+        }
+        // A pure subtype list keeps the subtype arm's lowering.
+        assert!(parse_that_is_mixed_type_suffix(" that's a Vehicle or Equipment").is_none());
+    }
+
+    /// CR 109.5 + CR 608.2c: control at entry qualifies the historical event,
+    /// not the creature's current controller, so the qualifier is left
+    /// unconsumed; the unqualified and live-control siblings still parse.
+    #[test]
+    fn historical_entry_control_qualifier_is_left_unconsumed() {
+        for (text, tail) in [
+            (
+                "creature that entered the battlefield under your control this turn",
+                "that entered the battlefield under your control this turn",
+            ),
+            (
+                "creature that entered under your control this turn",
+                "that entered under your control this turn",
+            ),
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(text);
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                "recognized creature head for {text:?}"
+            );
+            assert_eq!(rest.trim_start(), tail, "unconsumed qualifier for {text:?}");
+        }
+
+        for (text, controller) in [
+            ("creature that entered the battlefield this turn", None),
+            (
+                "creature you control that entered this turn",
+                Some(ControllerRef::You),
+            ),
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(text);
+            assert_eq!(rest, "", "supported sibling for {text:?}");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller,
+                    properties: vec![FilterProp::EnteredThisTurn],
+                }),
+                "supported sibling for {text:?}"
+            );
+        }
     }
 }
 

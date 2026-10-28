@@ -98844,3 +98844,69 @@ fn elided_put_counter_conjuncts_split_into_placements() {
         }
     ));
 }
+
+/// CR 109.5 + CR 608.2c: "that entered the battlefield under your control
+/// this turn" qualifies who controlled the creature as it entered, which a
+/// predicate on its current controller can't represent. The placement stays
+/// an explicit gap rather than counting creatures by their current controller.
+#[test]
+fn shaile_entered_under_your_control_this_turn_stays_explicit_gap() {
+    let text = "Flying, vigilance\n{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.";
+    let parsed = parse_card(text, "Shaile, Dean of Radiance", &[], &["Creature"]);
+    let mut activated = parsed
+        .abilities
+        .iter()
+        .filter(|def| def.kind == AbilityKind::Activated);
+    let def = activated.next().expect("Shaile's counter activation");
+    assert!(activated.next().is_none(), "{parsed:#?}");
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "expected a gap on the counter placement, got {def:#?}"
+    );
+    assert_eq!(
+        def.description.as_deref(),
+        Some("{T}: Put a +1/+1 counter on each creature that entered the battlefield under your control this turn.")
+    );
+}
+
+/// CR 122.1 + CR 608.2c: the supported siblings — entry this turn with no
+/// control qualifier, and a separate live "you control" axis — still lower to
+/// one +1/+1 counter on each matching creature, with no effect duration.
+#[test]
+fn live_control_and_unqualified_entry_filters_remain_supported() {
+    for (text, controller) in [
+        (
+            "{T}: Put a +1/+1 counter on each creature that entered the battlefield this turn.",
+            None,
+        ),
+        (
+            "{T}: Put a +1/+1 counter on each creature you control that entered this turn.",
+            Some(ControllerRef::You),
+        ),
+    ] {
+        let parsed = parse_card(text, "Entry grammar control", &[], &["Creature"]);
+        assert_card_has_no_gap(&parsed);
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+        let def = &parsed.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        let Effect::PutCounterAll {
+            counter_type,
+            count,
+            target,
+        } = def.effect.as_ref()
+        else {
+            panic!("expected a counter placement for {text:?}, got {def:#?}");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller,
+                properties: vec![FilterProp::EnteredThisTurn],
+            })
+        );
+        assert!(def.duration.is_none(), "{def:#?}");
+    }
+}
