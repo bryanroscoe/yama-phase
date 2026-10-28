@@ -855,35 +855,51 @@ pub(crate) fn try_parse_cost_modification(
     // Detect dynamic "for each" count pattern
     // "for each artifact you control" → QuantityRef::ObjectCount
     let cost_tp = TextPair::new(text, lower);
-    let mut dynamic_count = if let Some((_, after_for_each)) = cost_tp.split_around("for each ") {
-        // Strip trailing period/punctuation
-        let count_text = after_for_each.original.trim_end_matches('.');
-        super::oracle_quantity::parse_for_each_clause(count_text)
-            .or_else(|| {
-                parse_cda_quantity(count_text).and_then(|expr| match expr {
-                    QuantityExpr::Ref { qty } => Some(qty),
-                    _ => None,
+    // `Some(None)`: a "for each" clause none of the readers below understood.
+    let for_each_count = cost_tp
+        .split_around("for each ")
+        .map(|(_, after_for_each)| {
+            // Strip trailing period/punctuation
+            let count_text = after_for_each.original.trim_end_matches('.');
+            super::oracle_quantity::parse_for_each_clause(count_text)
+                .or_else(|| {
+                    parse_cda_quantity(count_text).and_then(|expr| match expr {
+                        QuantityExpr::Ref { qty } => Some(qty),
+                        _ => None,
+                    })
                 })
-            })
-            .or_else(|| super::oracle_quantity::parse_quantity_ref(count_text))
-            .or_else(|| {
-                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                if let Some(prefixed) = count_text.strip_prefix("the number of ") {
+                .or_else(|| super::oracle_quantity::parse_quantity_ref(count_text))
+                .or_else(|| {
                     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                    super::oracle_quantity::parse_quantity_ref(prefixed)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                let (count_filter, _) = parse_type_phrase_folding(count_text);
-                Some(QuantityRef::ObjectCount {
-                    filter: count_filter,
+                    if let Some(prefixed) = count_text.strip_prefix("the number of ") {
+                        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                        super::oracle_quantity::parse_quantity_ref(prefixed)
+                    } else {
+                        None
+                    }
                 })
-            })
-    } else {
-        None
-    };
+                .or_else(|| {
+                    let (count_filter, _) = parse_type_phrase_folding(count_text);
+                    Some(QuantityRef::ObjectCount {
+                        filter: count_filter,
+                    })
+                })
+                // CR 601.2f: a count of objects matching nothing in particular is a
+                // phrase none of the readers understood ("for each counter among
+                // players and permanents", "for each {E} you've paid or lost this
+                // turn"). Counting every object would take the full reduction with
+                // nothing to count.
+                .filter(|qty| {
+                    !matches!(qty, QuantityRef::ObjectCount { filter }
+                    if *filter == TargetFilter::Typed(TypedFilter::default()))
+                })
+        });
+    // A "for each" clause nothing above can read leaves the static an honest
+    // gap rather than a flat {N} reduction.
+    if matches!(for_each_count, Some(None)) {
+        return None;
+    }
+    let mut dynamic_count = for_each_count.flatten();
 
     if dynamic_count.is_none() && amount_is_variable_x {
         let (_, where_x_text) = super::oracle_effect::strip_trailing_where_x(cost_tp);
