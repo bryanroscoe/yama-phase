@@ -1371,6 +1371,7 @@ mod player_leaves_game_ltb_triggers;
 mod player_scope_created_token_union;
 mod player_scope_linked_exile_batch;
 mod player_scope_sacrifice_carrier;
+mod player_scope_sacrificed_this_way;
 mod ponder_decline_shuffle_regression;
 mod power_fist_combat_damage_regression;
 mod power_leak_dynamic_prevention;

@@ -13160,6 +13160,30 @@ pub(crate) fn chain_references_tracked_set(ability: &ResolvedAbility) -> bool {
     branch_references_tracked_set(Some(ability))
 }
 
+/// CR 608.2c: does `ability` read the fresh result of a producer whose action
+/// is `cause`? A reader bound to that action or to no action (an unqualified
+/// anaphor) does; a reader explicitly naming another action ("exiled this
+/// way" after a sacrifice) still needs the earlier binding, so it does not.
+fn chain_references_tracked_set_for_cause(ability: &ResolvedAbility, cause: ThisWayCause) -> bool {
+    !crosses_modal_boundary(ability)
+        && node_or_branch_references_tracked_set(
+            ability,
+            ParentAnaphor::NamesPublisher,
+            Some(cause),
+        )
+}
+
+/// CR 608.2c: whether a tracked-set reader bound to `reader` reads the result
+/// of a producer whose action is `producer`. `None` on either side places no
+/// restriction: an unrestricted walk counts every reader, and an unqualified
+/// reader names the nearest producer whatever its action.
+fn tracked_reader_accepts_cause(
+    reader: Option<ThisWayCause>,
+    producer: Option<ThisWayCause>,
+) -> bool {
+    producer.is_none_or(|producer| reader.is_none_or(|reader| reader == producer))
+}
+
 /// CR 608.2c + CR 611.2c: An event-less producer publishes the population its
 /// continuous effect froze ONLY when it is the resolution chain's sole
 /// EFFECTIVE producer.
@@ -13317,20 +13341,28 @@ fn grant_affects_parent_target(effect: &Effect) -> bool {
 }
 
 fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
-    node_or_branch_references_tracked_set(ability, ParentAnaphor::NamesPublisher)
+    node_or_branch_references_tracked_set(ability, ParentAnaphor::NamesPublisher, None)
 }
 
+/// `producer_cause` restricts the walk to readers of that producer action
+/// (see [`tracked_reader_accepts_cause`]); `None` counts every reader.
 fn node_or_branch_references_tracked_set(
     ability: &ResolvedAbility,
     anaphor: ParentAnaphor,
+    producer_cause: Option<ThisWayCause>,
 ) -> bool {
     let consumes = matches!(
         &ability.effect,
         Effect::CreateDelayedTrigger {
             uses_tracked_set: true,
             ..
-        } | Effect::ChooseFromZone { .. }
-    ) || effect_references_tracked_set(&ability.effect)
+        }
+    )
+        // A choice among the chain set reads it unless its only tracked
+        // readers name another action.
+        || (matches!(&ability.effect, Effect::ChooseFromZone { .. })
+            && (producer_cause.is_none() || !effect_references_tracked_set(&ability.effect)))
+        || effect_references_tracked_set_for_cause(&ability.effect, producer_cause)
         // CR 608.2c: `repeat_for` is a loop-count quantity on the
         // ResolvedAbility, not inside Effect — e.g. "for each nonland card
         // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
@@ -13340,11 +13372,10 @@ fn node_or_branch_references_tracked_set(
         || ability
             .repeat_for
             .as_ref()
-            .is_some_and(quantity_expr_references_tracked_set)
-        || ability
-            .player_scope
-            .as_ref()
-            .is_some_and(player_filter_references_tracked_set);
+            .is_some_and(|qty| quantity_expr_references_tracked_set_for_cause(qty, producer_cause))
+        || ability.player_scope.as_ref().is_some_and(|filter| {
+            player_filter_references_tracked_set_for_cause(filter, producer_cause)
+        });
 
     // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
     // the entry hop in `next_sub_needs_tracked_set` is INSUFFICIENT whenever a
@@ -13381,7 +13412,8 @@ fn node_or_branch_references_tracked_set(
     };
     let enters = |node: Option<&ResolvedAbility>| {
         node.is_some_and(|n| {
-            !crosses_modal_boundary(n) && node_or_branch_references_tracked_set(n, child_anaphor)
+            !crosses_modal_boundary(n)
+                && node_or_branch_references_tracked_set(n, child_anaphor, producer_cause)
         })
     };
     consumes
@@ -13397,6 +13429,14 @@ fn node_or_branch_references_tracked_set(
 /// class (GainLife, DealDamage, Token, Mill, Draw, PutCounter, GrantCastingPermission, …)
 /// without enumerating variants.
 fn effect_references_tracked_set(effect: &Effect) -> bool {
+    effect_references_tracked_set_for_cause(effect, None)
+}
+
+/// [`effect_references_tracked_set`] restricted to readers of `producer_cause`.
+fn effect_references_tracked_set_for_cause(
+    effect: &Effect,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
     // Quantity positions — `Effect::for_each_quantity_expr` is the exhaustive
     // authority over EVERY `QuantityExpr` an effect carries, including the
     // secondary slots that `count_expr()` (the primary count/amount accessor)
@@ -13425,7 +13465,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     // `ability_or_branch_references_tracked_set` — Seasoned Pyromancer, #740.)
     let mut has_quantity_hit = false;
     effect.for_each_quantity_expr(&mut |qty| {
-        has_quantity_hit |= quantity_expr_references_tracked_set(qty);
+        has_quantity_hit |= quantity_expr_references_tracked_set_for_cause(qty, producer_cause);
     });
     if has_quantity_hit {
         return true;
@@ -13433,7 +13473,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 
     // Filter positions — the effect's primary target filter may be TrackedSet.
     if let Some(filter) = effect.target_filter() {
-        if filter_references_tracked_set(filter) {
+        if filter_references_tracked_set_for_cause(filter, producer_cause) {
             return true;
         }
     }
@@ -13443,26 +13483,26 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         // "exile the rest" uses `Not(InTrackedSet)` inside its typed filter;
         // the search choice must publish its chosen set before this effect
         // resolves or that complement would include the chosen cards too.
-        if filter_references_tracked_set(target)
+        if filter_references_tracked_set_for_cause(target, producer_cause)
             || filter_properties_reference_tracked_membership(target)
         {
             return true;
         }
     }
     if let Effect::PutCounterAll { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
     if let Effect::SearchLibrary { filter, .. } = effect {
-        if filter_references_tracked_set(filter)
-            || filter_properties_reference_tracked_quantity(filter)
+        if filter_references_tracked_set_for_cause(filter, producer_cause)
+            || filter_properties_reference_tracked_quantity(filter, producer_cause)
         {
             return true;
         }
     }
     if let Effect::GoadAll { target } = effect {
-        if filter_references_tracked_set(target) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -13480,7 +13520,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         // chosen card as the fresh chain set, the `InTrackedSet(0)` sentinel
         // stays bound to the exile-batch set, and `Not` over the batch empties
         // the window (Plargg and Nassari's cast offer silently skipped).
-        if filter_references_tracked_set(filter)
+        if filter_references_tracked_set_for_cause(filter, producer_cause)
             || filter_properties_reference_tracked_membership(filter)
         {
             return true;
@@ -13492,7 +13532,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         ..
     } = effect
     {
-        if filter_references_tracked_set(target) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -13501,7 +13541,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     // not spell/ability targets). Inspect directly so "the rest" / "those
     // cards" sub-abilities chained off exile-all effects still record the set.
     if let Effect::GrantCastingPermission { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -13510,7 +13550,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     // sources). Sin, Spira's Punishment — random exile publishes the set for
     // the chained copy.
     if let Effect::CopyTokenOf { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        if filter_references_tracked_set_for_cause(target, producer_cause) {
             return true;
         }
     }
@@ -13524,10 +13564,9 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         // `grant_affects_parent_target`, which the caller applies only when no
         // nearer antecedent intervenes. That function's doc carries why.
         if static_abilities.iter().any(|static_def| {
-            static_def
-                .affected
-                .as_ref()
-                .is_some_and(filter_references_tracked_set)
+            static_def.affected.as_ref().is_some_and(|filter| {
+                filter_references_tracked_set_for_cause(filter, producer_cause)
+            })
         }) {
             return true;
         }
@@ -13545,20 +13584,38 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 /// bounded walker as every other union consumer; an incomplete walk is
 /// conservatively reported as a dependency so a truncated source still forces
 /// publication rather than silently under-counting.
-fn card_type_set_source_references_tracked_set(source: &CardTypeSetSource) -> bool {
+fn card_type_set_source_references_tracked_set(
+    source: &CardTypeSetSource,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
     let mut found = false;
     let complete =
         source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-            found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. });
+            found |= matches!(leaf, CardTypeSetSource::TrackedSet { caused_by, .. }
+                if tracked_reader_accepts_cause(*caused_by, producer_cause));
         });
     found || !complete
 }
 
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
+    quantity_expr_references_tracked_set_for_cause(qty, None)
+}
+
+/// [`quantity_expr_references_tracked_set`] restricted to readers of
+/// `producer_cause`.
+fn quantity_expr_references_tracked_set_for_cause(
+    qty: &QuantityExpr,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
+    let recurse =
+        |qty: &QuantityExpr| quantity_expr_references_tracked_set_for_cause(qty, producer_cause);
     match qty {
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. } => true,
+            QuantityRef::TrackedSetSize => true,
+            QuantityRef::FilteredTrackedSetSize { caused_by, .. } => {
+                tracked_reader_accepts_cause(*caused_by, producer_cause)
+            }
             // CR 608.2c: the three characteristic-set quantities share the
             // population axis, so a tracked set nested inside an `AnyOf` union
             // must be detected too — a direct-only `TrackedSet` match would let
@@ -13567,10 +13624,10 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             | QuantityRef::SharedCardTypes { source }
             | QuantityRef::DistinctSubtypes { source, .. }
             | QuantityRef::DistinctColorsAmong { source } => {
-                card_type_set_source_references_tracked_set(source)
+                card_type_set_source_references_tracked_set(source, producer_cause)
             }
             QuantityRef::PropertyAggregate(aggregate) => {
-                card_type_set_source_references_tracked_set(aggregate.source())
+                card_type_set_source_references_tracked_set(aggregate.source(), producer_cause)
             }
             // CR 608.2c: a player-count whose filter is keyed on the chain's
             // tracked object set is a CONSUMER of that set — the preceding
@@ -13578,22 +13635,19 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             // Seasoned Pyromancer (#740) shape one layer up: the tracked-set
             // reference is nested inside the PLAYER filter, not the quantity.
             // Not every `PlayerCount` qualifies, so it must be asked per filter.
-            QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+            QuantityRef::PlayerCount { filter } => {
+                player_filter_references_tracked_set_for_cause(filter, producer_cause)
+            }
             _ => false,
         },
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(quantity_expr_references_tracked_set)
-        }
-        QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
-        QuantityExpr::Power { exponent, .. } => quantity_expr_references_tracked_set(exponent),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_references_tracked_set(left)
-                || quantity_expr_references_tracked_set(right)
-        }
+        | QuantityExpr::DivideRounded { inner, .. } => recurse(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs.iter().any(recurse),
+        QuantityExpr::UpTo { max } => recurse(max),
+        QuantityExpr::Power { exponent, .. } => recurse(exponent),
+        QuantityExpr::Difference { left, right } => recurse(left) || recurse(right),
     }
 }
 
@@ -13608,10 +13662,21 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
 /// arms keep it readable; adding a variant to the `false` group is a decision,
 /// not an accident.
 fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
+    player_filter_references_tracked_set_for_cause(filter, None)
+}
+
+/// [`player_filter_references_tracked_set`] restricted to readers of
+/// `producer_cause`.
+fn player_filter_references_tracked_set_for_cause(
+    filter: &PlayerFilter,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
     match filter {
         // Reads `tracked_object_sets` + `tracked_set_member_causes`, which are
         // published only when `next_sub_needs_tracked_set` reports a consumer.
-        PlayerFilter::TrackedSetPossessor { .. } => true,
+        PlayerFilter::TrackedSetPossessor { caused_by, .. } => {
+            tracked_reader_accepts_cause(*caused_by, producer_cause)
+        }
         // Reads `last_zone_changed_ids` — a DIFFERENT ledger, unconditionally
         // recomputed after every effect and needing no publication gate.
         PlayerFilter::ZoneChangedThisWay
@@ -13646,23 +13711,40 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::PlayerAttribute { .. } => false,
         // The negation wrapper inherits its inner filter's consumption: an
         // "all except <tracked-set possessor>" scope still needs the set.
-        PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
+        PlayerFilter::AllExcept { exclude } => {
+            player_filter_references_tracked_set_for_cause(exclude, producer_cause)
+        }
         // The union needs the set when any member does.
-        PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_references_tracked_set),
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(|filter| player_filter_references_tracked_set_for_cause(filter, producer_cause)),
     }
 }
 
 fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
+    filter_references_tracked_set_for_cause(filter, None)
+}
+
+/// [`filter_references_tracked_set`] restricted to readers of `producer_cause`.
+fn filter_references_tracked_set_for_cause(
+    filter: &TargetFilter,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
     match filter {
         // CR 608.2c: Both the bare tracked-set filter and its type-filtered
         // intersection ("X cards revealed this way", "from among the milled
         // cards") consume the most recent tracked set — either form on a
         // sub-ability means the parent effect must publish its affected set.
-        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
-        TargetFilter::Not { filter } => filter_references_tracked_set(filter),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_references_tracked_set)
+        TargetFilter::TrackedSet { .. } => true,
+        TargetFilter::TrackedSetFiltered { caused_by, .. } => {
+            tracked_reader_accepts_cause(*caused_by, producer_cause)
         }
+        TargetFilter::Not { filter } => {
+            filter_references_tracked_set_for_cause(filter, producer_cause)
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| filter_references_tracked_set_for_cause(filter, producer_cause)),
         _ => false,
     }
 }
@@ -13671,16 +13753,21 @@ fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
 /// dynamic quantity (`FilterProp::Cmc { value: Ref(FilteredTrackedSetSize) }`,
 /// Hunger Tide Rises chapter IV) consumes the chain tracked set even when the
 /// filter itself is not a bare `TrackedSet`/`TrackedSetFiltered` reference.
-fn filter_properties_reference_tracked_quantity(filter: &TargetFilter) -> bool {
+fn filter_properties_reference_tracked_quantity(
+    filter: &TargetFilter,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
     match filter {
         TargetFilter::Typed(tf) => tf
             .properties
             .iter()
-            .any(filter_prop_references_tracked_quantity),
-        TargetFilter::Not { filter } => filter_properties_reference_tracked_quantity(filter),
+            .any(|prop| filter_prop_references_tracked_quantity(prop, producer_cause)),
+        TargetFilter::Not { filter } => {
+            filter_properties_reference_tracked_quantity(filter, producer_cause)
+        }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
-            .any(filter_properties_reference_tracked_quantity),
+            .any(|filter| filter_properties_reference_tracked_quantity(filter, producer_cause)),
         _ => false,
     }
 }
@@ -13723,20 +13810,23 @@ fn filter_prop_references_tracked_membership(prop: &crate::types::ability::Filte
 /// CR 608.2c: Dynamic `Counters`, `Cmc`, and `PtComparison` values are all
 /// quantity-bearing search properties. Keep their tracked-set detection at the
 /// property boundary so a parent producer publishes its set for every axis.
-fn filter_prop_references_tracked_quantity(prop: &crate::types::ability::FilterProp) -> bool {
+fn filter_prop_references_tracked_quantity(
+    prop: &crate::types::ability::FilterProp,
+    producer_cause: Option<ThisWayCause>,
+) -> bool {
     match prop {
         crate::types::ability::FilterProp::Counters { count, .. } => {
-            quantity_expr_references_tracked_set(count)
+            quantity_expr_references_tracked_set_for_cause(count, producer_cause)
         }
         crate::types::ability::FilterProp::Cmc { value, .. }
         | crate::types::ability::FilterProp::PtComparison { value, .. } => {
-            quantity_expr_references_tracked_set(value)
+            quantity_expr_references_tracked_set_for_cause(value, producer_cause)
         }
-        crate::types::ability::FilterProp::AnyOf { props } => {
-            props.iter().any(filter_prop_references_tracked_quantity)
-        }
+        crate::types::ability::FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|prop| filter_prop_references_tracked_quantity(prop, producer_cause)),
         crate::types::ability::FilterProp::Not { prop } => {
-            filter_prop_references_tracked_quantity(prop)
+            filter_prop_references_tracked_quantity(prop, producer_cause)
         }
         _ => false,
     }
@@ -19152,8 +19242,8 @@ fn perform_player_scope_sacrifices(
             .expect("a game cannot announce more sacrifices than i32 can represent"),
     );
     if completion.publish_fresh_tracked_set {
-        // CR 608.2c + CR 701.21a: an interactive sacrifice publishes a fresh
-        // tracked set for a chained "sacrificed this way" consumer, so each
+        // CR 608.2c + CR 701.21a: a completed sacrifice publishes a fresh
+        // tracked set for its own consumer, so each
         // member carries the action this completion names — otherwise
         // `FilteredTrackedSetSize { caused_by: Sacrificed }` reads 0 (Hunger
         // Tide Rises chapter IV, #5977). The completion carries no destination,
@@ -19440,6 +19530,20 @@ fn start_player_scope_sacrifice_choices(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
+    // CR 608.2c + CR 701.21a: "each opponent sacrifices a creature. You create
+    // a token for each creature sacrificed this way" — the text after the
+    // per-player sacrifice reads the permanents it sacrificed, so the completed
+    // batch publishes them, each recorded as `Sacrificed`. Unqualified readers
+    // also receive this fresh population, including when it is empty. A tail
+    // naming only another action ("puts all cards they exiled this way")
+    // retains its antecedent instead.
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::Sacrifice),
+        publish_fresh_tracked_set: after_scope.as_deref().is_some_and(|tail| {
+            chain_references_tracked_set_for_cause(tail, ThisWayCause::Sacrificed)
+        }),
+        ..Default::default()
+    };
     // CR 101.4: If multiple players make choices for one instruction, choices
     // are announced in APNAP order before the simultaneous action happens.
     let mut selections = Vec::new();
@@ -19456,7 +19560,7 @@ fn start_player_scope_sacrifice_choices(
                         ability: Box::new(template.clone()),
                         remaining_players: matching_players[i + 1..].to_vec(),
                         selections,
-                        completion: PendingPlayerScopeSacrificeCompletion::default(),
+                        completion,
                         // CR 608.2c: bind the carrier to the resolution that wrote it.
                         resolving_entry: state.resolving_stack_entry.as_ref().map(|entry| entry.id),
                     });
@@ -19466,9 +19570,15 @@ fn start_player_scope_sacrifice_choices(
         }
     }
 
-    match perform_player_scope_sacrifices(state, template, selections, None, events)? {
+    match perform_player_scope_sacrifices(state, template, selections, Some(completion), events)? {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
-            return Ok(ResolutionProgress::Waiting)
+            // CR 608.2c + CR 616.1: an automatic batch can still pause on a
+            // replacement choice. Its detached tail resumes only after that
+            // batch completes, as it does after a player's sacrifice choice.
+            if let Some(after_scope) = after_scope {
+                append_to_pending_continuation(state, Some(after_scope));
+            }
+            return Ok(ResolutionProgress::Waiting);
         }
         PlayerScopeSacrificePerformOutcome::Completed { .. } => {
             if let Some(after_scope) = after_scope {
@@ -62734,6 +62844,488 @@ mod resolution_progress_contract_tests {
         drain_pending_continuation(runner.state_mut(), &mut events);
         assert_eq!(runner.state().players[0].life, 26);
         assert!(runner.state().resolution_stack.is_empty());
+    }
+
+    // Verbatim Oracle text.
+    const LIVING_DEATH: &str = "Each player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield.";
+    const SYPHON_FLESH: &str = "Each other player sacrifices a creature of their choice. You create a 2/2 black Zombie creature token for each creature sacrificed this way.";
+    const REIGN_OF_THE_PIT: &str = "Each player sacrifices a creature of their choice. Create an X/X black Demon creature token with flying, where X is the total power of the creatures sacrificed this way.";
+
+    fn optional_sacrifice_exile_redirect() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    #[test]
+    fn living_death_cast_keeps_both_seats_exiled_antecedent_and_three_action_order() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let returned = [
+            scenario
+                .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+                .id(),
+            scenario
+                .add_creature_to_graveyard(P1, "Hill Giant", 3, 3)
+                .id(),
+        ];
+        let sacrificed = [
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+            scenario.add_creature(P1, "Grizzly Bears", 2, 2).id(),
+            scenario.add_creature(P1, "Serra Angel", 4, 4).id(),
+        ];
+        let divination = scenario
+            .add_spell_to_graveyard(P0, "Divination", false)
+            .id();
+        let land = scenario.add_basic_land(P0, ManaColor::Black);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Living Death", false, LIVING_DEATH)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        let records_before_cast = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(spell).resolve();
+        // CR 608.2c + CR 608.2e + CR 400.7j: return only the first action's
+        // cards, after every player's creatures have been sacrificed.
+        outcome.assert_zone(&returned, Zone::Battlefield);
+        outcome.assert_zone(&sacrificed, Zone::Graveyard);
+        outcome.assert_zone(&[divination, spell], Zone::Graveyard);
+        outcome.assert_zone(&[land], Zone::Battlefield);
+        // CR 110.2a: each player puts their own exiled card onto the battlefield.
+        for (card, player) in returned.into_iter().zip([P0, P1]) {
+            assert_eq!(outcome.state().objects[&card].controller, player);
+            assert_eq!(outcome.state().objects[&card].owner, player);
+        }
+        assert!(outcome.state().exile.is_empty());
+        assert_eq!(outcome.state().battlefield.len(), 3);
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().resolution_stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+
+        // CR 608.2e: pin all three table-wide actions, not only the final zones.
+        let moves: Vec<_> = outcome
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .skip(records_before_cast)
+            .filter(|record| {
+                returned.contains(&record.object_id) || sacrificed.contains(&record.object_id)
+            })
+            .map(|record| (record.from_zone, record.to_zone))
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                (Some(Zone::Graveyard), Zone::Exile),
+                (Some(Zone::Graveyard), Zone::Exile),
+                (Some(Zone::Battlefield), Zone::Graveyard),
+                (Some(Zone::Battlefield), Zone::Graveyard),
+                (Some(Zone::Battlefield), Zone::Graveyard),
+                (Some(Zone::Exile), Zone::Battlefield),
+                (Some(Zone::Exile), Zone::Battlefield),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_sacrifice_own_token_consumer_keeps_auto_and_prompted_population() {
+        for prompted in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let mine = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            let survivor = prompted.then(|| scenario.add_creature(P1, "Serra Angel", 4, 4).id());
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Syphon Flesh", false, SYPHON_FLESH)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let mut runner = scenario.build();
+            let outcome = if prompted {
+                runner.cast(spell).effect_zone(&[victim]).resolve()
+            } else {
+                runner.cast(spell).resolve()
+            };
+            // CR 608.2c + CR 701.21a: only the opponent sacrifices; its actual
+            // sacrifice supplies exactly one iteration of the token instruction.
+            outcome.assert_zone(&[mine], Zone::Battlefield);
+            outcome.assert_zone(&[victim], Zone::Graveyard);
+            if let Some(survivor) = survivor {
+                outcome.assert_zone(&[survivor], Zone::Battlefield);
+            }
+            let zombies: Vec<_> = outcome
+                .state()
+                .battlefield
+                .iter()
+                .filter_map(|id| outcome.state().objects.get(id))
+                .filter(|object| object.is_token && object.name == "Zombie")
+                .collect();
+            assert_eq!(zombies.len(), 1, "prompted={prompted}");
+            assert_eq!(zombies[0].controller, P0);
+            assert_eq!((zombies[0].power, zombies[0].toughness), (Some(2), Some(2)));
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn scoped_sacrifice_own_power_aggregate_keeps_auto_and_prompted_population() {
+        for prompted in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let mine = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let theirs = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+            let survivor = prompted.then(|| scenario.add_creature(P1, "Serra Angel", 4, 4).id());
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Reign of the Pit", false, REIGN_OF_THE_PIT)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let mut runner = scenario.build();
+            let outcome = if prompted {
+                runner.cast(spell).effect_zone(&[theirs]).resolve()
+            } else {
+                runner.cast(spell).resolve()
+            };
+            // CR 608.2c + CR 608.2h: reduce the actual sacrifices' last power,
+            // across both seats; the unchosen creature contributes nothing.
+            outcome.assert_zone(&[mine, theirs], Zone::Graveyard);
+            if let Some(survivor) = survivor {
+                outcome.assert_zone(&[survivor], Zone::Battlefield);
+            }
+            let demons: Vec<_> = outcome
+                .state()
+                .battlefield
+                .iter()
+                .filter_map(|id| outcome.state().objects.get(id))
+                .filter(|object| object.is_token && object.name == "Demon")
+                .collect();
+            assert_eq!(demons.len(), 1, "prompted={prompted}");
+            assert_eq!(demons[0].controller, P0);
+            assert_eq!((demons[0].power, demons[0].toughness), (Some(5), Some(5)));
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn scoped_sacrifice_cause_policy_preserves_prior_or_replaces_own_and_unqualified_sets() {
+        // Synthetic composition, not Living Death Oracle: the final quantity
+        // selects the earlier exile, the current sacrifice, or an unqualified
+        // nearest antecedent. Distinct populations make accidental unions fail.
+        for cause in [
+            Some(ThisWayCause::Exiled),
+            Some(ThisWayCause::Sacrificed),
+            None,
+        ] {
+            for player_count in [false, true] {
+                for candidates in 0..=2 {
+                    let mut scenario = GameScenario::new();
+                    let exiled = [
+                        scenario
+                            .add_creature_to_graveyard(P0, "Earlier A", 2, 2)
+                            .id(),
+                        scenario
+                            .add_creature_to_graveyard(P0, "Earlier B", 2, 2)
+                            .id(),
+                    ];
+                    let victims: Vec<_> = (0..candidates)
+                        .map(|index| {
+                            scenario
+                                .add_creature(P1, &format!("Candidate {index}"), 2, 2)
+                                .id()
+                        })
+                        .collect();
+                    let source = scenario.add_basic_land(P0, ManaColor::Black);
+                    let mut runner = scenario.build();
+                    let definition = parse_effect_chain(
+                        "Exile all creature cards from your graveyard. Each other player sacrifices a creature of their choice.",
+                        AbilityKind::Spell,
+                    );
+                    let mut ability = build_resolved_from_def(&definition, source, P0);
+                    let mut tail = life(0);
+                    let count = QuantityExpr::Ref {
+                        qty: if player_count {
+                            QuantityRef::PlayerCount {
+                                filter: PlayerFilter::TrackedSetPossessor {
+                                    relation: PlayerRelation::All,
+                                    possession: PossessionAxis::Owner,
+                                    filter: TargetFilter::Any,
+                                    caused_by: cause,
+                                },
+                            }
+                        } else {
+                            QuantityRef::FilteredTrackedSetSize {
+                                filter: Box::new(TargetFilter::Any),
+                                caused_by: cause,
+                            }
+                        },
+                    };
+                    tail.effect = Effect::GainLife {
+                        amount: QuantityExpr::Sum {
+                            exprs: vec![QuantityExpr::Fixed { value: 0 }, count],
+                        },
+                        player: TargetFilter::Controller,
+                    };
+                    tail.sub_link = SubAbilityLink::SequentialSibling;
+                    crate::game::ability_utils::append_to_sub_chain(&mut ability, tail);
+                    let mut events = Vec::new();
+                    let progress =
+                        resolve_ability_chain_step(runner.state_mut(), &ability, &mut events, 0)
+                            .unwrap();
+                    if candidates == 2 {
+                        assert_eq!(progress, ResolutionProgress::Waiting);
+                        assert!(matches!(&runner.state().waiting_for,
+                        WaitingFor::EffectZoneChoice { player: P1, cards, .. }
+                        if cards.len() == victims.len() && victims.iter().all(|id| cards.contains(id))));
+                        // The tail has not read either population before the choice.
+                        assert_eq!(runner.state().players[0].life, 20);
+                        runner
+                            .act(crate::types::actions::GameAction::SelectCards {
+                                cards: vec![victims[0]],
+                            })
+                            .unwrap();
+                        assert_eq!(runner.state().objects[&victims[1]].zone, Zone::Battlefield);
+                    } else {
+                        assert_eq!(progress, ResolutionProgress::Complete);
+                    }
+                    // CR 608.2c: a typed earlier action retains its set; own and
+                    // unqualified readers get a fresh actual set, even when empty.
+                    let expected = if cause == Some(ThisWayCause::Exiled) {
+                        if player_count {
+                            1
+                        } else {
+                            2
+                        }
+                    } else {
+                        i32::from(candidates != 0)
+                    };
+                    assert_eq!(
+                        runner.state().players[0].life,
+                        20 + expected,
+                        "cause={cause:?}, player_count={player_count}, candidates={candidates}"
+                    );
+                    for id in exiled {
+                        assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+                    }
+                    if let Some(victim) = victims.first() {
+                        assert_eq!(runner.state().objects[victim].zone, Zone::Graveyard);
+                    }
+                    assert!(runner.state().resolution_stack.is_empty());
+                    assert!(runner
+                        .state()
+                        .pending_player_scope_sacrifice_choice
+                        .is_none());
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn living_death_exiled_antecedent_and_tail_survive_sacrifice_replacement_choice() {
+        let mut scenario = GameScenario::new();
+        let returned = [
+            scenario
+                .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+                .id(),
+            scenario
+                .add_creature_to_graveyard(P1, "Hill Giant", 3, 3)
+                .id(),
+        ];
+        // Synthetic optional self-replacement isolates the pause. Its redirect
+        // is the graveyard-to-exile replacement class; it is not printed on Bears.
+        let redirected = scenario
+            .add_creature(P0, "Grizzly Bears", 2, 2)
+            .with_replacement_definition(optional_sacrifice_exile_redirect())
+            .id();
+        let sacrificed = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let source = scenario.add_basic_land(P0, ManaColor::Black);
+        let mut runner = scenario.build();
+        let unrelated = create_object(
+            runner.state_mut(),
+            CardId(99),
+            P0,
+            "Earlier exile".into(),
+            Zone::Exile,
+        );
+        let definition = parse_effect_chain(LIVING_DEATH, AbilityKind::Spell);
+        let ability = build_resolved_from_def(&definition, source, P0);
+        let mut events = Vec::new();
+        assert_eq!(
+            resolve_ability_chain_step(runner.state_mut(), &ability, &mut events, 0).unwrap(),
+            ResolutionProgress::Waiting
+        );
+        let WaitingFor::ReplacementChoice {
+            player: P0,
+            candidates,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("{:?}", runner.state().waiting_for)
+        };
+        let accept = candidates
+            .iter()
+            .position(|candidate| candidate.description == "Accept")
+            .unwrap();
+        assert!(runner
+            .state()
+            .pending_player_scope_sacrifice_choice
+            .is_some());
+        for id in returned {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+        }
+        runner
+            .act(crate::types::actions::GameAction::ChooseReplacement { index: accept })
+            .unwrap();
+        // CR 608.2c + CR 614.6: the redirected sacrifice is still the sacrifice
+        // action, never part of the first instruction's exiled population.
+        assert_eq!(runner.state().objects[&redirected].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&sacrificed].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&unrelated].zone, Zone::Exile);
+        for (id, player) in returned.into_iter().zip([P0, P1]) {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&id].controller, player);
+        }
+        assert_eq!(runner.state().exile.len(), 2);
+        assert_eq!(
+            runner
+                .state()
+                .exile
+                .iter()
+                .filter(|&&id| runner.state().objects[&id].owner == P0)
+                .count(),
+            2
+        );
+        assert_eq!(
+            runner
+                .state()
+                .exile
+                .iter()
+                .filter(|&&id| runner.state().objects[&id].owner == P1)
+                .count(),
+            0
+        );
+        assert!(runner
+            .state()
+            .pending_player_scope_sacrifice_choice
+            .is_none());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    #[test]
+    fn scoped_sacrifice_own_aggregate_survives_player_then_replacement_choice() {
+        let mut scenario = GameScenario::new();
+        let mine = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        // Synthetic optional replacement on one of the actual Reign sacrifices.
+        let redirected = scenario
+            .add_creature(P1, "Hill Giant", 3, 3)
+            .with_replacement_definition(optional_sacrifice_exile_redirect())
+            .id();
+        let survivor = scenario.add_creature(P1, "Serra Angel", 4, 4).id();
+        let source = scenario.add_basic_land(P0, ManaColor::Black);
+        let mut runner = scenario.build();
+        let definition = parse_effect_chain(REIGN_OF_THE_PIT, AbilityKind::Spell);
+        let ability = build_resolved_from_def(&definition, source, P0);
+        let mut events = Vec::new();
+        assert_eq!(
+            resolve_ability_chain_step(runner.state_mut(), &ability, &mut events, 0).unwrap(),
+            ResolutionProgress::Waiting
+        );
+        assert!(
+            matches!(&runner.state().waiting_for, WaitingFor::EffectZoneChoice { player: P1, cards, .. }
+            if cards.len() == 2 && cards.contains(&redirected) && cards.contains(&survivor))
+        );
+        // CR 101.4: P0's automatic selection waits for P1's announced choice.
+        assert_eq!(runner.state().objects[&mine].zone, Zone::Battlefield);
+        runner
+            .act(crate::types::actions::GameAction::SelectCards {
+                cards: vec![redirected],
+            })
+            .unwrap();
+        let WaitingFor::ReplacementChoice {
+            player: P1,
+            candidates,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("{:?}", runner.state().waiting_for)
+        };
+        let accept = candidates
+            .iter()
+            .position(|candidate| candidate.description == "Accept")
+            .unwrap();
+        assert!(runner
+            .state()
+            .pending_player_scope_sacrifice_choice
+            .is_some());
+        assert!(!runner
+            .state()
+            .battlefield
+            .iter()
+            .any(|id| runner.state().objects[id].is_token));
+        runner
+            .act(crate::types::actions::GameAction::ChooseReplacement { index: accept })
+            .unwrap();
+        // CR 608.2h + CR 614.6: both actual sacrifices supply last power,
+        // including the one whose destination changed and whose move paused.
+        assert_eq!(runner.state().objects[&mine].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&redirected].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&survivor].zone, Zone::Battlefield);
+        let demons: Vec<_> = runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .filter(|object| object.is_token && object.name == "Demon")
+            .collect();
+        assert_eq!(demons.len(), 1);
+        assert_eq!((demons[0].power, demons[0].toughness), (Some(5), Some(5)));
+        assert_eq!(demons[0].controller, P0);
+        assert!(runner
+            .state()
+            .pending_player_scope_sacrifice_choice
+            .is_none());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 
     #[test]
