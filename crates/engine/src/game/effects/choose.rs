@@ -352,11 +352,9 @@ pub(crate) fn bind_named_choice(
         }
     }
 
-    // CR 608.2d then CR 607.2d: record the colour THIS
-    // resolution announced, for `resolution_chosen_color`'s primary read.
-    // Gated on the exact-object binding captured above, so a `persist: false`
-    // printed `Choose a color.` (the F1 class) still writes nothing here and
-    // still falls through to `resolution_chosen_color`'s fallback.
+    // Preserve the narrower persisting-choice compatibility record. The
+    // resolution reader uses `named_color_this_resolution`, written above for
+    // every successful single-color answer, regardless of persistence.
     if persisting_color_answer {
         state.chosen_color_this_resolution = ChoiceValue::from_choice(choice_type, choice)
             .and_then(|value| match value {
@@ -382,7 +380,7 @@ pub(crate) fn resolution_chosen_color(
     state: &GameState,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Option<ManaColor> {
-    state.chosen_color_this_resolution.or_else(|| {
+    state.named_color_this_resolution.or_else(|| {
         state
             .objects
             .get(&source_id)
@@ -614,8 +612,8 @@ fn apply_choice_attributes(
     //   - `GameObject::chosen_color()` — CR 607.2d, the LINKED read: "what did
     //     this object's supplier choose". Oldest-since-entry (first match).
     //   - `choose::resolution_chosen_color()` — CR 608.2d, "what did THIS
-    //     resolution announce". Reads `state.chosen_color_this_resolution`
-    //     (written below by the exact-object binding path), falling back to
+    //     resolution announce". Reads `state.named_color_this_resolution`
+    //     (written by the common answer binder), falling back to
     //     `chosen_color()` for a linked anaphoric reader whose own chooser was
     //     suppressed.
     //   - `GameObject::current_chosen_color()` — "the current answer". Newest
@@ -1181,6 +1179,86 @@ mod tests {
         assert_eq!(
             resolution_chosen_subtype(&state, source, &ChosenSubtypeKind::BasicLandType),
             Some("Island".to_string()),
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d: the current answer is independent of persistence;
+    /// CR 607.2d: without a local answer, the oldest linked choice is retained.
+    #[test]
+    fn resolution_chosen_color_reads_all_binding_modes_and_preserves_linked_choice() {
+        for binding in [
+            None,
+            Some(NamedChoiceSourceBinding::ResolutionContext),
+            Some(NamedChoiceSourceBinding::ExactObjectAndResolution),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let id =
+                chosen_subtype_source(&mut state, vec![ChosenAttribute::Color(ManaColor::Blue)]);
+            assert_eq!(resolution_chosen_color(&state, id), Some(ManaColor::Blue));
+            let mut source = binding.map(|binding| {
+                let mut source = exact_choice_source(&state, id);
+                source.binding = binding;
+                source
+            });
+            bind_named_choice(
+                &mut state,
+                &ChoiceType::color(),
+                "Red",
+                source.as_mut(),
+                None,
+            );
+            assert_eq!(resolution_chosen_color(&state, id), Some(ManaColor::Red));
+            assert_eq!(state.objects[&id].chosen_color(), Some(ManaColor::Blue));
+            bind_named_choice(
+                &mut state,
+                &ChoiceType::Labeled {
+                    options: vec!["Other".to_string()],
+                },
+                "Other",
+                source.as_mut(),
+                None,
+            );
+            assert_eq!(resolution_chosen_color(&state, id), Some(ManaColor::Red));
+            assert_eq!(state.objects[&id].chosen_color(), Some(ManaColor::Blue));
+        }
+    }
+
+    /// CR 608.2d: random and interactive answers share the same color binding.
+    #[test]
+    fn resolution_chosen_color_reads_random_nonpersisting_answer() {
+        let mut state = GameState::new_two_player(42);
+        let choice_type = ChoiceType::Color {
+            excluded: ManaColor::ALL
+                .into_iter()
+                .filter(|c| *c != ManaColor::White)
+                .collect(),
+        };
+        let mut ability = make_choose_ability(choice_type.clone());
+        if let Effect::Choose { selection, .. } = &mut ability.effect {
+            *selection = TargetSelectionMode::Random;
+        }
+        assert_eq!(
+            compute_options(
+                &state,
+                &choice_type,
+                ability.controller,
+                ability.source_id,
+                &[]
+            ),
+            vec!["White"]
+        );
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut Vec::new()
+        ));
+        assert_eq!(
+            state.last_named_choice,
+            Some(ChoiceValue::Color(ManaColor::White))
+        );
+        assert_eq!(
+            resolution_chosen_color(&state, ability.source_id),
+            Some(ManaColor::White)
         );
     }
 
