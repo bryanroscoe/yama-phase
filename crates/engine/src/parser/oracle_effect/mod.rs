@@ -27237,6 +27237,25 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     false
 }
 
+/// CR 608.2c + CR 608.2h: rebind the trigger-event object scope of every
+/// per-object quantity of `effect` to the ability's first object target. Only
+/// called outside triggered abilities, where no trigger event exists.
+fn bind_event_source_quantities_to_target(effect: &mut Effect) {
+    let mut rebind = |expr: &mut QuantityExpr| {
+        rebind_object_scope_amount(
+            expr,
+            ObjectScope::EventSource,
+            ObjectScope::Target,
+            SourceRefRebind::AllObjectRefs,
+        );
+    };
+    // `each_quantity_expr_mut` doesn't visit a token count.
+    if let Effect::Token { count, .. } = effect {
+        rebind(count);
+    }
+    each_quantity_expr_mut(effect, &mut rebind);
+}
+
 /// CR 608.2c: whether an instruction acts on the chain's referent ("it") —
 /// through its target slot, or, for the face-down actions that declare no slot
 /// (CR 708.2: "turn it face up"), through its `ParentTarget` subject.
@@ -47817,6 +47836,20 @@ fn parse_effect_chain_ir_body(
             && !bind_anaphoric_damage_subject_keep_recipient(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        // CR 608.2c + CR 608.2h: outside a triggered ability there is no
+        // trigger event, so a quantity read off "that spell" names the object
+        // an earlier instruction of this ability targeted ("Counter target
+        // spell. Create X Treasure tokens, where X is that spell's mana value").
+        if !ctx.in_trigger
+            && builder.clauses().iter().any(|prev| {
+                prev.parsed
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+            })
+        {
+            bind_event_source_quantities_to_target(&mut clause.effect);
         }
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));

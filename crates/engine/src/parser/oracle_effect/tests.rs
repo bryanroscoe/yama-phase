@@ -95458,3 +95458,31 @@ fn turn_it_face_up_if_face_down_keeps_the_damage_source_bound() {
     };
     assert_eq!(*damage_source, Some(DamageSource::Target));
 }
+
+/// CR 608.2c + CR 608.2h: "Counter target spell. Create X Treasure tokens,
+/// where X is that spell's mana value." Outside a trigger, "that spell" is the
+/// countered target, not a trigger event's object.
+#[test]
+fn that_spells_mana_value_after_counter_target_spell_reads_the_target() {
+    let def = parse_effect_chain(
+        "Counter target spell. Create X Treasure tokens, where X is that spell's mana value.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Counter { .. }),
+        "got {:?}",
+        def.effect
+    );
+    let token = def.sub_ability.as_ref().expect("token clause chained");
+    let Effect::Token { count, .. } = &*token.effect else {
+        panic!("expected Token, got {:?}", token.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target
+            }
+        }
+    );
+}
