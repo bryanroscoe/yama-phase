@@ -11715,8 +11715,22 @@ pub(super) fn parse_exile_ast(
         }
     }
 
+    // CR 406.2 + CR 402.1: "exile all the cards from/in <zone>" names the
+    // whole zone, like "exile all cards from <zone>": the article there is not
+    // the anaphoric "the cards" of an earlier instruction, so it is consumed
+    // with the quantifier.
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
-        value((), alt((tag("exile all "), tag("exile each ")))).parse(input)
+        value(
+            (),
+            (
+                alt((tag("exile all "), tag("exile each "))),
+                opt(terminated(
+                    tag("the "),
+                    peek(preceded(tag("cards "), alt((tag("from "), tag("in "))))),
+                )),
+            ),
+        )
+        .parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
@@ -21267,6 +21281,29 @@ mod tests {
         assert!(filter.properties.contains(&FilterProp::ManaValueParity {
             parity: ParitySource::LastNamedChoice,
         }));
+    }
+
+    /// CR 406.2 + CR 402.1: "Exile all the cards from your hand, then draw that
+    /// many cards." The article doesn't make "the cards" anaphoric here.
+    #[test]
+    fn parse_exile_all_the_cards_from_your_hand_is_the_whole_hand() {
+        let mut ctx = ParseContext::default();
+        let with_article = parse_exile_ast(
+            "Exile all the cards from your hand",
+            "exile all the cards from your hand",
+            &mut ctx,
+        );
+        let mut ctx = ParseContext::default();
+        let without = parse_exile_ast(
+            "Exile all cards from your hand",
+            "exile all cards from your hand",
+            &mut ctx,
+        );
+        assert!(matches!(
+            with_article,
+            Some(ZoneCounterImperativeAst::Exile { all: true, .. })
+        ));
+        assert_eq!(format!("{with_article:?}"), format!("{without:?}"));
     }
 
     #[test]
