@@ -53,6 +53,25 @@ pub enum BailReason {
     EngineRejected(EngineError),
 }
 
+impl BailReason {
+    /// Whether the bail is a property of the projection's inputs alone.
+    /// `TimeCapExceeded` is decided by the wall clock, so the same key may
+    /// complete on a later call; every other reason is reached by the same
+    /// deterministic traversal each time it is run.
+    pub fn is_deterministic(&self) -> bool {
+        match self {
+            BailReason::TimeCapExceeded { .. } => false,
+            BailReason::StepCapExceeded { .. }
+            | BailReason::GameOverDuringProjection
+            | BailReason::MulliganOrSideboardEncountered
+            | BailReason::NoLegalAction { .. }
+            | BailReason::NoLegalManaPayment
+            | BailReason::IncompleteManaPaymentWitness
+            | BailReason::EngineRejected(_) => true,
+        }
+    }
+}
+
 /// Per-creature growth across the horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VelocitySample {
