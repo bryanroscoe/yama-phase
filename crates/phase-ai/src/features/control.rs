@@ -29,7 +29,7 @@
 //! a mulligan policy analogous to ramp or landfall.
 
 use engine::game::DeckEntry;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
+use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::zones::Zone;
@@ -236,14 +236,22 @@ fn is_counterspell(face: &CardFace) -> bool {
 /// based. The `_parts` suffix is retained for policy parity with other
 /// classifiers — callers pass `&obj.abilities` directly.
 pub(crate) fn is_sweeper_parts(abilities: &[AbilityDefinition]) -> bool {
-    abilities.iter().any(|ability| {
-        collect_chain_effects(ability).iter().any(|e| {
-            matches!(
-                e,
-                Effect::DestroyAll { .. } | Effect::DamageAll { .. } | Effect::ChangeZoneAll { .. }
-            )
+    !sweeper_filters(abilities).is_empty()
+}
+
+/// The filters of a sweeper's mass effects (`DestroyAll`, `DamageAll`,
+/// `ChangeZoneAll`): the objects the sweeper sweeps. Empty for a non-sweeper.
+pub(crate) fn sweeper_filters(abilities: &[AbilityDefinition]) -> Vec<&TargetFilter> {
+    abilities
+        .iter()
+        .flat_map(collect_chain_effects)
+        .filter_map(|effect| match effect {
+            Effect::DestroyAll { target, .. }
+            | Effect::DamageAll { target, .. }
+            | Effect::ChangeZoneAll { target, .. } => Some(target),
+            _ => None,
         })
-    })
+        .collect()
 }
 
 /// Parts-based spot removal classifier. Exported `pub(crate)` for policy reuse.
