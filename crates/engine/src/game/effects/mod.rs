@@ -13268,17 +13268,15 @@ fn is_sole_chain_producer(state: &GameState, ability: &ResolvedAbility) -> bool 
 /// branch executes, so counting both can only DECLINE a publish, never cause a
 /// wrong one).
 ///
-/// CHAIN-WIDE, NOT NEAREST-ANTECEDENT — and that is the sharp edge. Any later
-/// publisher position anywhere below this node declines the head, including the
-/// shape `head -> consumer{TrackedSet} -> consumer2{TrackedSet}`, where BOTH
-/// consumers wanted this head's population and both get nothing. No corpus row
-/// hits it today, but the loaded gun is named: **Motivated Pony**'s third node
-/// is `Unimplemented { name: "they" }` ("and they get an additional +2/+2").
-/// The day that clause parses into any tracked-set consumer, this leg declines
-/// the head, the untap regresses, and
-/// `motivated_pony_untaps_only_the_attacking_creatures_it_pumped` goes red. The
-/// fix at that point is to scope the leg to the nearest antecedent (CR 608.2c's
-/// actual rule) rather than to relax the test.
+/// CHAIN-WIDE, NOT NEAREST-ANTECEDENT, with one scoping: a later node in
+/// publisher position that itself consumes the chain set does not count (see
+/// [`node_or_later_is_publisher_position`]), so the shape
+/// `head -> consumer{TrackedSet} -> consumer2{TrackedSet}` publishes the head's
+/// population for both consumers ("Creatures you control gain indestructible
+/// ... put a +1/+1 counter on each of those creatures and they gain
+/// vigilance"; Motivated Pony's "and they get an additional +2/+2" once it
+/// parses). A later node that produces its own population still declines the
+/// head.
 ///
 /// CR 700.2: chain-wide, but NOT past a mode boundary. Without that stop, two
 /// publishing modes A → B make leg 2 walk past A's own consumer into B's root,
@@ -13310,7 +13308,13 @@ fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
     // delayed-exile chain (Twinflame, Myra the Magnificent), putting the
     // ORIGINAL creature into the set the delayed "exile those tokens"
     // then binds — measured, not predicted.
-    next_sub_needs_tracked_set(node)
+    // CR 608.2c: a node that itself CONSUMES the chain set ("put a +1/+1
+    // counter on each of those creatures") acts on the earlier producer's
+    // population, so its being in publisher position for a later "they gain
+    // vigilance" relays that population rather than naming a competing one.
+    // Only a node that produces its own population competes with the head for
+    // the anaphor.
+    (next_sub_needs_tracked_set(node) && !effect_references_tracked_set(&node.effect))
         || node
             .sub_ability
             .as_deref()
