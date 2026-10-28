@@ -95486,3 +95486,172 @@ fn that_spells_mana_value_after_counter_target_spell_reads_the_target() {
         }
     );
 }
+
+/// Assert that no ability, trigger or static of a whole-card parse carries an
+/// unimplemented gap.
+fn assert_card_has_no_gap(parsed: &crate::parser::oracle::ParsedAbilities) {
+    let json = serde_json::to_string(&(&parsed.abilities, &parsed.triggers, &parsed.statics))
+        .expect("serialize");
+    assert!(!json.contains("Unimplemented"), "unexpected gap: {json}");
+}
+
+/// CR 608.2c + CR 109.2: "Put A on it if it's a creature and B on it if it's a
+/// planeswalker" is two placement instructions sharing the elided "put", each
+/// gated on the declared target's type. The second gate reads the same object,
+/// not the first instruction, so it is an independent instruction that still
+/// runs when the first gate is false.
+#[test]
+fn forge_of_heroes_conjoined_placements_each_gate_on_the_declared_target() {
+    let parsed = parse_card(
+        "{T}: Add {C}.\n{T}: Choose target commander that entered this turn. Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker.",
+        "Forge of Heroes",
+        &[],
+        &["Land"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let choose = &parsed.abilities[1];
+    let plus_one = choose.sub_ability.as_deref().expect("+1/+1 placement");
+    assert!(matches!(
+        plus_one.effect.as_ref(),
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &plus_one.condition,
+        Some(AbilityCondition::TargetMatchesFilter { filter: TargetFilter::Typed(tf), use_lki: false, .. })
+            if tf.type_filters == vec![TypeFilter::Creature]
+    ));
+    let loyalty = plus_one.sub_ability.as_deref().expect("loyalty placement");
+    assert!(matches!(
+        loyalty.effect.as_ref(),
+        Effect::PutCounter {
+            counter_type: CounterType::Loyalty,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &loyalty.condition,
+        Some(AbilityCondition::TargetMatchesFilter { filter: TargetFilter::Typed(tf), .. })
+            if tf.type_filters == vec![TypeFilter::Planeswalker]
+    ));
+    assert_eq!(
+        loyalty.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert_eq!(
+        loyalty.sibling_condition,
+        crate::types::ability::SiblingCondition::ReplicatedOrBranch
+    );
+}
+
+/// CR 205.2a: "If it's a noncreature, nonland card, …" — the comma joins negated
+/// card types inside one description, so the leading conditional must not split
+/// there, and the gate is "none of these types". Consecutive reveal gates are
+/// independent branches.
+#[test]
+fn druidic_satchel_negated_type_list_gate() {
+    let parsed = parse_card(
+        "{2}, {T}: Reveal the top card of your library. If it's a creature card, create a 1/1 green Saproling creature token. If it's a land card, put that card onto the battlefield under your control. If it's a noncreature, nonland card, you gain 2 life.",
+        "Druidic Satchel",
+        &[],
+        &["Artifact"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let mut node = parsed.abilities[0].sub_ability.as_deref();
+    let mut gates = Vec::new();
+    while let Some(def) = node {
+        gates.push((def.condition.clone(), def.sibling_condition));
+        node = def.sub_ability.as_deref();
+    }
+    assert_eq!(gates.len(), 3, "{gates:?}");
+    assert_eq!(
+        gates[2].0,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature, CoreType::Land],
+                additional_filter: None,
+                subtype_filter: None,
+            }),
+        })
+    );
+    assert_eq!(
+        gates[1].1,
+        crate::types::ability::SiblingCondition::ReplicatedOrBranch
+    );
+    assert_eq!(
+        gates[2].1,
+        crate::types::ability::SiblingCondition::ReplicatedOrBranch
+    );
+}
+
+/// CR 608.2c + CR 205.2a: "If it's a land card or a creature card with mana value
+/// …" — each disjunct is a card description with its own property slot.
+#[test]
+fn nissa_steward_of_elements_disjunctive_card_type_gate() {
+    let parsed = parse_card(
+        "[0]: Look at the top card of your library. If it's a land card or a creature card with mana value less than or equal to the number of loyalty counters on Nissa, you may put that card onto the battlefield.",
+        "Nissa, Steward of Elements",
+        &[],
+        &["Planeswalker"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let put = parsed.abilities[0].sub_ability.as_deref().expect("put");
+    let Some(AbilityCondition::Or { conditions }) = &put.condition else {
+        panic!("expected Or gate, got {:?}", put.condition);
+    };
+    assert!(matches!(
+        &conditions[0],
+        AbilityCondition::RevealedHasCardType { card_types, additional_filter: None, .. }
+            if card_types == &vec![CoreType::Land]
+    ));
+    assert!(matches!(
+        &conditions[1],
+        AbilityCondition::RevealedHasCardType { card_types, additional_filter: Some(FilterProp::Cmc { comparator: Comparator::LE, .. }), .. }
+            if card_types == &vec![CoreType::Creature]
+    ));
+}
+
+/// CR 122.1 + CR 608.2c: "put A on X and B on Y" — the bare second conjunct
+/// re-acquires the elided "put", for targeted and mass placements alike.
+#[test]
+fn elided_put_counter_conjuncts_split_into_placements() {
+    let parsed = parse_card(
+        "At the beginning of your upkeep, put three +1/+1 counters on target creature you control and three +1/+1 counters on target creature an opponent controls.",
+        "Evolutionary Escalation",
+        &[],
+        &["Enchantment"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let first = parsed.triggers[0].execute.as_deref().expect("first");
+    let second = first.sub_ability.as_deref().expect("second");
+    assert!(matches!(
+        second.effect.as_ref(),
+        Effect::PutCounter { target: TargetFilter::Typed(tf), .. }
+            if tf.controller == Some(ControllerRef::Opponent)
+    ));
+
+    let parsed = parse_card(
+        "[−9]: Put five +1/+1 counters on each creature you control and five loyalty counters on each other planeswalker you control.",
+        "Ajani Unyielding",
+        &[],
+        &["Planeswalker"],
+    );
+    assert_card_has_no_gap(&parsed);
+    let first = &parsed.abilities[0];
+    assert!(matches!(
+        first.effect.as_ref(),
+        Effect::PutCounterAll { .. }
+    ));
+    let second = first.sub_ability.as_deref().expect("loyalty placement");
+    assert!(matches!(
+        second.effect.as_ref(),
+        Effect::PutCounterAll {
+            counter_type: CounterType::Loyalty,
+            ..
+        }
+    ));
+}

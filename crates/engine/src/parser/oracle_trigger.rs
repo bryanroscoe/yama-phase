@@ -8400,6 +8400,22 @@ fn extract_if_condition_with_card_name(
         };
     }
 
+    // CR 603.4 + CR 205.2a: "if it's [not] a <card-type phrase>" on the
+    // triggering event's object (Trail of Mystery's turned-face-up head). Only the
+    // LEADING position is an intervening-if; a trailing "… if it's a creature"
+    // stays with the effect clause it gates.
+    if let Some((before, (filter, negated), rest)) =
+        scan_preceded(&lower, parse_event_object_type_phrase_intervening_if)
+            .filter(|(before, _, _)| before.trim_start().is_empty())
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        let condition = build_event_object_subtype_condition(filter, negated, trigger_zone_change);
+        return IfExtraction::hoisted(
+            strip_condition_clause(text, before.len(), clause_len),
+            condition,
+        );
+    }
+
     // CR 603.4 + CR 120.1: "if any of that [combat] damage was dealt by
     // <source-chain>" — damage-source-type intervening-if (Mindblade Render).
     if let Some((stripped, cond)) = try_extract_event_damage_source_condition(&lower, text) {
@@ -8882,19 +8898,49 @@ fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
 fn parse_event_object_subtype_intervening_if(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, negated) = parse_event_object_copula_article(input)?;
+    let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
+    let rest = &rest[consumed..];
+    let filter = TargetFilter::Typed(typed_filter_for_subtype(&subtype));
+    Ok((rest, (filter, negated)))
+}
+
+/// CR 603.4: the shared "if it's [not] a(n) " head of an event-object type
+/// intervening-if. Returns whether the copula is negated. Longest-match: the
+/// negated forms ("'s not"/" is not"/" isn't") share a prefix with the plain
+/// forms ("'s"/" is"), so they must be tried first.
+fn parse_event_object_copula_article(input: &str) -> OracleResult<'_, bool> {
     let (rest, _) = tag("if it").parse(input)?;
-    // Longest-match: the negated forms ("'s not"/" is not"/" isn't") share a
-    // prefix with the plain forms ("'s"/" is"), so they must be tried first.
     let (rest, negated) = alt((
         value(true, alt((tag("'s not "), tag(" is not "), tag(" isn't ")))),
         value(false, alt((tag("'s "), tag(" is ")))),
     ))
     .parse(rest)?;
     let (rest, _) = alt((tag("an "), tag("a "))).parse(rest)?;
-    let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
-    let rest = &rest[consumed..];
-    let filter = TargetFilter::Typed(typed_filter_for_subtype(&subtype));
-    Ok((rest, (filter, negated)))
+    Ok((rest, negated))
+}
+
+/// CR 603.4 + CR 205.2a: "if it's [not] a <card-type phrase>" on the triggering
+/// event's object — the card-type sibling of
+/// [`parse_event_object_subtype_intervening_if`] (Trail of Mystery: "Whenever a
+/// permanent you control is turned face up, if it's a creature, it gets +2/+2
+/// until end of turn"; Phyrexian Totem: "if it's a creature, sacrifice that many
+/// permanents"). The type phrase is delegated to `parse_type_phrase_folding` and
+/// must end at a clause boundary, so a longer predicate ("if it's attacking
+/// alone") never matches here. Registered AFTER the zone-change object filter
+/// path, so dies/enters heads keep their snapshot-aware conditions; the caller
+/// routes any remaining zone-change trigger through the snapshot evaluator via
+/// [`build_event_object_subtype_condition`].
+fn parse_event_object_type_phrase_intervening_if(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, negated) = parse_event_object_copula_article(input)?;
+    let (filter, after) = parse_type_phrase_folding(rest);
+    if !matches!(&filter, TargetFilter::Typed(tf) if !tf.type_filters.is_empty()) {
+        return Err(oracle_err(rest));
+    }
+    nom_primitives::peek_clause_terminator(after)?;
+    Ok((after, (filter, negated)))
 }
 
 /// CR 603.4 + CR 603.10: Build the trigger condition for a recognized "if it's

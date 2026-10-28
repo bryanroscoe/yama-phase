@@ -28524,6 +28524,21 @@ fn previous_clause_moves_to_battlefield(clauses: &[ClauseIr]) -> bool {
 /// preceding instruction (the comparative "that creature" gate).
 fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &TargetFilter)> {
     for (index, prev) in clauses.iter().enumerate().rev() {
+        // CR 608.2c: an instruction that acts on the established anaphor ("put a
+        // +1/+1 counter on it if it's a creature") declares no new object, so a
+        // condition on it decides only whether IT happens — the antecedent of a
+        // later "it" is still the earlier declared target (Forge of Heroes). Walk
+        // past it before the condition check below, which guards instructions
+        // that would otherwise supply their own (possibly unchosen) antecedent.
+        if prev.condition.is_some()
+            && matches!(
+                prev.parsed.effect.target_filter(),
+                Some(TargetFilter::ParentTarget)
+            )
+            && prev.parsed.sub_ability.is_none()
+        {
+            continue;
+        }
         // CR 608.2c + CR 118.12 / CR 603.12 / CR 207.2c: an affirmative "if you do" / "when you do" gate
         // or whole-spell casting condition (Addendum / kicker) decides whether its
         // instruction happens, not what that instruction declared, so its declared

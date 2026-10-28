@@ -1799,6 +1799,9 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                                         exile_conjunct_prepend(&before_lower, remainder_trimmed)
                                     })
                                     .or_else(|| {
+                                        counter_conjunct_prepend(before_and, remainder_trimmed)
+                                    })
+                                    .or_else(|| {
                                         mana_spent_amount_conjunct_prepend(
                                             before_and,
                                             remainder_trimmed,
@@ -4043,6 +4046,80 @@ fn exile_conjunct_prepend(before_lower: &str, remainder_trimmed: &str) -> Option
         return None;
     }
     Some("exile ".to_string())
+}
+
+/// CR 122.1 + CR 608.2c: "put A on X [if C1] and B on Y [if C2]" — the second
+/// conjunct is a bare "<count> <kind> counter(s) on <object>" placement that
+/// elides the shared "put" verb (Forge of Heroes: "Put a +1/+1 counter on it if
+/// it's a creature and a loyalty counter on it if it's a planeswalker";
+/// Evolutionary Escalation: "... on target creature you control and three
+/// +1/+1 counters on target creature an opponent controls"; Ajani Unyielding:
+/// "... on each creature you control and five loyalty counters on each other
+/// planeswalker you control"). Each conjunct is its own placement instruction
+/// with its own object and its own optional trailing condition, so the chunk
+/// splits here and the tail gets the elided verb back.
+///
+/// Both conjuncts must be complete placements under the shared
+/// `try_parse_put_counter` building block (optionally followed by a trailing
+/// "if <condition>" that the per-clause suffix stripper owns). This rejects
+/// counter-kind lists ("put a flying counter and a vigilance counter on ~"),
+/// whose first conjunct names no object, and any non-placement continuation.
+fn counter_conjunct_prepend(before_and: &str, remainder_trimmed: &str) -> Option<String> {
+    /// A complete placement, optionally followed by a trailing "if <condition>"
+    /// the per-clause suffix stripper owns. Returns the placement's object and
+    /// whether that condition is present.
+    fn placement_with_optional_if(text: &str) -> Option<(TargetFilter, bool)> {
+        let lower = text.to_ascii_lowercase();
+        let mut ctx = ParseContext::default();
+        let (effect, remainder, _) = super::counter::try_parse_put_counter(&lower, text, &mut ctx)?;
+        let remainder = remainder.trim_start().to_ascii_lowercase();
+        let gated = tag::<_, _, OracleError<'_>>("if ")
+            .parse(remainder.as_str())
+            .is_ok();
+        if !(remainder.is_empty() || gated) {
+            return None;
+        }
+        Some((effect.target_filter()?.clone(), gated))
+    }
+
+    // Conjunct 1: the chunk so far must hold a complete "put ..." placement at a
+    // word boundary (it may follow a "you may " frame or a trigger lead-in).
+    let before_lower = before_and.to_ascii_lowercase();
+    let (prefix, (), _) = nom_primitives::scan_preceded(&before_lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>("put ")).parse(i)
+    })?;
+    let (head_object, head_gated) = placement_with_optional_if(&before_and[prefix.len()..])?;
+    // Conjunct 2: a verb-less placement, bounded at the next sentence/clause
+    // boundary so a following sentence cannot defeat the completeness check.
+    // allow-noncombinator: structural clause-boundary scan (locate the sentence/comma terminator), not parsing dispatch.
+    let phrase_end = remainder_trimmed
+        .find(['.', ','])
+        .unwrap_or(remainder_trimmed.len());
+    let phrase = remainder_trimmed[..phrase_end].trim();
+    if phrase.is_empty() {
+        return None;
+    }
+    let (_, tail_gated) = placement_with_optional_if(&format!("put {phrase}"))?;
+    // An ungated placement on the source or an anaphor followed by a placement
+    // on its own target ("put a +1/+1 counter on it and a +1/+1 counter on up
+    // to one other target attacking creature", Trygon Prime) is one compound
+    // instruction whose tail announces the target; the clause parser keeps it
+    // whole, so later anaphors bind to that announced target.
+    let tail_announces_target = nom_primitives::scan_at_word_boundaries(phrase, |i| {
+        tag::<_, _, OracleError<'_>>("target ").parse(i)
+    })
+    .is_some();
+    if !head_gated
+        && !tail_gated
+        && tail_announces_target
+        && matches!(
+            head_object,
+            TargetFilter::SelfRef | TargetFilter::ParentTarget
+        )
+    {
+        return None;
+    }
+    Some("put ".to_string())
 }
 
 /// What a mana-gated conjunct's elided head hands out, which fixes the noun the
@@ -17555,5 +17632,71 @@ mod loyalty_symbol_clause_start_tests {
             "{def:#?}"
         );
         assert!(removal.sub_ability.is_none(), "{def:#?}");
+    }
+}
+
+#[cfg(test)]
+mod counter_conjunct_tests {
+    use super::*;
+
+    fn chunk_texts(input: &str) -> Vec<String> {
+        split_clause_sequence(input)
+            .into_iter()
+            .map(|chunk| chunk.text)
+            .collect()
+    }
+
+    /// CR 122.1 + CR 608.2c: a verb-less "<count> <kind> counter(s) on <object>"
+    /// conjunct after a complete placement is its own instruction and gets the
+    /// elided "put" back; each keeps its own trailing condition.
+    #[test]
+    fn elided_put_counter_conjunct_splits_with_verb() {
+        assert_eq!(
+            chunk_texts(
+                "Put a +1/+1 counter on it if it's a creature and a loyalty counter on it if it's a planeswalker."
+            ),
+            vec![
+                "Put a +1/+1 counter on it if it's a creature",
+                "put a loyalty counter on it if it's a planeswalker",
+            ]
+        );
+    }
+
+    /// A counter-kind list names no object before "and", so it stays one
+    /// placement for the counter-list parser.
+    #[test]
+    fn counter_kind_list_is_not_split() {
+        assert_eq!(
+            counter_conjunct_prepend(
+                "put a flying counter",
+                "a vigilance counter on this creature"
+            ),
+            None
+        );
+        assert_eq!(
+            counter_conjunct_prepend("put a +1/+1 counter on it", "it gains flying"),
+            None
+        );
+    }
+
+    /// CR 115.1 + CR 608.2c: an ungated placement on an anaphor followed by a
+    /// placement on its own announced target (Trygon Prime) stays one compound
+    /// instruction; a tail without a target still splits.
+    #[test]
+    fn announced_target_tail_stays_one_instruction() {
+        assert_eq!(
+            counter_conjunct_prepend(
+                "put a +1/+1 counter on it",
+                "a +1/+1 counter on up to one other target attacking creature",
+            ),
+            None,
+        );
+        assert_eq!(
+            counter_conjunct_prepend(
+                "put a +1/+1 counter on it",
+                "a +1/+1 counter on each creature you control",
+            ),
+            Some("put ".to_string()),
+        );
     }
 }
