@@ -17,7 +17,7 @@
 
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
@@ -576,31 +576,8 @@ pub(crate) fn parse_quantity_ref_with_context(
         // players who control more lands than you", Oreskos Explorer, is covered,
         // not just the opponent cards). (Singular forms are accepted for the
         // grammatically-degenerate one-player phrasing.)
-        if let Ok((predicate_input, relation)) = alt((
-            value(
-                PlayerRelation::Opponent,
-                tag::<_, _, OracleError<'_>>("opponents "),
-            ),
-            value(PlayerRelation::Opponent, tag("opponent ")),
-            value(PlayerRelation::All, tag("players ")),
-            value(PlayerRelation::All, tag("player ")),
-        ))
-        .parse(rest)
-        {
-            if let Some((comparator, count, filter, remainder)) =
-                parse_controls_permanent_object(predicate_input, ctx)
-            {
-                if remainder.trim().is_empty() {
-                    return Some(QuantityRef::PlayerCount {
-                        filter: PlayerFilter::ControlsCount {
-                            relation,
-                            filter,
-                            comparator,
-                            count: Box::new(count),
-                        },
-                    });
-                }
-            }
+        if let Some(qty) = parse_player_population_controls_count(rest, ctx) {
+            return Some(qty);
         }
         // CR 402.1 / 119.1 / 122.1f / 404.1: "opponents who have N or more
         // <kind> counters" (Glissa's Retriever) / "your opponents with N or
@@ -1601,6 +1578,70 @@ fn parse_opponents_attacked_clause(input: &str) -> nom::IResult<&str, (), Oracle
     .map(|(rest, _)| (rest, ()))
 }
 
+/// CR 109.4 + CR 109.5: "<population> who control(s) <comparator> <type>" →
+/// `PlayerCount` over the population satisfying the shared control predicate
+/// (`parse_controls_permanent_object`): "opponents who control an Elf",
+/// "players who control more lands than you" (Oreskos Explorer), "opponent who
+/// controls fewer creatures than you" (Voice of Many), "players who control at
+/// least two more lands than you" (Surveyor's Scope). The population word fixes
+/// the relation ("opponent(s)" → Opponent, "player(s)" → All). Shared by the
+/// "the number of …" and "for each …" quantity entries; the predicate must
+/// consume the whole clause.
+fn parse_player_population_controls_count(
+    clause: &str,
+    ctx: &mut ParseContext,
+) -> Option<QuantityRef> {
+    let (predicate_input, relation) = parse_player_population(clause).ok()?;
+    let (comparator, count, filter, remainder) =
+        parse_controls_permanent_object(predicate_input, ctx)?;
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(QuantityRef::PlayerCount {
+        filter: PlayerFilter::ControlsCount {
+            relation,
+            filter,
+            comparator,
+            count: Box::new(count),
+        },
+    })
+}
+
+/// CR 608.2c + CR 109.4: "<population> who controls one or more of those
+/// <type>" → the count of players who control a member of the preceding
+/// effect's tracked object set (Sudden Salvation: "You draw a card for each
+/// opponent who controls one or more of those permanents"). The demonstrative
+/// "those <type>" names the objects the previous instruction acted on, so this
+/// is the `TrackedSetPossessor` relation without a producing-action restriction
+/// (`caused_by: None`) — the sibling of the "… <verb> this way" form parsed by
+/// `parse_tracked_set_possessor_this_way`.
+fn parse_tracked_set_possessor_demonstrative(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, relation) = parse_player_population(input)?;
+    let (input, _) = tag("who ").parse(input)?;
+    let (input, possession) = alt((
+        value(
+            PossessionAxis::Controller,
+            alt((tag("controls "), tag("control "))),
+        ),
+        value(PossessionAxis::Owner, alt((tag("owns "), tag("own ")))),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((tag("one or more of those "), tag("any of those "))).parse(input)?;
+    let (filter, rest) = parse_type_phrase_folding(input);
+    if !matches!(&filter, TargetFilter::Typed(_)) || !rest.trim().is_empty() {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        "",
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            caused_by: None,
+        },
+    ))
+}
+
 /// CR 109.5: "opponent who [scalar predicate]" → `PlayerCount` over opponents
 /// matching the per-candidate attribute threshold. The comparator is carried per
 /// attribute clause: hand-size accepts both "N or fewer" (LE) and "N or more"
@@ -1621,6 +1662,10 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
             map(parse_battlefield_entries_attr_clause, |(a, n)| {
                 (a, Comparator::GE, QuantityExpr::Fixed { value: n })
             }),
+            map(parse_player_counter_attr_clause, |(a, n)| {
+                (a, Comparator::GE, QuantityExpr::Fixed { value: n })
+            }),
+            parse_comparative_life_who_clause,
         ))
         .parse(input)?;
         Ok((input, (relation, attr, comparator, value_expr)))
@@ -1693,6 +1738,38 @@ fn parse_hand_size_who_attr_clause(
             },
             comparator,
             n as i32,
+        ),
+    ))
+}
+
+/// CR 119.1 + CR 109.5: "who has/have {less|more} life than you" / "who has/have
+/// as much life as you" — the life-total sibling of
+/// [`parse_comparative_hand_size_who_clause`] (Great Unclean One: "for each
+/// opponent who has less life than you"). Both sides read the life total; the
+/// reference operand "you" is the controller.
+fn parse_comparative_life_who_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, Comparator, QuantityExpr)> {
+    let (input, _) = alt((tag("who has "), tag("who have "))).parse(input)?;
+    let (input, (comparator, connector)) = alt((
+        value((Comparator::GT, "than "), tag("more ")),
+        value((Comparator::LT, "than "), tag("less ")),
+        value((Comparator::EQ, "as "), tag("as much ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("life ").parse(input)?;
+    let (input, _) = tag(connector).parse(input)?;
+    let (input, ref_scope) = value(PlayerScope::Controller, tag("you")).parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal { player: ref_scope },
+            },
         ),
     ))
 }
@@ -1783,7 +1860,9 @@ fn parse_player_population(input: &str) -> OracleResult<'_, PlayerRelation> {
 /// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
 /// all covered.
 fn parse_player_counter_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
-    let (input, _) = alt((tag("who have "), tag("who has "))).parse(input)?;
+    // "with N or more poison counters" (Wurmquake) is the prepositional form of
+    // the same per-candidate predicate.
+    let (input, _) = alt((tag("who have "), tag("who has "), tag("with "))).parse(input)?;
     let (input, n) = nom_primitives::parse_number(input)?;
     let (input, _) = tag(" or more ").parse(input)?;
     let (input, kind) = nom_quantity::parse_player_counter_kind(input)?;
@@ -3719,6 +3798,22 @@ fn parse_for_each_clause_with_they_controller(
     // control this turn" (Smuggler's Share class).
     if let Some(qty) = parse_for_each_opponent_player_attribute_clause(clause) {
         return Some(qty);
+    }
+
+    // CR 109.4 + CR 109.5: "opponent who controls fewer creatures than you"
+    // (Voice of Many) / "player who controls an Elf" — the for-each form of the
+    // population control predicate.
+    if let Some(qty) = parse_player_population_controls_count(
+        clause,
+        &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+    ) {
+        return Some(qty);
+    }
+
+    // CR 608.2c + CR 109.4: "opponent who controls one or more of those
+    // permanents" (Sudden Salvation).
+    if let Ok((_, filter)) = parse_tracked_set_possessor_demonstrative(clause) {
+        return Some(QuantityRef::PlayerCount { filter });
     }
 
     // CR 404.1: "graveyard with N or more cards in it" (Master's Councillors
@@ -10162,5 +10257,96 @@ mod tests {
                     .properties(vec![FilterProp::IsCommander])
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod player_population_tests {
+    use super::*;
+
+    fn controls_count(clause: &str) -> (PlayerRelation, Comparator, QuantityExpr) {
+        match parse_for_each_clause(clause) {
+            Some(QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsCount {
+                        relation,
+                        comparator,
+                        count,
+                        ..
+                    },
+            }) => (relation, comparator, *count),
+            other => panic!("{clause}: expected ControlsCount, got {other:?}"),
+        }
+    }
+
+    /// CR 109.4 + CR 109.5 + CR 107.1: the comparison axis of "<population> who
+    /// controls <cmp> <type> than you".
+    #[test]
+    fn population_control_comparatives() {
+        let you_creatures = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+        assert_eq!(
+            controls_count("opponent who controls fewer creatures than you"),
+            (
+                PlayerRelation::Opponent,
+                Comparator::LT,
+                you_creatures.clone()
+            )
+        );
+        assert_eq!(
+            controls_count("opponent who controls more creatures than you"),
+            (PlayerRelation::Opponent, Comparator::GT, you_creatures)
+        );
+        let (relation, comparator, count) =
+            controls_count("player who controls at least two more lands than you");
+        assert_eq!(
+            (relation, comparator),
+            (PlayerRelation::All, Comparator::GE)
+        );
+        assert!(matches!(count, QuantityExpr::Offset { offset: 2, .. }));
+    }
+
+    /// CR 119.1 + CR 122.1f: comparative life and prepositional poison forms of
+    /// the per-candidate attribute predicate.
+    #[test]
+    fn population_life_and_poison_attributes() {
+        assert!(matches!(
+            parse_for_each_clause("opponent who has less life than you"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    comparator: Comparator::LT,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            parse_for_each_clause("opponent with three or more poison counters"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    comparator: Comparator::GE,
+                    ..
+                }
+            })
+        ));
+    }
+
+    /// CR 608.2c + CR 109.4: "who controls one or more of those permanents"
+    /// counts possessors of the tracked set.
+    #[test]
+    fn population_possessing_those_permanents() {
+        assert!(matches!(
+            parse_for_each_clause("opponent who controls one or more of those permanents"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: PlayerRelation::Opponent,
+                    possession: PossessionAxis::Controller,
+                    caused_by: None,
+                    ..
+                }
+            })
+        ));
     }
 }
