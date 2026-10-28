@@ -2181,6 +2181,7 @@ mod magnificent_end_tapped_target_cost;
 mod planar_nexus_every_nonbasic_land_type;
 mod put_target_count_entry_counters;
 mod risky_move_gain_control_trigger;
+mod sepulchral_primordial_one_per_graveyard;
 mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod study_hall_costed_any_color_land;
