@@ -1532,6 +1532,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
+        PlayerScope::ChosenPlayer { .. } => "the player chosen this way".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
         // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
         PlayerScope::SpecificPlayer { .. } => "that player".to_string(),

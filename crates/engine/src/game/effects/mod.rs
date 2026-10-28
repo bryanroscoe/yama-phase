@@ -6365,6 +6365,7 @@ fn declined_search_player_scope_dependency(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
     }
@@ -7201,6 +7202,28 @@ fn settle_shared_continuation_gate(ability: &ResolvedAbility) -> Option<Resolved
     Some(settled)
 }
 
+/// CR 608.2c: whether a condition is a self-contained check of the game state
+/// ("if an opponent has more life than you", "if an opponent controls more
+/// creatures than you") that names nothing an earlier instruction produced —
+/// no target, tracked set, chosen player or "that"/"it" anaphor. A following
+/// sentence gated on such a condition is its own instruction, checked when it
+/// is reached, so a false gate on the sentence before it says nothing about
+/// it. Conservative: only `QuantityCheck`s whose two sides read source context
+/// alone (and `And`/`Or`/`Not` of them) qualify; anything else stays dependent.
+fn condition_reads_only_game_state(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            crate::game::quantity::quantity_expr_reads_only_source_context(lhs)
+                && crate::game::quantity::quantity_expr_reads_only_source_context(rhs)
+        }
+        AbilityCondition::Not { condition } => condition_reads_only_game_state(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().all(condition_reads_only_game_state)
+        }
+        _ => false,
+    }
+}
+
 /// CR 603.12 + CR 615.5: Whether a SUB-ability's own gate makes it resolve even
 /// though its parent's condition was FALSE — the single authority for that
 /// question, with two consumers.
@@ -7651,6 +7674,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
             | PlayerScope::DefendingPlayer
             | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
+            | PlayerScope::ChosenPlayer { index: _ }
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { id: _ } => false,
         },
@@ -22151,9 +22175,21 @@ fn resolve_chain_body(
                             ..
                         })
                     );
+                // CR 608.2c: a following sentence gated on its own
+                // self-contained game-state check ("If an opponent controls
+                // more creatures than you, ...") is the next instruction in
+                // written order, checked on its own when reached.
+                let is_self_contained_conditional_sibling = sub.sub_link
+                    == SubAbilityLink::SequentialSibling
+                    && sub
+                        .condition
+                        .as_ref()
+                        .is_some_and(condition_reads_only_game_state);
                 if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && (sub.condition.is_none() || is_ordinal_sequential_sibling))
+                        && (sub.condition.is_none()
+                            || is_ordinal_sequential_sibling
+                            || is_self_contained_conditional_sibling))
                 {
                     let mut sub_resolved = sub.as_ref().clone();
                     // CR 608.2d: a `Resolution`-timed sub makes its OWN
@@ -27960,6 +27996,10 @@ fn resolve_grant_next_spell_ability(
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::SourceChosenPlayer => Some(ability.controller),
+        // CR 608.2c: the player an earlier choice of this resolution picked.
+        PlayerScope::ChosenPlayer { index } => {
+            ability.chosen_players.get(usize::from(index)).copied()
+        }
         // CR 109.4 + CR 108.3: the controller/owner of the parent object target.
         PlayerScope::ParentObjectTarget { possession } => match possession {
             PossessionAxis::Controller => {

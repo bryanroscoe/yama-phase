@@ -1658,11 +1658,60 @@ pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) ->
             .as_deref()
             .is_none_or(player_scope_is_source_context_previewable),
         PlayerScope::ScopedPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::AnyTurn => false,
+    }
+}
+
+/// CR 608.2c: whether a quantity reads only the game state as seen from the
+/// ability's source and controller — players' life totals, hand sizes, and
+/// counts of objects or players selected by context-free filters — and never
+/// an object or player supplied by an earlier instruction of the resolving
+/// ability (a target, a tracked set, a chosen or scoped player, an anaphor).
+/// Such a quantity means the same thing whether or not an earlier instruction
+/// happened. Conservative: any reference this walk doesn't model is `false`.
+pub(crate) fn quantity_expr_reads_only_source_context(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::StartingLifeTotal { player } => {
+                player_scope_is_source_context_previewable(player)
+            }
+            QuantityRef::ObjectCount { filter } => target_filter_is_source_context_free(filter),
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsCount {
+                        filter: counted,
+                        count,
+                        ..
+                    },
+            } => {
+                target_filter_is_source_context_free(counted)
+                    && quantity_expr_reads_only_source_context(count)
+            }
+            _ => false,
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_reads_only_source_context(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().all(quantity_expr_reads_only_source_context)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_only_source_context(left)
+                && quantity_expr_reads_only_source_context(right)
+        }
     }
 }
 
@@ -2007,6 +2056,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
     }
@@ -2024,6 +2074,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
     }
@@ -9300,6 +9351,11 @@ fn resolve_single_player_scope(
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx),
+        // CR 608.2c + CR 109.4: the player an earlier `Choose` of this
+        // resolution picked ("choose an opponent. If that player ...").
+        PlayerScope::ChosenPlayer { index } => {
+            ability.and_then(|a| a.chosen_players.get(usize::from(*index)).copied())
+        }
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
         PlayerScope::AnyTurn => {
@@ -9421,6 +9477,12 @@ where
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 608.2c + CR 109.4: the player an earlier `Choose` of this
+        // resolution picked.
+        PlayerScope::ChosenPlayer { index } => ability
+            .and_then(|a| a.chosen_players.get(usize::from(*index)).copied())
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
         // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
         // excluded from the aggregate population, same as
         // `resolve_player_count`'s candidate loop (outside its life-history
@@ -9524,6 +9586,7 @@ where
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, extract)

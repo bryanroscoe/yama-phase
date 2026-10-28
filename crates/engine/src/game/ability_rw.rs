@@ -7586,6 +7586,7 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         // reads no game state, exactly like the controller/scoped scopes.
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
         | PlayerScope::RecipientController

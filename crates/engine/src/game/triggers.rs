@@ -13273,7 +13273,9 @@ fn player_scope_unbound_at_fire_time(scope: &PlayerScope) -> bool {
         PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::RecipientController
-        | PlayerScope::ParentObjectTarget { .. } => true,
+        | PlayerScope::ParentObjectTarget { .. }
+        // CR 608.2c: chosen during resolution, so a fire-time check has none.
+        | PlayerScope::ChosenPlayer { .. } => true,
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(player_scope_unbound_at_fire_time),

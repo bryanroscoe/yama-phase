@@ -1755,6 +1755,49 @@ fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
     );
 }
 
+/// CR 608.2c + CR 109.4: Sandstone Oracle — "choose an opponent. If that player
+/// has more cards in hand than you, draw cards equal to the difference." "That
+/// player" is the opponent chosen this way, in both the gate and the amount.
+#[test]
+fn that_player_after_choose_an_opponent_is_the_chosen_player() {
+    let def = parse_effect_chain(
+        "Choose an opponent. If that player has more cards in hand than you, draw cards equal to the difference.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Choose { .. }),
+        "head is the choice, got {:?}",
+        def.effect
+    );
+    let draw = def.sub_ability.as_ref().expect("draw clause chained");
+    let chosen = PlayerScope::ChosenPlayer { index: 0 };
+    let mut scopes = Vec::new();
+    if let Some(AbilityCondition::QuantityCheck { lhs, rhs, .. }) = &draw.condition {
+        for side in [lhs, rhs] {
+            side.any_ref(&mut |qty| {
+                if let QuantityRef::HandSize { player } = qty {
+                    scopes.push(player.clone());
+                }
+                false
+            });
+        }
+    } else {
+        panic!("expected a hand-size comparison, got {:?}", draw.condition);
+    }
+    assert_eq!(scopes, vec![chosen.clone(), PlayerScope::Controller]);
+    let Effect::Draw { count, .. } = &*draw.effect else {
+        panic!("expected Draw, got {:?}", draw.effect);
+    };
+    let mut count_scopes = Vec::new();
+    count.any_ref(&mut |qty| {
+        if let QuantityRef::HandSize { player } = qty {
+            count_scopes.push(player.clone());
+        }
+        false
+    });
+    assert_eq!(count_scopes, vec![chosen, PlayerScope::Controller]);
+}
+
 /// CR 608.2d: the recipient-less binding channel generalizes past the
 /// possessive axis. Infernal Offering's "You and that player each sacrifice a
 /// creature" has no `TargetFilter` recipient slot on `Effect::Sacrifice` either,
