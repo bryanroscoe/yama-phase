@@ -5049,8 +5049,16 @@ fn enters_with_counters_outcome(
         parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
     {
         count_expr = combined;
-    } else if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
+    } else if let Some(for_each_count) =
+        parse_enters_counter_for_each_suffix(after_counter, &counter_type)
+    {
         count_expr = multiply_counter_count_by_for_each(count_expr, for_each_count);
+    } else if has_enters_counter_for_each_suffix(after_counter) {
+        // CR 122.6: "… counter on it for each <X>" whose X the quantity grammar
+        // can't read. Placing the bare printed count instead would give a fixed
+        // number of counters for a scaled clause, so the clause stays an honest
+        // gap.
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
     }
     // CR 122.6: For "a number of counters equal to [quantity]" and the
     // sibling shorthand "counters on it equal to [quantity]", parse the
@@ -5881,7 +5889,10 @@ fn parse_enters_counter_rounding_postmodifier(after_counter: &str) -> Option<Rou
     Some(rounding)
 }
 
-fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
+fn parse_enters_counter_for_each_suffix(
+    after_counter: &str,
+    counter_type: &CounterType,
+) -> Option<QuantityExpr> {
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
         .parse(after_counter)
         .ok()?;
@@ -5909,7 +5920,56 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
         }
         _ => rest.trim(),
     };
-    super::oracle_quantity::parse_for_each_clause_expr(clause)
+    // The two-population form first: the single-clause reader would otherwise
+    // take "<A> and a +1/+1 counter on it" as one counter-type name.
+    parse_enters_counter_for_each_pair(clause, counter_type)
+        .or_else(|| super::oracle_quantity::parse_for_each_clause_expr(clause))
+}
+
+/// CR 122.6 + CR 614.1c: "… counter on it for each <A> and a <same> counter on
+/// it for each <B>" — one counter per A plus one per B ("for each other red
+/// creature you control and a +1/+1 counter on it for each other green
+/// creature you control"; an object that is both counts in both). `clause` is
+/// the text after the first "for each ". The second placement must name the
+/// same counter, else the clauses describe different counters and this reading
+/// doesn't apply.
+fn parse_enters_counter_for_each_pair(
+    clause: &str,
+    counter_type: &CounterType,
+) -> Option<QuantityExpr> {
+    let (_, (first, second_placement)) = nom_primitives::split_once_on(clause, " and ").ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(second_placement)
+        .ok()?;
+    let (rest, second_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    if &second_type != counter_type {
+        return None;
+    }
+    let (second, _) = (
+        tag::<_, _, OracleError<'_>>(" counter on "),
+        nom_primitives::parse_object_recipient_pronoun,
+        tag(" for each "),
+    )
+        .parse(rest)
+        .ok()?;
+    let first = super::oracle_quantity::parse_for_each_clause_expr(first.trim())?;
+    let second = super::oracle_quantity::parse_for_each_clause_expr(second.trim())?;
+    Some(QuantityExpr::Sum {
+        exprs: vec![first, second],
+    })
+}
+
+/// CR 122.6: whether the text after the counter noun is "[s] on <recipient>
+/// for each …" — a per-each scaled placement, read or not.
+fn has_enters_counter_for_each_suffix(after_counter: &str) -> bool {
+    (
+        opt(tag::<_, _, OracleError<'_>>("s")),
+        tag(" on "),
+        nom_primitives::parse_object_recipient_pronoun,
+        tag(" for each "),
+    )
+        .parse(after_counter)
+        .is_ok()
 }
 
 /// Parse the "<type> counter[s] on it/them plus an additional <M> <type>
@@ -5976,7 +6036,8 @@ fn parse_enters_base_plus_additional_for_each(
     // Delegate the " counter[s] on it/them for each <filter>" tail to the
     // existing suffix parser — it consumes the plural "s" and the connective,
     // then parses the for-each filter into the per-each dynamic count.
-    let per_each = parse_enters_counter_for_each_suffix(after_additional_counter)?;
+    let per_each =
+        parse_enters_counter_for_each_suffix(after_additional_counter, base_counter_type)?;
 
     let inner = if multiplier == 1 {
         per_each
@@ -6763,7 +6824,9 @@ fn parse_whenever_you_cast_enters_with(
             // rider this route cannot compose stays an honest gap. (The
             // dynamic-X arm already fails closed via `?`.)
             let fixed = QuantityExpr::Fixed { value: n as i32 };
-            if let Some(population) = parse_enters_counter_for_each_suffix(after_counter) {
+            if let Some(population) =
+                parse_enters_counter_for_each_suffix(after_counter, &counter_type)
+            {
                 multiply_counter_count_by_for_each(fixed, population)
             } else if counter_list_remainder_is_exhausted(rest) {
                 fixed
@@ -16762,6 +16825,92 @@ mod tests {
                 qty: QuantityRef::ObjectCount { .. }
             }
         ));
+    }
+
+    /// CR 122.1 + CR 614.1c: "for each +1/+1 counter among other creatures you
+    /// control" counts the counters among those creatures, not the creatures.
+    #[test]
+    fn enters_with_counter_for_each_counter_among_objects() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each +1/+1 counter among other creatures you control.",
+            "Ascendant Acolyte",
+        )
+        .expect("enters-with must parse");
+        let Effect::PutCounter { count, .. } = &*def.execute.as_deref().unwrap().effect else {
+            panic!("expected PutCounter");
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::CountersOnObjects {
+                    counter_type,
+                    filter,
+                },
+        } = count
+        else {
+            panic!("expected a counter total, got {count:?}");
+        };
+        assert_eq!(*counter_type, Some(CounterType::Plus1Plus1));
+        assert!(
+            matches!(filter, TargetFilter::Typed(typed)
+                if typed.controller == Some(ControllerRef::You)
+                    && typed.properties.contains(&FilterProp::Another)),
+            "other creatures you control, got {filter:?}"
+        );
+    }
+
+    /// CR 122.6: a scaled placement whose "for each" clause the quantity grammar
+    /// can't read fails closed rather than placing the bare printed count.
+    #[test]
+    fn unreadable_enters_with_for_each_clause_fails_closed() {
+        assert_eq!(
+            enters_with_fails_closed(
+                "This creature enters with a +1/+1 counter on it for each frobnicated widget.",
+                "Test Creature",
+            ),
+            Some(EntersWithGap::Clause)
+        );
+        assert_eq!(
+            enters_with_fails_closed(
+                "This creature enters with a +1/+1 counter on it for each other creature you control.",
+                "Test Creature",
+            ),
+            None
+        );
+    }
+
+    /// CR 122.6 + CR 614.1c: "a +1/+1 counter on it for each other red creature
+    /// you control and a +1/+1 counter on it for each other green creature you
+    /// control" places one counter per red creature plus one per green creature.
+    #[test]
+    fn enters_with_counter_for_each_of_two_populations_sums_them() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each other red creature you control and a +1/+1 counter on it for each other green creature you control.",
+            "Ulasht, the Hate Seed",
+        )
+        .expect("enters-with must parse");
+        let Effect::PutCounter {
+            count,
+            counter_type,
+            ..
+        } = &*def.execute.as_deref().unwrap().effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        let red = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other red creature you control",
+        )
+        .expect("red clause parses");
+        let green = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other green creature you control",
+        )
+        .expect("green clause parses");
+        assert_eq!(
+            count,
+            &QuantityExpr::Sum {
+                exprs: vec![red, green]
+            }
+        );
     }
 
     /// #5649: Nefarious Lich's damage clause is a CR 614.1a substitution

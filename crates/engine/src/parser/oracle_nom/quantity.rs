@@ -5610,8 +5610,12 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
         // CR 122.1: "counter(s) on [self-ref]" — any counter type on the source
         // permanent (Gavel of the Righteous: "for each counter on this Equipment").
         // Placed before `parse_for_each_controlled_type` so the bare "counter" token
-        // does not commit to a type-phrase fallback.
-        parse_for_each_counters_on_source,
+        // does not commit to a type-phrase fallback. The "among <objects>" sibling
+        // totals counters across a population.
+        alt((
+            parse_for_each_counters_on_source,
+            parse_for_each_counters_among_objects,
+        )),
         // CR 305.6: "for each basic land type among lands you/they control" —
         // domain scaling (Jodah's Codex, Wandering Treefolk, Radha's Firebrand,
         // Scion of Draco). Reuses the shared bare-domain-suffix combinator and
@@ -5666,11 +5670,7 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
 /// per-recipient anthem ("+1/+1 for each +1/+1 counter on it", Clamavus) count
 /// the anthem source's own counters instead of each affected creature's.
 fn parse_for_each_counters_on_source(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, counter_type) = alt((
-        parse_typed_counter_type_for_each_source,
-        value(None, parse_generic_counter_match),
-    ))
-    .parse(input)?;
+    let (rest, counter_type) = parse_for_each_counter_kind(input)?;
     let (rest, _) = tag(" on ").parse(rest)?;
     let (rest, scope) = parse_for_each_counter_object_scope(rest)?;
     Ok((
@@ -5680,6 +5680,41 @@ fn parse_for_each_counters_on_source(input: &str) -> OracleResult<'_, QuantityRe
             counter_type,
         },
     ))
+}
+
+/// CR 122.1: "[<kind>] counter among <objects>" in a "for each" context — the
+/// total of those counters across every matching object, not the number of
+/// objects ("for each +1/+1 counter among other creatures you control"). A
+/// population the type grammar can't name ("counter among players and
+/// permanents") fails, so it never counts every object.
+fn parse_for_each_counters_among_objects(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, counter_type) = parse_for_each_counter_kind(input)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        "",
+        QuantityRef::CountersOnObjects {
+            counter_type,
+            filter,
+        },
+    ))
+}
+
+/// CR 122.1: the counter noun of a "for each [<kind>] counter …" clause — a
+/// named kind, or any kind (`None`).
+fn parse_for_each_counter_kind(input: &str) -> OracleResult<'_, Option<CounterType>> {
+    alt((
+        parse_typed_counter_type_for_each_source,
+        value(None, parse_generic_counter_match),
+    ))
+    .parse(input)
 }
 
 /// CR 608.2k: The object axis of a "for each … counter(s) on <object>" clause.
