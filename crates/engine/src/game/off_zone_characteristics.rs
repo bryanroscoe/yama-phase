@@ -1,8 +1,10 @@
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::filter::FilterContext;
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, active_effect_condition_controller,
-    collect_shared_active_continuous_effects_matching, evaluate_condition_with_recipient,
-    order_active_continuous_effects, GatherDependence,
+    base_static_source_may_reach, collect_shared_active_continuous_effects_matching,
+    collect_static_source_continuous_effects_matching, evaluate_condition_with_recipient,
+    order_active_continuous_effects, transient_modifications_reaching, GatherDependence,
 };
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{ContinuousModification, TargetFilter, TriggerProducerOrigin};
@@ -589,6 +591,99 @@ pub(crate) fn base_statics_can_grant_off_zone_keyword_kind(
     active_continuous_effects_from_base_static_source(state, obj, supports_off_zone_keyword_query)
         .iter()
         .any(|effect| effect_can_add_off_zone_keyword_kind(state, effect, kind))
+}
+
+/// CR 613.1f + CR 113.6b: Could an off-zone keyword query give an object
+/// outside the battlefield a keyword whose companion triggers function in the
+/// zone it is in?
+///
+/// Trigger collection reconciles those companions onto every graveyard, exile,
+/// stack and command-zone object before each scan, which costs one full keyword
+/// query per object. The returned predicate answers for any object and zone
+/// without that query, and a `false` is exact: such a companion comes only from
+/// a keyword ADDED by an effect in [`collect_applicable_off_zone_keyword_effects`]'s
+/// two inputs, and this pre-filters both of them, keeping only the
+/// modifications [`may_add_off_battlefield_keyword_companion`] accepts whose
+/// keyword can have a companion functioning in the asked zone.
+///
+/// The shared input has two halves. The static sources are gathered once, so
+/// narrowed; when that gather evaluated no filter or condition
+/// ([`GatherDependence::Structural`]) it is a pure function of the state and
+/// holds exactly the effects every recipient's own gather would keep from
+/// them, and otherwise it answers `true` (conservative). The stored transients
+/// are read from their definitions alone, live or not, and one whose affected
+/// filter names a specific object can apply to that object only. The
+/// per-object input is the object's own base statics, checked by
+/// [`base_static_source_may_reach`] from their definitions.
+///
+/// A battlefield recipient falls open to the ordinary candidate calculation.
+/// Reconciliation also visits virtual stack entries for prepared activations:
+/// their entry id is the source permanent's id, whose object remains on the
+/// battlefield. The off-zone pre-filter cannot assume an off-zone object row.
+pub(crate) fn off_zone_keyword_companions_may_exist(
+    state: &GameState,
+) -> impl Fn(&crate::game::game_object::GameObject, Zone) -> bool + '_ {
+    let (static_effects, dependence) = collect_static_source_continuous_effects_matching(
+        state,
+        may_add_off_battlefield_keyword_companion,
+    );
+    let static_context_dependent = dependence == GatherDependence::ContextDependent;
+    let transients =
+        transient_modifications_reaching(state, may_add_off_battlefield_keyword_companion);
+    move |obj, zone| {
+        zone == Zone::Battlefield
+            || static_context_dependent
+            || static_effects
+                .iter()
+                .any(|effect| may_add_keyword_companion_in_zone(&effect.modification, zone))
+            || transients.iter().any(|(modification, recipient)| {
+                recipient.is_none_or(|id| id == obj.id)
+                    && may_add_keyword_companion_in_zone(modification, zone)
+            })
+            || base_static_source_may_reach(obj, may_add_off_battlefield_keyword_companion)
+    }
+}
+
+/// Whether a modification kept by [`may_add_off_battlefield_keyword_companion`]
+/// can add a keyword with a companion trigger that functions in `zone`. Only an
+/// `AddKeyword` names its keyword; the other kept arms answer `true`.
+fn may_add_keyword_companion_in_zone(modification: &ContinuousModification, zone: Zone) -> bool {
+    match modification {
+        ContinuousModification::AddKeyword { keyword } => {
+            KeywordTriggerInstaller::triggers_for(keyword)
+                .iter()
+                .any(|definition| {
+                    crate::game::triggers::trigger_definition_functions_in_zone(definition, zone)
+                })
+        }
+        _ => true,
+    }
+}
+
+/// The modifications that can add a keyword whose companion triggers function
+/// outside the battlefield: the keyword-adding arms of
+/// [`supports_off_zone_keyword_query`]. An `AddKeyword` is decided from the
+/// companions [`KeywordTriggerInstaller::triggers_for`] builds for its exact
+/// keyword; the arms whose keyword is resolved per recipient or per source are
+/// kept unconditionally. The removal arms can only shrink a recipient's
+/// keywords (see [`modification_can_add_keyword_kind`]), so they are dropped.
+fn may_add_off_battlefield_keyword_companion(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::AddKeyword { keyword } => {
+            KeywordTriggerInstaller::triggers_for(keyword)
+                .iter()
+                .any(|definition| {
+                    definition
+                        .trigger_zones
+                        .iter()
+                        .any(|zone| *zone != Zone::Battlefield)
+                })
+        }
+        ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::RemoveAllAbilities => false,
+        other => supports_off_zone_keyword_query(other),
+    }
 }
 
 /// CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped by owner,
