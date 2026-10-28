@@ -2238,6 +2238,20 @@ fn is_keyword_companion_producer(producer: &TriggerGrantProducerKey) -> bool {
     matches!(producer, TriggerGrantProducerKey::KeywordCompanion { .. })
 }
 
+/// Whether `obj` holds any keyword-companion grant or trigger entry, i.e.
+/// whether reconciling it against no candidates could change it.
+fn has_keyword_companion_occurrence(obj: &GameObject) -> bool {
+    obj.trigger_occurrence_state
+        .active_grants()
+        .any(|(producer, _)| is_keyword_companion_producer(producer))
+        || obj.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+            )
+        })
+}
+
 /// Produces the exact keyword-companion candidates for one off-zone source.
 /// The off-zone characteristics pass retains the continuous-effect occurrence
 /// that supplied each final keyword, so no payload comparison or base-keyword
@@ -2318,11 +2332,20 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
         let state = &*state;
         crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
             let mut staged = Vec::with_capacity(object_ids.len());
+            let companions_may_exist =
+                crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(state);
 
             for object_id in object_ids {
                 let Some(obj) = state.objects.get(&object_id) else {
                     continue;
                 };
+                // Nothing can grant this object a companion, so its candidates
+                // are provably empty; with none installed either, reconciling
+                // would store what it already holds, which the guard below
+                // skips anyway. Skipping first avoids the keyword query.
+                if !companions_may_exist(obj, obj.zone) && !has_keyword_companion_occurrence(obj) {
+                    continue;
+                }
                 let candidates = off_zone_keyword_trigger_candidates(state, obj);
                 let mut occurrence_state = obj.trigger_occurrence_state.clone();
                 let companions = occurrence_state
@@ -3554,9 +3577,15 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
         // check in `source_has_trigger_in_zone` does not read the owner.
         Zone::Graveyard | Zone::Exile => {
             crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
+                let companions_may_exist =
+                    crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(
+                        state,
+                    );
                 super::targeting::zone_object_ids(state, zone)
                     .into_iter()
-                    .filter(|id| source_has_trigger_in_zone(state, *id, zone))
+                    .filter(|id| {
+                        source_has_trigger_in_zone_given(state, *id, zone, &companions_may_exist)
+                    })
                     .collect()
             })
         }
@@ -3605,11 +3634,30 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
 /// Candidate discovery at the collector's current observation boundary. This
 /// does not answer a source-relative trigger fact; every matched candidate is
 /// immediately converted to its owned `TriggerSourceContext` before matching.
+#[cfg(test)]
 fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone) -> bool {
+    let companions_may_exist =
+        crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(state);
+    source_has_trigger_in_zone_given(state, source_id, zone, &companions_may_exist)
+}
+
+/// [`source_has_trigger_in_zone`] with the board-wide companion pre-check
+/// computed once by the caller. A keyword-companion trigger synthesized from
+/// the source's off-zone keywords can function outside the battlefield only if
+/// a keyword was ADDED with such a companion (the synthesis drops the source's
+/// printed keywords), so when `companions_may_exist` rules that out the
+/// per-object keyword query is skipped without changing the answer.
+fn source_has_trigger_in_zone_given(
+    state: &GameState,
+    source_id: ObjectId,
+    zone: Zone,
+    companions_may_exist: &impl Fn(&GameObject, Zone) -> bool,
+) -> bool {
     state.objects.get(&source_id).is_some_and(|obj| {
         super::functioning_abilities::active_trigger_definitions(state, obj)
             .any(|active| trigger_definition_functions_in_zone(active.definition, zone))
             || (zone != Zone::Battlefield
+                && companions_may_exist(obj, zone)
                 && synthesize_granted_keyword_triggers(
                     obj,
                     crate::game::off_zone_characteristics::effective_off_zone_keywords(
@@ -46119,6 +46167,92 @@ pub mod tests {
     }
 
     #[test]
+    fn off_zone_reconciliation_accepts_projected_battlefield_source() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Activation Source", 1, 1);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let overlay = TriggerCollectionOverlay::for_prepared_activated_ability(
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+        );
+        overlay.install_virtual_targeting_source(&mut state);
+        assert_eq!(
+            super::super::targeting::zone_object_ids(&state, Zone::Stack),
+            vec![source],
+            "the production overlay exposes the permanent id through the stack scan"
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert!(
+            crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist(&state)(
+                &state.objects[&source],
+                Zone::Battlefield,
+            ),
+            "the off-zone pre-check must defer to the ordinary query"
+        );
+        assert!(off_zone_keyword_trigger_candidates(&state, &state.objects[&source]).is_empty());
+        let before = format!("{:?}", state.objects[&source]);
+        let stack_before = format!("{:?}", state.stack);
+
+        reconcile_off_zone_keyword_triggers(&mut state);
+
+        assert_eq!(format!("{:?}", state.objects[&source]), before);
+        assert_eq!(format!("{:?}", state.stack), stack_before);
+    }
+
+    #[test]
+    fn pending_activation_collection_accepts_projected_battlefield_source() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Activation Source", 1, 1);
+        let target = make_creature(&mut state, PlayerId(1), "Activation Target", 2, 2);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut collection = PendingActivationTriggerCollection::for_prepared_activated_ability(
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+        );
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(target),
+            source_id: source,
+            source_controller: PlayerId(0),
+            targeter: None,
+        };
+        let before = format!("{state:?}");
+
+        // Each slice reconstructs the staged state and its virtual stack entry.
+        // Both slices must reconcile successfully without publishing that entry.
+        collection.collect(&state, std::slice::from_ref(&event));
+        collection.collect(&state, std::slice::from_ref(&event));
+
+        assert!(collection.pending_contexts.is_empty());
+        assert_eq!(format!("{state:?}"), before);
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    #[test]
     fn off_zone_keyword_reconciliation_reuses_then_retires_grant_occurrence() {
         let mut state = setup();
         let source = make_creature(&mut state, PlayerId(0), "Jhoira", 1, 3);
@@ -47316,6 +47450,134 @@ pub mod tests {
         assert!(state
             .objects
             .shares_object_with(&granted.objects, recovering));
+    }
+
+    /// CR 113.6b + CR 613.1f: the off-zone companion pre-check answers per
+    /// zone and per recipient. A granted Suspend has companions only in exile
+    /// (CR 702.62a) and a granted Recover only in a graveyard (CR 702.59a); a
+    /// transient whose affected filter names one object reaches that object
+    /// alone; a battlefield recipient always falls open.
+    #[test]
+    fn off_zone_companion_precheck_answers_per_zone_and_recipient() {
+        use crate::game::off_zone_characteristics::off_zone_keyword_companions_may_exist;
+
+        let suspend = Keyword::Suspend {
+            count: 0,
+            cost: ManaCost::generic(1),
+        };
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Keyword Granter", 1, 1);
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let named = off_zone_test_card(&mut state, 1, Zone::Exile);
+        let other = off_zone_test_card(&mut state, 2, Zone::Exile);
+        {
+            let may_exist = off_zone_keyword_companions_may_exist(&state);
+            for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command] {
+                assert!(!may_exist(&state.objects[&plain], zone), "{zone:?}");
+            }
+            assert!(may_exist(&state.objects[&plain], Zone::Battlefield));
+        }
+
+        state
+            .transient_continuous_effects
+            .push_back(transient_keyword_grant(100, source, named, suspend));
+        {
+            let may_exist = off_zone_keyword_companions_may_exist(&state);
+            assert!(may_exist(&state.objects[&named], Zone::Exile));
+            assert!(
+                !may_exist(&state.objects[&other], Zone::Exile),
+                "a transient naming one object reaches that object alone"
+            );
+            assert!(
+                !may_exist(&state.objects[&named], Zone::Graveyard),
+                "Suspend has no graveyard companion"
+            );
+        }
+
+        grant_off_zone_trigger_keywords(&mut state, Some(other), None);
+        let may_exist = off_zone_keyword_companions_may_exist(&state);
+        assert!(
+            may_exist(&state.objects[&plain], Zone::Graveyard),
+            "a structural static grant is kept for every recipient before its filter"
+        );
+        assert!(
+            !may_exist(&state.objects[&other], Zone::Exile),
+            "Recover has no exile companion"
+        );
+    }
+
+    /// The pre-check skips only objects whose reconcile would change nothing:
+    /// on a board with a static Recover grant, a transient Suspend grant, a
+    /// Suspend grant to a graveyard card (no companion there) and plain cards,
+    /// the reconcile equals the unguarded reference sweep.
+    #[test]
+    fn off_zone_companion_precheck_matches_unguarded_sweep() {
+        use crate::types::object_map::sweep_test_support::assert_sweep_matches_reference;
+
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Keyword Granter", 1, 1);
+        let plain_graveyard = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let plain_exile = off_zone_test_card(&mut state, 1, Zone::Exile);
+        let recovering = off_zone_test_card(&mut state, 2, Zone::Graveyard);
+        let suspended = off_zone_test_card(&mut state, 3, Zone::Exile);
+        let misplaced = off_zone_test_card(&mut state, 4, Zone::Graveyard);
+        grant_off_zone_trigger_keywords(&mut state, Some(recovering), Some(misplaced));
+        state
+            .transient_continuous_effects
+            .push_back(transient_keyword_grant(
+                100,
+                source,
+                suspended,
+                Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::generic(1),
+                },
+            ));
+
+        let (actual, _) = assert_sweep_matches_reference(
+            &state,
+            &[recovering, suspended],
+            reconcile_off_zone_keyword_triggers,
+            reference_reconcile_off_zone_keyword_triggers,
+        );
+        assert!(holds_keyword_companion(&actual, recovering));
+        assert!(holds_keyword_companion(&actual, suspended));
+        for id in [plain_graveyard, plain_exile, misplaced] {
+            assert!(!holds_keyword_companion(&actual, id));
+            assert!(actual.objects.shares_object_with(&state.objects, id));
+        }
+    }
+
+    /// The graveyard source scan keeps a card granted a keyword with a
+    /// graveyard companion and drops one whose granted keyword has none there.
+    #[test]
+    fn graveyard_source_scan_uses_the_companion_precheck() {
+        let mut state = setup();
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let recovering = off_zone_test_card(&mut state, 1, Zone::Graveyard);
+        let misplaced = off_zone_test_card(&mut state, 2, Zone::Graveyard);
+        grant_off_zone_trigger_keywords(&mut state, Some(recovering), Some(misplaced));
+
+        let sources = trigger_source_ids_for_zone(&state, Zone::Graveyard);
+        assert!(sources.contains(&recovering));
+        assert!(!sources.contains(&plain));
+        assert!(!sources.contains(&misplaced));
+        // The scan without the pre-check, as it read before it.
+        let unguarded = |id: ObjectId| {
+            let obj = &state.objects[&id];
+            crate::game::functioning_abilities::active_trigger_definitions(&state, obj).any(
+                |active| trigger_definition_functions_in_zone(active.definition, Zone::Graveyard),
+            ) || synthesize_granted_keyword_triggers(
+                obj,
+                crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, id)
+                    .iter(),
+            )
+            .into_iter()
+            .any(|(_, def)| trigger_definition_functions_in_zone(&def, Zone::Graveyard))
+        };
+        for id in [plain, recovering, misplaced] {
+            assert_eq!(sources.contains(&id), unguarded(id), "{id:?}");
+        }
     }
 
     #[test]
