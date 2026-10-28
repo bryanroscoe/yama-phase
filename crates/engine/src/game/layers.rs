@@ -7809,39 +7809,19 @@ pub(crate) fn for_each_static_effect_source(
     // (CR 604.3) rather than through an opt-in `active_zones` list.
     // `active_continuous_effects_from_static_definitions` applies the
     // zone-of-function gate per-static (including the CDA all-zones rule via
-    // `static_functions_in_zone`), so scanning every object outside the
+    // `static_functions_in_zone`), so visiting every such object outside the
     // battlefield / command-zone passes already covered above is safe:
     // battlefield-default statics filter themselves out.
-    for obj in state.objects.values() {
-        // Battlefield objects were already processed above (phased-out gate
-        // included). Command-zone sources (emblems, face-up conspiracies, and
-        // active planes/phenomena that opt in) were fully handled by the two
-        // command loops above via `object_sources_static_from_command_zone`, so
-        // the `Command` arm skips here to avoid double-visiting (CR 114.4).
-        match obj.zone {
-            crate::types::zones::Zone::Battlefield | crate::types::zones::Zone::Command => continue,
-            _ => {}
+    //
+    // `GameObject::may_source_statics_off_battlefield` is the admission (zone
+    // other than battlefield and command, which the loops above cover; phased
+    // in; an opt-in-zone static or a CDA). The object store keeps the admitted
+    // ids in its own iteration order until it is next written, so a gather does
+    // not walk every object in every library and hand to find them.
+    for id in state.objects.off_battlefield_static_source_ids().iter() {
+        if let Some(obj) = state.objects.get(id) {
+            visit(state, obj);
         }
-        if obj.is_phased_out() {
-            continue;
-        }
-        // Cheap pre-check: only scan objects that carry at least one
-        // opt-in-zone static OR a characteristic-defining ability. Avoids
-        // iterating libraries/hands full of ordinary cards on every layer
-        // recomputation. A CDA (`characteristic_defining`) must be included
-        // here even though it typically carries an empty `active_zones` list
-        // (CR 604.3: CDAs function in all zones by definition, not by opt-in
-        // list) — otherwise a source whose ONLY static is a bare CDA would
-        // never even reach `active_continuous_effects_from_static_definitions`
-        // to have that CDA evaluated off-battlefield.
-        if !obj
-            .static_definitions
-            .iter_all()
-            .any(|def| !def.active_zones.is_empty() || def.characteristic_defining)
-        {
-            continue;
-        }
-        visit(state, obj);
     }
 }
 
