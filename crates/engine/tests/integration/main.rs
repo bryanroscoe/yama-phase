@@ -2186,4 +2186,5 @@ mod strago_cast_this_way_rider;
 mod study_hall_costed_any_color_land;
 mod tifa_additional_combat;
 mod token_attack_destination;
+mod windgraces_judgment_one_per_opponent;
 mod zaffai_thunder_conductor_magecraft;
