@@ -1400,19 +1400,30 @@ fn scoped_player_member_filter_follows_the_resolution_scope() {
     );
 }
 
-/// B-6 — SHAPE. Danse's put-into-zone rows refuse honestly (unit 8e, Option 1)
-/// while the neighboring shapes keep parsing: the particle-less and bare
-/// forms still reach `ChangeZone`, and Danse's own sacrifice + roll preamble
-/// stays supported — only the two rows are red.
+/// B-6 — SHAPE. Danse's singular put-into-zone row binds the chain's tracked
+/// set ("a creature card put into a graveyard this way", CR 608.2c), the plural
+/// row still refuses honestly (unit 8e, Option 1), and the neighboring shapes
+/// keep parsing: the particle-less and bare forms still reach `ChangeZone`,
+/// and Danse's own sacrifice + roll preamble stays supported — only the plural
+/// row is red.
 #[test]
 fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
     let sorcery = vec!["Sorcery".to_string()];
-    // The two FULL bodies — singular "a graveyard" and "up to two" plural
-    // "graveyards" — both surface as Unimplemented.
+    // The singular body ("a graveyard") reads the cards the earlier
+    // instruction put into a graveyard: the chain's tracked set narrowed to
+    // creature cards. The "up to two" plural body ("graveyards") is still
+    // unbound and surfaces as Unimplemented.
     assert_eq!(
         unimplemented_count("Probe Row", DANSE_ROW_1, &sorcery),
-        1,
-        "row 1 names a put-into-zone set the engine cannot execute"
+        0,
+        "row 1 binds its put-into-zone set"
+    );
+    let row_1 = parse_oracle_text(DANSE_ROW_1, "Probe Row", &[], &sorcery, &[]);
+    let row_1_json = serde_json::to_string(&row_1).expect("serializes");
+    assert!(
+        row_1_json.contains("\"type\":\"ChangeZone\"")
+            && row_1_json.contains("\"type\":\"TrackedSetFiltered\""),
+        "row 1 returns from the chain's tracked set, got {row_1_json}"
     );
     assert_eq!(
         unimplemented_count("Probe Row", DANSE_ROW_2, &sorcery),
@@ -1436,7 +1447,7 @@ fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
     }
 
     // Danse itself: the sacrifice preamble and the d20 roll stay supported —
-    // exactly the two die rows are red, no more.
+    // exactly the plural die row is red, no more.
     let parsed = parse_oracle_text(DANSE, "Danse Macabre", &[], &sorcery, &[]);
     let json = serde_json::to_string(&parsed).expect("serializes");
     assert!(
@@ -1449,18 +1460,19 @@ fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
     );
     assert_eq!(
         json.matches("\"type\":\"Unimplemented\"").count(),
-        2,
-        "exactly the two die rows may be red, got {json}"
+        1,
+        "exactly the plural die row may be red, got {json}"
     );
 
-    // The results table itself: both rows keep their printed ranges and both
-    // bodies refuse as honest-red `Unimplemented`. Main's evolved row-body
+    // The results table itself: both rows keep their printed ranges; row 0
+    // returns from the tracked set and row 1 refuses as honest-red
+    // `Unimplemented`. Main's evolved row-body
     // taxonomy names the marker "unparsed_verb_arguments" (verb recognized,
     // arguments not modeled) where our tree said "return" — equally red, so
     // the pin follows main's vocabulary while keeping the full-sentence
-    // description assertion. The participle axis that would bind them
-    // (unit 8e) is DEFERRED(phase 7), so refusal — not an over-broad
-    // reanimation — is the honest shape.
+    // description assertion. The plural participle ("put into graveyards
+    // this way") is still unbound (unit 8e), so refusal — not an over-broad
+    // reanimation — is the honest shape for that row.
     fn roll_results(def: &AbilityDefinition) -> Option<&Vec<DieResultBranch>> {
         if let Effect::RollDie { results, .. } = &*def.effect {
             return Some(results);
@@ -1480,7 +1492,13 @@ fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
         vec![(1, 14), (15, 255)],
         "both die rows keep their printed ranges"
     );
-    for (index, row) in results.iter().enumerate() {
+    assert!(
+        matches!(&*results[0].effect.effect, Effect::ChangeZone { target, .. }
+            if target.references_tracked_set()),
+        "row 0 must return from the chain's tracked set, got {:?}",
+        results[0].effect.effect
+    );
+    for (index, row) in results.iter().enumerate().skip(1) {
         assert!(
             matches!(&*row.effect.effect, Effect::Unimplemented { name, description, .. }
             if name == "unparsed_verb_arguments"

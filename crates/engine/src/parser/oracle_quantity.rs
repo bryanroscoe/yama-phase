@@ -49,6 +49,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::event_kinds::PlayerActionKind;
+use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -2610,6 +2611,7 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     // tail is a shared optional relative clause (`opt(alt(..))`) plus an `alt()`
     // over the landing-zone verb phrases, terminated by "this way".
     let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(lower);
+    let (filter, tail_read) = peel_this_way_tracked_set(filter);
 
     // Require a specific, controller-agnostic type filter. A typeless or generic
     // "card" filter is the unfiltered count; a controller-bearing filter is
@@ -2625,7 +2627,17 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
         _ => return None,
     }
 
-    // Parse the composed landing-zone tail off the type phrase's remainder.
+    // Parse the composed landing-zone tail off the type phrase's remainder,
+    // unless the type phrase already read it.
+    if tail_read {
+        return remainder
+            .trim()
+            .is_empty()
+            .then(|| QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+                caused_by: None,
+            });
+    }
     let rest = remainder.trim_start();
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>("that was "),
@@ -3401,6 +3413,7 @@ fn parse_spell_history_clause(
 /// (the cards moved "this way").
 fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
     let (filter, rest) = parse_type_phrase_folding(clause);
+    let (filter, tail_read) = peel_this_way_tracked_set(filter);
     let TargetFilter::Typed(ref typed) = filter else {
         return None;
     };
@@ -3416,14 +3429,19 @@ fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
     }
     // The remainder must be a "<zone-move verb> this way" tracked-set phrase
     // (e.g. "put into a graveyard this way", "milled this way", "exiled this
-    // way"): nom `take_until("this way") + tag`, with nothing after it.
-    let terminates_this_way = (
-        take_until::<_, _, OracleError<'_>>("this way"),
-        tag::<_, _, OracleError<'_>>("this way"),
-    )
-        .parse(rest.trim())
-        .map(|(after, _)| after.trim().is_empty())
-        .unwrap_or(false);
+    // way"): nom `take_until("this way") + tag`, with nothing after it. When the
+    // type phrase already read that phrase, nothing may follow it.
+    let terminates_this_way = if tail_read {
+        rest.trim().is_empty()
+    } else {
+        (
+            take_until::<_, _, OracleError<'_>>("this way"),
+            tag::<_, _, OracleError<'_>>("this way"),
+        )
+            .parse(rest.trim())
+            .map(|(after, _)| after.trim().is_empty())
+            .unwrap_or(false)
+    };
     if !terminates_this_way {
         return None;
     }
@@ -3431,6 +3449,22 @@ fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
         filter: Box::new(filter),
         caused_by: None,
     })
+}
+
+/// CR 608.2c: a type phrase can read its own "this way" relative clause ("land
+/// card put into a graveyard this way") and return the chain's tracked set
+/// narrowed by the noun's filter. Counting that set is the filtered tracked-set
+/// size, so the counting readers take the noun's filter back out and report
+/// that the clause was read.
+fn peel_this_way_tracked_set(filter: TargetFilter) -> (TargetFilter, bool) {
+    match filter {
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter,
+            caused_by: None,
+        } => (*filter, true),
+        other => (other, false),
+    }
 }
 
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
