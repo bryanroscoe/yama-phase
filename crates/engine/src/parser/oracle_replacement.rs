@@ -807,6 +807,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     if let Some(def) = parse_inverted_typed_counter_prohibition(&lower, &text) {
         return Some(def);
     }
+    if let Some(def) = parse_counter_kind_prohibition(&lower, &text) {
+        return Some(def);
+    }
 
     // --- Counter-prohibition replacement: "~ can't have counters put on it." ---
     // CR 614.6 + CR 614.7 + CR 122.1: A self-targeted counter-placement
@@ -13405,6 +13408,33 @@ fn parse_inverted_typed_counter_prohibition(
                 TargetFilter::Typed(TypedFilter::new(type_filter)),
                 Zone::Battlefield,
             ))
+            .quantity_modification(QuantityModification::Prevent)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.17 + CR 614.6 + CR 122.1: "<permanents> can't have <kind> counters
+/// put on them" ("Creatures you control can't have -1/-1 counters put on
+/// them"). The same `AddCounter` prevention as the type-scoped prohibition
+/// above, narrowed to the subject (a type phrase, controller included) and to
+/// that counter kind, so other counters are still put on them.
+fn parse_counter_kind_prohibition(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, (subject, _, counter_type, _, _)) = all_consuming((
+        crate::parser::oracle_nom::target::parse_type_phrase,
+        tag::<_, _, OracleError<'_>>(" can't have "),
+        crate::parser::oracle_nom::primitives::parse_counter_type_typed,
+        tag(" counters put on them"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .ok()?;
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(attach_zone_to_filter(subject, Zone::Battlefield))
+            .counter_match(CounterMatch::OfType(counter_type))
             .quantity_modification(QuantityModification::Prevent)
             .description(original_text.to_string()),
     )
@@ -27483,6 +27513,34 @@ mod tests {
                 Some(QuantityModification::Prevent)
             );
         }
+    }
+
+    /// CR 614.17 + CR 122.1: "Creatures you control can't have -1/-1 counters
+    /// put on them" (Darksteel Angel, Melira, Sylvok Outcast) is narrowed to
+    /// the controller's creatures and to -1/-1 counters, so +1/+1 counters are
+    /// still put on them.
+    #[test]
+    fn counter_kind_prohibition_scopes_subject_and_kind() {
+        use crate::types::ability::{ControllerRef, QuantityModification};
+        use crate::types::counter::{CounterMatch, CounterType};
+        let def = parse_replacement_line(
+            "Creatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+        )
+        .expect("must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Minus1Minus1))
+        );
+        let Some(TargetFilter::Typed(subject)) = &def.valid_card else {
+            panic!("typed subject: {:?}", def.valid_card)
+        };
+        assert_eq!(subject.controller, Some(ControllerRef::You));
     }
 
     #[test]

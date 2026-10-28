@@ -1204,9 +1204,18 @@ fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
     // "instead" but still route through the replacement pipeline.
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         alt((
-            tag::<_, _, OracleError>("can't have counters put on"),
-            tag("players can't get counters"),
-            tag("counters can't be put on"),
+            value((), tag::<_, _, OracleError>("can't have counters put on")),
+            value((), tag("players can't get counters")),
+            value((), tag("counters can't be put on")),
+            // "can't have -1/-1 counters put on them": one counter kind.
+            value(
+                (),
+                (
+                    tag("can't have "),
+                    nom_primitives::parse_counter_type_typed,
+                    tag(" counters put on"),
+                ),
+            ),
         ))
         .parse(input)
     })
