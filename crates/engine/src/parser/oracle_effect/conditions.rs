@@ -5,6 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while};
 use nom::character::complete::{char, multispace0, satisfy};
 use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value, verify};
+use nom::multi::separated_list1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -221,11 +222,48 @@ fn comma_inside_if_creature_subtype_list(lower: &str, comma_idx: usize) -> bool 
     // the span ends where `parse_type_phrase_folding` stops consuming type words.
     target_anaphoric_subtype_span(lower, after_prefix)
         .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
+        // CR 205.2a: "if it's a noncreature, nonland card, …" (Druidic Satchel) —
+        // the comma joins negated card types inside one card description.
+        || negated_card_type_list_span(lower, after_prefix)
+            .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
         // CR 205.3m + CR 608.2c: "if you control a Fish, Octopus, Otter, Seal,
         // Serpent, or Whale, draw a card" (Unagi's Spray) — the same list commas
         // inside a control-presence condition.
         || controls_type_span(lower, after_prefix)
             .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
+}
+
+/// CR 205.2a: a comma-joined list of two or more negated card types ending at
+/// the card noun — "noncreature, nonland card". Returns the named card types; a
+/// card matches the description only when it has NONE of them. Consumes through
+/// the last type word and peeks (does not consume) the " card" noun.
+fn parse_negated_card_type_list(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    preceded(tag("non"), parse_negated_card_type_list_after_non).parse(input)
+}
+
+/// [`parse_negated_card_type_list`] after its leading "non" was consumed.
+fn parse_negated_card_type_list_after_non(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    terminated(
+        verify(
+            separated_list1(tag(", non"), nom_primitives::parse_core_type),
+            |types: &Vec<CoreType>| types.len() > 1,
+        ),
+        peek(tag(" card")),
+    )
+    .parse(input)
+}
+
+/// CR 205.2a: the byte span of a negated card-type list ("noncreature, nonland")
+/// in an "it's a <list> card" condition, or `None` when the text is not this
+/// shape. A lexical span like [`controls_type_span`]: it only prevents the
+/// leading-conditional splitter from cutting the description at its commas.
+fn negated_card_type_list_span(lower: &str, after_prefix: &str) -> Option<(usize, usize)> {
+    let (after_article, _) = alt((tag::<_, _, OracleError<'_>>("it's an "), tag("it's a ")))
+        .parse(after_prefix)
+        .ok()?;
+    let (rest, _) = parse_negated_card_type_list(after_article).ok()?;
+    let start = lower.len() - after_article.len();
+    Some((start, lower.len() - rest.len()))
 }
 
 /// CR 205.3m: the byte span of a CLOSED subtype list ("a Fish, Octopus, …, or
@@ -1884,6 +1922,43 @@ fn parse_revealed_card_gate_suffix<'a>(
     (after_type, None)
 }
 
+/// CR 608.2c + CR 205.2a: "[non]<type> card[ <property>] or a[n] [non]<type>
+/// card[ <property>] …" after the `"it's a/an "` head. Each disjunct is its own
+/// card description with its own property slot (Nissa, Steward of Elements: "a
+/// land card or a creature card with mana value less than or equal to …"), so
+/// the legs are parsed independently by [`parse_its_a_card_type_gate_body`] and
+/// joined with `Or`. A single leg returns that leg's condition unchanged.
+fn parse_its_a_card_type_gate_disjunction<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(AbilityCondition, &'a str)> {
+    fn leg<'a>(rest: &'a str, ctx: &mut ParseContext) -> Option<(AbilityCondition, &'a str)> {
+        let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
+            .parse(rest)
+            .map(|(rest, matched)| (rest, matched.is_some()))
+            .unwrap_or((rest, false));
+        parse_its_a_card_type_gate_body(rest, negated, ctx)
+    }
+
+    let (first, mut after) = leg(rest, ctx)?;
+    let mut legs = vec![first];
+    while let Ok((next, _)) =
+        alt((tag::<_, _, OracleError<'_>>(" or an "), tag(" or a "))).parse(after)
+    {
+        let Some((condition, after_leg)) = leg(next, ctx) else {
+            break;
+        };
+        legs.push(condition);
+        after = after_leg;
+    }
+    let condition = if legs.len() == 1 {
+        legs.pop()?
+    } else {
+        AbilityCondition::Or { conditions: legs }
+    };
+    Some((condition, after))
+}
+
 /// CR 608.2c: Shared body for `"[non]<type> card[...suffix]"` gates after the
 /// `"it's a/an "` or `"if it's a/an "` prefix. Returns the condition and the
 /// unconsumed remainder (effect body for leading-if forms).
@@ -1923,6 +1998,29 @@ fn parse_its_a_card_type_gate_body<'a>(
             ),
             after_type,
         ));
+    }
+    // CR 205.2a: "noncreature, nonland card" (Druidic Satchel, Narset
+    // Transcendent) — every listed type is negated, so the card matches only when
+    // it has none of them: `Not(RevealedHasCardType { any of the list })`. The
+    // caller has already consumed the first "non". No postnominal property slot
+    // is read here: negating the whole condition would also negate the property.
+    if negated {
+        if let Ok((after_list, card_types)) = parse_negated_card_type_list_after_non(rest) {
+            let (after_type, _) = tag::<_, _, OracleError<'_>>(" card")
+                .parse(after_list)
+                .ok()?;
+            return Some((
+                maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_types,
+                        additional_filter: None,
+                        subtype_filter: None,
+                    },
+                    true,
+                ),
+                after_type,
+            ));
+        }
     }
     let (after_type, type_str) = alt((
         terminated(take_until(" card"), tag::<_, _, OracleError<'_>>(" card")),
@@ -2178,12 +2276,8 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     let Some(rest) = rest else {
         return (None, text.to_string());
     };
-    let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
-        .parse(rest)
-        .map(|(rest, matched)| (rest, matched.is_some()))
-        .unwrap_or((rest, false));
     let mut ctx = ParseContext::default();
-    let Some((condition, after_type)) = parse_its_a_card_type_gate_body(rest, negated, &mut ctx)
+    let Some((condition, after_type)) = parse_its_a_card_type_gate_disjunction(rest, &mut ctx)
     else {
         return (None, text.to_string());
     };
@@ -2233,11 +2327,7 @@ fn parse_its_a_type_condition(
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an ")))
         .parse(condition_text)
         .ok()?;
-    let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
-        .parse(rest)
-        .map(|(rest, matched)| (rest, matched.is_some()))
-        .unwrap_or((rest, false));
-    let (condition, remainder) = parse_its_a_card_type_gate_body(rest, negated, ctx)?;
+    let (condition, remainder) = parse_its_a_card_type_gate_disjunction(rest, ctx)?;
     if remainder.trim().trim_end_matches('.').is_empty() {
         Some(condition)
     } else {
@@ -4739,6 +4829,20 @@ pub(super) fn strip_routed_suffix_conditional(
     };
 
     if let Some(cond) = parse_target_color_condition_text(condition_core) {
+        return (general(cond), effect_text);
+    }
+
+    // CR 608.2c + CR 109.2: a trailing "if it's a <permanent type>" whose "it"
+    // anaphors an object target declared earlier in the same chain (Forge of
+    // Heroes: "Choose target commander … Put a +1/+1 counter on it if it's a
+    // creature") tests that target, not a revealed card. The membership gate
+    // only claims bare "it" under a battlefield-permanent declared target and a
+    // card-less type phrase, so reveal/zone-change riders ("put that card into
+    // your hand if it's a land") keep the `RevealedHasCardType` reading below.
+    if let Some(cond) = parse_target_type_membership_condition_text(
+        condition_core,
+        ctx.chain_declared_object_target.as_ref(),
+    ) {
         return (general(cond), effect_text);
     }
 

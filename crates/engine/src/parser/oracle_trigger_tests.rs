@@ -38463,14 +38463,15 @@ fn didnt_attack_with_a_creature_intervening_if_hoists_as_zero_attack_tally() {
 
 /// CR 603.4 + CR 608.2c: a LEADING guard has no earlier instruction to refer to.
 /// When the effect parser lowers it to a prior-instruction back-reference
-/// ("if you didn't" -> not-performed, "if it's a creature" -> revealed card type)
-/// and the trigger grammar cannot hoist it, the trigger fails closed instead of
-/// keeping a condition that can never be evaluated meaningfully.
+/// ("if you didn't" -> not-performed) and the trigger grammar cannot hoist it,
+/// the trigger fails closed instead of keeping a condition that can never be
+/// evaluated meaningfully. (A leading "if it's a creature" on a turned-face-up
+/// head is hoisted onto the event object — see
+/// `turned_face_up_if_its_a_creature_is_event_object_intervening_if`.)
 #[test]
 fn unhoistable_leading_guard_lowered_to_a_back_reference_fails_closed() {
     for text in [
         "At the beginning of your end step, if you didn't play a card from exile this turn, create a tapped Powerstone token.",
-        "Whenever a permanent you control is turned face up, if it's a creature, put two +1/+1 counters on it.",
     ] {
         let def = parse_trigger_line(text, "Test Card");
         assert_eq!(def.condition, None, "nothing was hoisted for {text:?}");
@@ -41398,4 +41399,49 @@ fn stack_spell_copy_cast_indicated_action_strict_fails() {
         "{:?}",
         cast.effect
     );
+}
+
+/// CR 603.4 + CR 205.2a: "Whenever a permanent you control is turned face up, if
+/// it's a creature, …" — the card-type check is an intervening-if on the
+/// turned-up permanent (the trigger's event object), not effect text.
+#[test]
+fn turned_face_up_if_its_a_creature_is_event_object_intervening_if() {
+    let trigger = parse_trigger_line(
+        "Whenever a permanent you control is turned face up, if it's a creature, it gets +2/+2 until end of turn.",
+        "Trail of Mystery",
+    );
+    assert_eq!(trigger.mode, TriggerMode::TurnFaceUp);
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::EventObjectMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("turned-face-up effect");
+    assert_no_unimplemented(execute);
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Pump {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
+}
+
+/// CR 603.4: the negated copula wraps the same event-object gate in `Not`.
+#[test]
+fn turned_face_up_if_its_not_a_creature_negates_event_object_gate() {
+    let trigger = parse_trigger_line(
+        "Whenever a permanent you control is turned face up, if it's not a creature, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::EventObjectMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            }),
+        })
+    );
+    assert_no_unimplemented(trigger.execute.as_deref().expect("draw"));
 }
