@@ -356,3 +356,5 @@ mod damage_history_quantity_gap_coverage;
 mod nonpersisting_color_choice_grants;
 
 mod windgraces_judgment_one_per_opponent;
+
+mod sepulchral_primordial_one_per_graveyard;
