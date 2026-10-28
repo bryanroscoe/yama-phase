@@ -3302,9 +3302,18 @@ fn determine_block_objective(
     }
 
     // Race detection: losing the damage race (opponent hits harder than we do)
-    // Only enter Race if we'd die in ~3 turns AND opponent outpaces us
+    // Only enter Race if we'd die in ~3 turns AND opponent outpaces us.
+    //
+    // This is a two-player race. With two or more living opponents there is no
+    // race against this one attacker: our creatures are our defence against
+    // every opponent and our only pressure on them, the attacker's creatures are
+    // split across several targets, and the turns-to-die above counts only this
+    // one player's attack. Imminent danger is still Stabilize, decided above.
     let my_board_power = battlefield_power(state, player);
-    if life as f64 <= threshold * 3.0 && incoming_power > my_board_power {
+    if life as f64 <= threshold * 3.0
+        && incoming_power > my_board_power
+        && players::opponents(state, player).len() < 2
+    {
         return CombatObjective::Race;
     }
 
@@ -5133,6 +5142,46 @@ mod tests {
         );
     }
 
+    /// The two-player race band doesn't apply with two or more living opponents:
+    /// the same board that chumps in a duel keeps its creature in a free-for-all,
+    /// and still chumps once the attack threatens to kill (Stabilize).
+    #[test]
+    fn free_for_all_defender_does_not_race_chump_but_still_stabilizes() {
+        let mut state = setup_multiplayer(3);
+        let wall = add_creature(&mut state, PlayerId(0), "Wall", 2, 5, vec![]);
+        let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 6, 6, vec![]);
+        let blocker = add_creature(&mut state, PlayerId(1), "Brawler", 4, 2, vec![]);
+        state.players[1].life = 22;
+
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[wall, ogre], &AiProfile::default()),
+            CombatObjective::PreserveAdvantage,
+            "life 22 vs incoming 8 is the duel Race band, not a free-for-all one"
+        );
+        assert!(
+            choose_blockers(&state, PlayerId(1), &[wall, ogre]).is_empty(),
+            "no chump at 22 life with two opponents left"
+        );
+
+        state.players[1].life = 12;
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[wall, ogre], &AiProfile::default()),
+            CombatObjective::Stabilize,
+        );
+        assert!(
+            choose_blockers(&state, PlayerId(1), &[wall, ogre]).contains(&(blocker, ogre)),
+            "at 12 life the 6/6 is chumped as before"
+        );
+
+        // With one opponent left the duel race band is back.
+        state.players[1].life = 22;
+        state.players[2].is_eliminated = true;
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[wall, ogre], &AiProfile::default()),
+            CombatObjective::Race,
+        );
+    }
+
     /// The reservation only withholds a blocker that actually has a trade. With
     /// nothing on the board it can kill, the Race chump behaviour is unchanged.
     #[test]
@@ -6071,7 +6120,9 @@ mod tests {
         let mut state = setup_multiplayer(3);
         let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 10, 10, vec![]);
         add_creature(&mut state, PlayerId(1), "Chump", 4, 4, vec![]);
-        state.players[1].life = 30;
+        // Low enough that the modeled defender chumps (Stabilize): at 30 life it
+        // keeps the 4/4 in a free-for-all, and there is no chump credit to cap.
+        state.players[1].life = 20;
         let slices = BlockLegalitySlices::collect(&state);
         reset_expanded_comparison_counters();
 
