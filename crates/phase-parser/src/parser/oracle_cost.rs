@@ -1967,6 +1967,14 @@ pub fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     if !remainder.trim().is_empty() {
         return None;
     }
+    // CR 601.2f: a phrase the type grammar recognised nothing in ("for each
+    // counter among players and permanents", "for each {E} you've paid or lost
+    // this turn") comes back as an unconstrained filter, which would count every
+    // object and reduce the cost with nothing to count. Leave the clause an
+    // honest gap instead.
+    if filter == TargetFilter::Typed(TypedFilter::default()) {
+        return None;
+    }
 
     Some(CostReduction {
         mode,
@@ -4877,6 +4885,35 @@ mod tests {
     #[test]
     fn cost_reduction_unrecognized_returns_none() {
         assert!(try_parse_cost_reduction("something else entirely").is_none());
+    }
+
+    /// CR 601.2f: a "for each" phrase the grammar recognises nothing in must not
+    /// become a count of every object, which would take the whole reduction
+    /// with nothing to count.
+    #[test]
+    fn unrecognised_for_each_phrase_is_not_a_count_of_everything() {
+        let counts_everything = |text: &str| {
+            matches!(
+                try_parse_cost_reduction(text),
+                Some(CostReduction {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                    ..
+                }) if filter == TargetFilter::Typed(TypedFilter::default())
+            )
+        };
+        assert!(!counts_everything(
+            "This spell costs {1} less to cast for each counter among players and permanents."
+        ));
+        assert!(!counts_everything(
+            "This spell costs {1} less to cast for each {E} you've paid or lost this turn."
+        ));
+        // A recognised object phrase still counts.
+        assert!(try_parse_cost_reduction(
+            "This spell costs {1} less to cast for each creature you control."
+        )
+        .is_some());
     }
 
     /// CR 602.2b + CR 601.2f + CR 102.1: the "during your turn[s]" timing-gated
