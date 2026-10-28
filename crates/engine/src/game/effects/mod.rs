@@ -8731,7 +8731,7 @@ fn effect_fields_read_filter_population(
                     EachDamageRecipient::OtherBatchSource { source_filters } => {
                         source_filters.iter().any(|filter| has_filter(filter))
                     }
-                    EachDamageRecipient::EachController => false,
+                    EachDamageRecipient::EachController | EachDamageRecipient::Itself => false,
                 }
         }
         Effect::Counter {
