@@ -41477,3 +41477,28 @@ fn static_gaeas_liege_full_oracle_dispatch() {
         parsed.parse_warnings
     );
 }
+
+/// CR 601.2f: a self cost reduction whose "for each" phrase nothing reads must
+/// not become a count of every object, and must not fall back to a flat
+/// reduction either.
+#[test]
+fn self_cost_reduction_never_counts_every_object() {
+    for text in [
+        "This spell costs {1} less to cast for each counter among players and permanents.",
+        "This spell costs {1} less to cast for each {E} you've paid or lost this turn.",
+    ] {
+        let reduces = parse_static_line(text)
+            .is_some_and(|def| matches!(def.mode, StaticMode::ModifyCost { .. }));
+        assert!(!reduces, "{text}");
+    }
+    // A readable count still reduces per object.
+    let def = parse_static_line("This spell costs {1} less to cast for each creature you control.")
+        .expect("reads");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            dynamic_count: Some(_),
+            ..
+        }
+    ));
+}
