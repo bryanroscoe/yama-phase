@@ -2977,6 +2977,8 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
         // "was untapped" sets use_lki (reads the snapshot), present-tense "is
         // untapped" reads live state, and "isn't untapped" wraps in `Not`.
         value(FilterProp::Untapped, tag("untapped")),
+        // CR 708.2: face-down status ("Turn it face up if it's face down").
+        value(FilterProp::FaceDown, tag("face down")),
         // CR 508.1b: combat status (Wisecrack "is attacking").
         value(FilterProp::Attacking { defender: None }, tag("attacking")),
         // CR 509.1a: combat status (blocking sibling).

@@ -28251,6 +28251,20 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     let mut skipped_conditional = false;
     for prev in clauses.iter().rev() {
         if let Some(cond) = prev.condition.as_ref() {
+            // CR 608.2c: a clause acting on the referent and gated on a test of
+            // that same referent ("Turn it face up if it's face down") neither
+            // introduces nor replaces the referent, so the walk carries on
+            // through it to the declaration.
+            let gates_on_the_referent = matches!(
+                cond,
+                AbilityCondition::TargetMatchesFilter {
+                    subject_slot: None,
+                    ..
+                }
+            ) && effect_acts_on_parent_target(&prev.parsed.effect);
+            if gates_on_the_referent {
+                continue;
+            }
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
             } else if !cond.has_when_you_do_marker()
@@ -28271,15 +28285,28 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
         if has_typed_target_widened(&prev.parsed.effect) {
             return true;
         }
-        if matches!(
-            prev.parsed.effect.target_filter(),
-            Some(TargetFilter::ParentTarget)
-        ) {
+        if effect_acts_on_parent_target(&prev.parsed.effect) {
             continue;
         }
         return false;
     }
     false
+}
+
+/// CR 608.2c: whether an instruction acts on the chain's referent ("it") —
+/// through its target slot, or, for the face-down actions that declare no slot
+/// (CR 708.2: "turn it face up"), through its `ParentTarget` subject.
+fn effect_acts_on_parent_target(effect: &Effect) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
+        || matches!(
+            effect,
+            Effect::TurnFaceUp {
+                target: TargetFilter::ParentTarget
+            } | Effect::TurnFaceDown {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
 }
 
 fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
