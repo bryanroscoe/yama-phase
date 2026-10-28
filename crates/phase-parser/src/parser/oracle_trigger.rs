@@ -7060,6 +7060,7 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
         }
         Some(
             AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::PlaneswalkerOfType { .. }
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
@@ -24622,14 +24623,16 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
         return Some(constraint);
     }
-    // Suffix-based: "combat on your turn", "each combat on your turn"
+    // Suffix-based: "combat on your turn", "each combat on your turn", and
+    // CR 603.1: "combat on each opponent's turn", which fires only while an
+    // opponent is the active player. The turn specifier is the same table the
+    // "during <turn>" restrictions read.
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
+        if let Ok((_, constraint)) =
+            preceded(tag::<_, _, OracleError<'_>>("on "), parse_during_turn_spec).parse(remaining)
         {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
+            return Some(constraint);
         }
         remaining = remaining
             .find(' ')

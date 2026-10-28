@@ -6894,6 +6894,13 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
             AttackTargetFilter::Planeswalker,
             tag(" planeswalkers you control"),
         ),
+        // CR 205.3j + CR 508.1c: " Jaces you control", the planeswalkers of one
+        // planeswalker type you control. After the bare " planeswalkers you
+        // control" arm, which no type word matches.
+        map_opt(
+            nom::sequence::delimited(tag(" "), take_until("s you control"), tag("s you control")),
+            planeswalker_type_scope,
+        ),
         value(AttackTargetFilter::Player, tag(" you")),
     )))
     .parse(input)
@@ -6920,6 +6927,19 @@ pub(crate) fn parse_previously_attacked_player_scope_nom(
         rest,
         crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn,
     ))
+}
+
+/// CR 205.3j: the attack scope for the planeswalkers of the planeswalker type a
+/// lowercase word names ("jace" names Jace), or `None` for any other word.
+fn planeswalker_type_scope(word: &str) -> Option<crate::types::triggers::AttackTargetFilter> {
+    crate::types::card_type::PLANESWALKER_SUBTYPES
+        .iter()
+        .find(|subtype| subtype.eq_ignore_ascii_case(word))
+        .map(
+            |subtype| crate::types::triggers::AttackTargetFilter::PlaneswalkerOfType {
+                subtype: (*subtype).to_string(),
+            },
+        )
 }
 
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(

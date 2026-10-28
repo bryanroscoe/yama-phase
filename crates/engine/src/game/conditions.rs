@@ -165,6 +165,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         // wildcard) so future widening is compiler-flagged.
         AttackTargetFilter::Player
         | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::PlaneswalkerOfType { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
         | AttackTargetFilter::Monarch

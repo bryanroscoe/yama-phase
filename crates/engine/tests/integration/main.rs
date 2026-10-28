@@ -328,3 +328,5 @@ mod any_one_color_multi_mana_castability;
 mod hashep_oasis_sacrifices_itself;
 
 mod planar_nexus_every_nonbasic_land_type;
+
+mod jace_multiverse_architect_attack_restriction;

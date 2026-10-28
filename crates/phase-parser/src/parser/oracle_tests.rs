@@ -24015,6 +24015,9 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
     let attack_target_scopes = [
         AttackTargetFilter::Player,
         AttackTargetFilter::Planeswalker,
+        AttackTargetFilter::PlaneswalkerOfType {
+            subtype: "Jace".to_string(),
+        },
         AttackTargetFilter::PlayerOrPlaneswalker,
         AttackTargetFilter::Battle,
         AttackTargetFilter::Owner,
@@ -24029,6 +24032,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
             | AttackTargetFilter::PlayerOrPlaneswalker
             | AttackTargetFilter::Monarch => true,
             AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::PlaneswalkerOfType { .. }
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker

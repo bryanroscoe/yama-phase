@@ -513,6 +513,41 @@ fn bind_transient_effect(
         }
     }
 
+    // CR 611.2c + CR 508.1c: a duration-bound attack RESTRICTION over a
+    // broadcast population ("creatures they control can't attack Jaces you
+    // control this turn"; "until your next turn, creatures can't attack you")
+    // changes no characteristics and no controller, so it modifies the rules
+    // of the game and also affects creatures that come under that control
+    // after it began. The parser carries it as a bare `CantAttack` /
+    // `CantAttackOrBlock` granted to each member. Keep the population filter
+    // intact on one TCE so the layer pass re-derives the members, as the
+    // `MustAttackAwayFromSource` branch above does for the requirement side,
+    // instead of letting the broadcast branch below freeze it.
+    //
+    // Only the object set is live. A player the filter names through the
+    // resolving ability ("they" of a trigger, a target player) is fixed now
+    // (CR 109.4), because that ability is gone when the layers read the
+    // filter. A population whose player can't be fixed installs nothing.
+    if target_filter.is_none()
+        && !modifications.is_empty()
+        && modifications.iter().all(grants_bare_attack_restriction)
+    {
+        if let Some(TargetFilter::Typed(typed)) = static_def.affected.as_ref() {
+            if let Some(population) = fix_population_player(state, ability, typed) {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
+                    duration.clone(),
+                    TargetFilter::Typed(population),
+                    modifications,
+                    static_def.condition.clone(),
+                );
+            }
+            return;
+        }
+    }
+
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
@@ -1579,6 +1614,62 @@ fn snapshot_granted_cost_modifier(
     *amount = amount.scaled(multiplier);
 }
 
+/// CR 508.1c: a modification that grants each affected creature a bare attack
+/// restriction (`CantAttack` / `CantAttackOrBlock` on itself, with no condition
+/// and nothing else), the shape the effect parser emits for "<creatures> can't
+/// attack <scope>".
+fn grants_bare_attack_restriction(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::GrantStaticAbility { definition }
+            if definition.affected == Some(TargetFilter::SelfRef)
+                && definition.condition.is_none()
+                && definition.modifications.is_empty()
+                && matches!(
+                    definition.mode,
+                    crate::types::statics::StaticMode::CantAttack
+                        | crate::types::statics::StaticMode::CantAttackOrBlock
+                )
+    )
+}
+
+/// CR 109.4 + CR 611.2c: fix the player a population filter names through the
+/// resolving ability, so the filter still names that player after the ability
+/// is gone: "they" of a phase trigger (the turn's player, bound to
+/// `scoped_player`), the triggering player, or a targeted or declared player.
+/// "You" and "your opponents" stay as they are: the layer pass reads them from
+/// the transient effect's own controller. `None` when the player can't be
+/// fixed.
+fn fix_population_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    typed: &TypedFilter,
+) -> Option<TypedFilter> {
+    let player = match typed.controller.as_ref() {
+        None
+        | Some(
+            ControllerRef::You | ControllerRef::Opponent | ControllerRef::SpecificPlayer { .. },
+        ) => return Some(typed.clone()),
+        Some(ControllerRef::ScopedPlayer) => ability.scoped_player?,
+        Some(ControllerRef::TriggeringPlayer) => {
+            super::resolve_player_for_context_ref(state, ability, &TargetFilter::TriggeringPlayer)?
+        }
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                TargetRef::Object(_) => None,
+            })?
+        }
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, *group)?
+        }
+        Some(_) => return None,
+    };
+    let mut fixed = typed.clone();
+    fixed.controller = Some(ControllerRef::SpecificPlayer { id: player });
+    Some(fixed)
+}
+
 fn defended_scope_uses_source_controller_anchor(
     filter: &crate::types::triggers::AttackTargetFilter,
 ) -> bool {
@@ -1587,6 +1678,7 @@ fn defended_scope_uses_source_controller_anchor(
     match filter {
         AttackTargetFilter::Player
         | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::PlaneswalkerOfType { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::Battle
         | AttackTargetFilter::PlayerOrPermanents => true,

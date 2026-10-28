@@ -2748,6 +2748,14 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
             permanent_controller(*pw_id) == Some(source_controller)
         }
+        // CR 205.3j + CR 508.1c: "Jaces you control": a planeswalker of that
+        // planeswalker type, controlled by the protected player.
+        (AttackTargetFilter::PlaneswalkerOfType { subtype }, AttackTarget::Planeswalker(pw_id)) => {
+            state.objects.get(pw_id).is_some_and(|pw| {
+                pw.controller == source_controller
+                    && pw.card_types.subtypes.iter().any(|s| s == subtype)
+            })
+        }
         (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
             *p == source_controller
         }
