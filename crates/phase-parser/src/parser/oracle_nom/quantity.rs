@@ -2365,6 +2365,9 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             // with the other this-turn zone-change counts.
             parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn,
             parse_number_of_times_you_chose_a_mode,
+            // CR 903.8: "times it's been cast from the command zone this game"
+            // (Study Hall's where-X) — the same grammar as the for-each form.
+            parse_commander_cast_count_times,
         )),
         parse_tokens_created_this_turn_tail,
         parse_distinct_colors_among_tail,
@@ -7174,16 +7177,56 @@ fn parse_foretold_cards_owned_in_exile(input: &str) -> OracleResult<'_, Quantity
 }
 
 fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_commander_cast_count_times(input)
+}
+
+/// CR 903.8: "time[s] <subject> cast <commander> from the command zone this
+/// game" — the command-zone cast count behind commander tax, read by "for each
+/// time …" and "the number of times …". The subject axis fixes whose casts are
+/// counted:
+/// - "you've cast your/a commander" → the controller (Skull Storm);
+/// - "they've cast their/a commander" → the clause's target player, the
+///   third-person anaphor convention shared with "life they lost this turn"
+///   (Commander's Insight: "Target player draws X cards plus an additional card
+///   for each time they've cast a commander …"); a per-player loop rebinds it;
+/// - "it's been cast" → the commander itself (Study Hall, Myth Unbound, Opal
+///   Palace), read as its controller's command-zone casts. The resolver sums
+///   every commander the player owns, so this is exact for a single commander
+///   and counts both partners' casts in a partner deck.
+pub(crate) fn parse_commander_cast_count_times(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("time").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
-    let (rest, _) = alt((tag("you've"), tag("youve"))).parse(rest)?;
-    // CR 903.8: "a commander" / "your commander" both count the controller's
-    // command-zone casts; the resolver sums over every commander the player owns.
-    let (rest, _) = tag(" cast ").parse(rest)?;
-    let (rest, _) = alt((tag("your"), tag("a"))).parse(rest)?;
-    let (rest, _) = tag(" commander from the command zone this game").parse(rest)?;
-    Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
+    let (rest, player) = alt((
+        value(
+            PlayerScope::Controller,
+            (
+                alt((tag("you've"), tag("youve"))),
+                tag(" cast "),
+                alt((tag("your"), tag("a"))),
+                tag(" commander"),
+            ),
+        ),
+        value(
+            PlayerScope::Target,
+            (
+                alt((tag("they've"), tag("theyve"))),
+                tag(" cast "),
+                alt((tag("their"), tag("a"))),
+                tag(" commander"),
+            ),
+        ),
+        value(
+            PlayerScope::Controller,
+            (alt((tag("it's been"), tag("it has been"))), tag(" cast")),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" from the command zone this game").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CommanderCastFromCommandZoneCount { player },
+    ))
 }
 
 /// CR 400.7 + CR 700.4: Parse a trailing "that died [under your control] this
@@ -14594,19 +14637,47 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_number_of_times_it_was_cast_from_the_command_zone() {
+        for text in [
+            "the number of times it's been cast from the command zone this game",
+            "the number of times it has been cast from the command zone this game",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: PlayerScope::Controller,
+                },
+                "{text}"
+            );
+            assert_eq!(rest, "");
+        }
+    }
+
+    #[test]
     fn test_parse_for_each_commander_cast_count() {
         let (rest, q) = parse_for_each_clause_ref(
             "times you've cast your commander from the command zone this game",
         )
         .unwrap();
-        assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount);
+        assert_eq!(
+            q,
+            QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            }
+        );
         assert_eq!(rest, "");
 
         let (rest, q) = parse_for_each_clause_ref(
             "time youve cast your commander from the command zone this game",
         )
         .unwrap();
-        assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount);
+        assert_eq!(
+            q,
+            QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -14618,7 +14689,13 @@ mod tests {
             "times youve cast a commander from the command zone this game",
         ] {
             let (rest, q) = parse_for_each_clause_ref(text).unwrap();
-            assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount, "{text}");
+            assert_eq!(
+                q,
+                QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: PlayerScope::Controller,
+                },
+                "{text}"
+            );
             assert_eq!(rest, "");
         }
         assert!(parse_for_each_clause_ref(
@@ -16083,6 +16160,37 @@ mod tests {
             parse_greatest_discarded_this_way("the number of cards a player discarded this way")
                 .is_err(),
             "no superlative means no aggregate axis — must not match"
+        );
+    }
+
+    /// CR 903.8: the subject axis of the command-zone cast count — "you've"
+    /// (controller), "they've" (the clause's target player) and "it's been"
+    /// (the commander itself, read as its controller's casts).
+    #[test]
+    fn commander_cast_count_subject_axis() {
+        use crate::parser::oracle_quantity::parse_for_each_clause;
+        assert_eq!(
+            parse_quantity_ref(
+                "the number of times it's been cast from the command zone this game"
+            ),
+            Ok((
+                "",
+                QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: PlayerScope::Controller,
+                }
+            ))
+        );
+        assert_eq!(
+            parse_for_each_clause("time they've cast a commander from the command zone this game"),
+            Some(QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Target,
+            })
+        );
+        assert_eq!(
+            parse_for_each_clause("time it's been cast from the command zone this game"),
+            Some(QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            })
         );
     }
 }

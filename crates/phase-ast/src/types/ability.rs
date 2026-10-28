@@ -9477,7 +9477,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => false,
     }
@@ -10339,7 +10339,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => {}
     }
@@ -12497,7 +12497,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::VoteCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -14168,11 +14168,19 @@ pub enum QuantityRef {
     /// by War Room's "pay life equal to the number of colors in your
     /// commanders' color identity" activation cost.
     ColorsInCommandersColorIdentity,
-    /// CR 903.8: Number of times the controller has cast their commander(s)
-    /// from the command zone this game. Used by commander storm effects such
-    /// as "copy it for each time you've cast your commander from the command
-    /// zone this game."
-    CommanderCastFromCommandZoneCount,
+    /// CR 903.8: Number of times `player` has cast their commander(s) from the
+    /// command zone this game. Used by commander storm effects such as "copy it
+    /// for each time you've cast your commander from the command zone this
+    /// game" (`Controller`) and by "for each time they've cast a commander from
+    /// the command zone this game" (Commander's Insight, `Target`). The count
+    /// sums every commander the player owns (CR 903.3 allows two with partner).
+    CommanderCastFromCommandZoneCount {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
     /// Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
     /// or in the command zone" pattern. The resolver selects the first matching commander
@@ -14306,7 +14314,8 @@ impl QuantityRef {
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
             | QuantityRef::CardsDiscardedThisTurn { player }
             | QuantityRef::TokensCreatedThisTurn { player, .. }
-            | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
+            | QuantityRef::PlayerActionsThisTurn { player, .. }
+            | QuantityRef::CommanderCastFromCommandZoneCount { player } => Some(player),
             QuantityRef::LifeAboveStarting
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
@@ -14381,7 +14390,6 @@ impl QuantityRef {
             | QuantityRef::TimesCostPaidThisResolution
             | QuantityRef::ManaSpentToCast { .. }
             | QuantityRef::ColorsInCommandersColorIdentity
-            | QuantityRef::CommanderCastFromCommandZoneCount
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::DistinctColorsAmong { .. }
             | QuantityRef::DistinctCounterKindsAmong { .. }
@@ -14542,7 +14550,7 @@ impl QuantityRef {
             | QuantityRef::ConvokedCreatureCount
             | QuantityRef::TimesCostPaidThisResolution
             | QuantityRef::ColorsInCommandersColorIdentity
-            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderCastFromCommandZoneCount { .. }
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::VoteCount { .. } => false,
         }
@@ -14578,7 +14586,8 @@ impl QuantityRef {
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
             | QuantityRef::CardsDiscardedThisTurn { player }
             | QuantityRef::TokensCreatedThisTurn { player, .. }
-            | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
+            | QuantityRef::PlayerActionsThisTurn { player, .. }
+            | QuantityRef::CommanderCastFromCommandZoneCount { player } => Some(player),
             QuantityRef::LifeAboveStarting
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
@@ -14653,7 +14662,6 @@ impl QuantityRef {
             | QuantityRef::TimesCostPaidThisResolution
             | QuantityRef::ManaSpentToCast { .. }
             | QuantityRef::ColorsInCommandersColorIdentity
-            | QuantityRef::CommanderCastFromCommandZoneCount
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::DistinctColorsAmong { .. }
             | QuantityRef::DistinctCounterKindsAmong { .. }
@@ -15511,7 +15519,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount | QuantityRef::TimesCostPaidThisResolution
-        | QuantityRef::ColorsInCommandersColorIdentity | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::ColorsInCommandersColorIdentity | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::VoteCount { .. } => ObjectScopeRead::Unscoped,
     }
 }
@@ -27766,6 +27774,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::CommanderCastFromCommandZoneCount { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -27903,7 +27912,6 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => RecipientRead::Unread,
     }

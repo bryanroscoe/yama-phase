@@ -2229,7 +2229,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
-        QuantityRef::CommanderCastFromCommandZoneCount => {
+        QuantityRef::CommanderCastFromCommandZoneCount { .. } => {
             "# of commander casts from command zone".into()
         }
         QuantityRef::CommanderManaValue { .. } => "mana value of a commander".into(),
@@ -11302,7 +11302,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
         }
-        QuantityRef::CommanderCastFromCommandZoneCount => {
+        QuantityRef::CommanderCastFromCommandZoneCount { .. } => {
             ("CommanderCastFromCommandZoneCount", Handled)
         }
         QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),

@@ -6047,7 +6047,7 @@ pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>,
             // fieldless-Investigate seam via `for_each_repeatable_repeat_for`.
             if matches!(
                 &qty,
-                QuantityRef::CommanderCastFromCommandZoneCount
+                QuantityRef::CommanderCastFromCommandZoneCount { .. }
                     | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             ) || zada_repeat_for_implies_distinct_copy_targets(&QuantityExpr::Ref {
                 qty: qty.clone(),
@@ -17960,7 +17960,9 @@ mod dq_d_player_set_lift_tests {
         for_each_repeatable_repeat_for, strip_for_each_repeat_suffix, strip_player_scope_subject,
     };
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
-    use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        MultiTargetSpec, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    };
 
     // Matrix #3 — the shared `split_for_each_suffix` refactor is byte-identical:
     // each input yields the SAME `(Option<QuantityExpr>, String)` as pre-refactor.
@@ -17976,7 +17978,9 @@ mod dq_d_player_set_lift_tests {
             matches!(
                 qty,
                 Some(QuantityExpr::Ref {
-                    qty: QuantityRef::CommanderCastFromCommandZoneCount
+                    qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                        player: PlayerScope::Controller
+                    }
                 })
             ),
             "CommanderCast lift must survive the refactor: {qty:?}"

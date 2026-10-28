@@ -2643,14 +2643,14 @@ pub(crate) fn parse_conditional_enters_with_counters_grant(lower: &str) -> Optio
                 (
                     tag("a number of additional "),
                     nom_primitives::parse_counter_type_typed,
-                    tag(" counters on it equal to "),
-                    tag("the number of times it's been cast from the command zone this game"),
+                    tag(" counters on it equal to the number of "),
+                    crate::parser::oracle_nom::quantity::parse_commander_cast_count_times,
                 ),
-                |(_, counter_type, _, _)| {
+                |(_, counter_type, _, qty)| {
                     (
                         counter_type,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                            qty,
                         },
                     )
                 },
@@ -4207,7 +4207,9 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter { properties, .. }),
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                    qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
                 },
             }] if properties == &[FilterProp::IsCommander]
         ));
@@ -4386,6 +4388,36 @@ mod tests {
             }
             other => panic!("expected TriggerOnSpend, got {other:?}"),
         }
+    }
+
+    /// CR 106.6 + CR 603.3 + CR 903.8: Study Hall's "When you spend this mana to
+    /// cast your commander, scry X, where X is the number of times it's been
+    /// cast from the command zone this game" is a commander-spell spend trigger
+    /// whose scry counts the command-zone casts.
+    #[test]
+    fn parses_study_hall_commander_scry_spend_trigger() {
+        let grant = parse_mana_spend_trigger(
+            "when you spend this mana to cast your commander, scry x, where x is the number of times it's been cast from the command zone this game.",
+        )
+        .expect("Study Hall's spend trigger must parse");
+        let ManaSpellGrant::TriggerOnSpend { filter, ability } = grant else {
+            panic!("expected TriggerOnSpend");
+        };
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed spell filter, got {filter:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::IsCommander));
+        let Effect::Scry { count, .. } = &*ability.effect else {
+            panic!("expected Scry, got {:?}", ability.effect);
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            }
+        );
     }
 
     /// The active-voice subject phrasing parses identically to the passive voice,

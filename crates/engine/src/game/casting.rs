@@ -25771,7 +25771,7 @@ fn resolve_mana_entry_counter_count(
     if matches!(
         count,
         QuantityExpr::Ref {
-            qty: QuantityRef::CommanderCastFromCommandZoneCount
+            qty: QuantityRef::CommanderCastFromCommandZoneCount { .. }
         }
     ) && cast_origin == Some(Zone::Command)
     {
@@ -32872,6 +32872,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         QuantityRef::HandSize { player }
         | QuantityRef::LifeTotal { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::CommanderCastFromCommandZoneCount { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
@@ -32994,7 +32995,6 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::VoteCount { .. } => false,
     }
 }
