@@ -51,6 +51,7 @@ impl Default for ComboRegistry {
                 heliod_ballista_line(),
                 thoracle_consultation_line(),
                 kiki_felidar_line(),
+                stage_depths_line(),
             ],
             detector: Box::new(StructuralComboDetector),
         }
@@ -294,6 +295,37 @@ fn kiki_felidar_line() -> ComboLine {
     }
 }
 
+/// Thespian's Stage + Dark Depths: "{2}, {T}: This land becomes a copy of
+/// target land, except it has this ability." The copy of Dark Depths has no
+/// ice counters (counters aren't copiable values, and it never entered with
+/// ten), so its state trigger at once sacrifices it for Marit Lage, a
+/// legendary 20/20 flying indestructible token (CR 707.2 + CR 603.8; keep the
+/// copy at the legend rule, CR 704.5j). The win is Marit Lage's combat damage.
+///
+/// With one piece on the battlefield, the tutor scorer fetches the other. The
+/// copy's target choice is scored structurally by `copy_value`
+/// (`zero_counter_state_trigger_payoff`), not by this line. Thespian's Stage's
+/// copy ability is `abilities[1]` (`abilities[0]` is its `{T}: Add {C}`).
+fn stage_depths_line() -> ComboLine {
+    ComboLine {
+        id: ComboLineId(3),
+        name: "Thespian's Stage + Dark Depths",
+        pieces: vec![
+            ComboPiece::OnBattlefield(CardPredicate::NameEquals("Thespian's Stage")),
+            ComboPiece::OnBattlefield(CardPredicate::NameEquals("Dark Depths")),
+        ],
+        mana_cost: ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        },
+        action_sequence: vec![ComboStep::Activate {
+            predicate: CardPredicate::NameEquals("Thespian's Stage"),
+            ability_index: 1,
+        }],
+        win_kind: WinKind::LethalDamage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,7 +340,7 @@ mod tests {
     #[test]
     fn registry_exposes_expected_lines() {
         let reg = ComboRegistry::default();
-        assert_eq!(reg.lines().len(), 3);
+        assert_eq!(reg.lines().len(), 4);
         assert_eq!(reg.lines()[0].id, ComboLineId(0));
         assert_eq!(
             reg.lines()[0].name,
@@ -323,6 +355,41 @@ mod tests {
         assert_eq!(
             reg.lines()[2].name,
             "Kiki-Jiki, Mirror Breaker + Felidar Guardian"
+        );
+        assert_eq!(reg.lines()[3].id, ComboLineId(3));
+        assert_eq!(reg.lines()[3].name, "Thespian's Stage + Dark Depths");
+    }
+
+    /// The line's activation step names the Stage's copy ability by index, and
+    /// with the Stage on the battlefield the tutor scorer is asked for Dark
+    /// Depths.
+    #[test]
+    fn stage_depths_line_names_the_copy_ability_and_the_missing_piece() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::Effect;
+
+        let mut scenario = GameScenario::new();
+        let stage = scenario
+            .add_land_from_oracle(
+                P0,
+                "Thespian's Stage",
+                "{T}: Add {C}.\n{2}, {T}: This land becomes a copy of target land, except it has this ability.",
+            )
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        assert!(
+            matches!(
+                &*state.objects[&stage].abilities[1].effect,
+                Effect::BecomeCopy { .. }
+            ),
+            "the Stage's copy ability must be abilities[1]"
+        );
+
+        let reg = ComboRegistry::default();
+        assert_eq!(
+            reg.missing_pieces_for_near_reachable_lines(state, P0),
+            vec!["Dark Depths"]
         );
     }
 
