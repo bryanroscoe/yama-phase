@@ -1208,8 +1208,11 @@ fn finish_payment_terminal(
         .collect();
     for candidate in mana {
         let frozen = FrozenCandidate::capture(state, &candidate)?;
+        // The allowance is shared with every node below this one: an earlier
+        // sibling's subtree may have spent it, so each application re-checks it.
+        budget.payment_applications_remaining =
+            budget.payment_applications_remaining.checked_sub(1)?;
         let mut next = state.clone();
-        budget.payment_applications_remaining -= 1;
         let Ok(events) = frozen.apply(&mut next) else {
             continue;
         };
@@ -1328,6 +1331,70 @@ mod tests {
             assert!(decision.terminal_branch_budget().is_some());
         }
         assert!(decision.terminal_branch_budget().is_none());
+    }
+
+    /// The payment search's application allowance is a hard bound shared by
+    /// the whole search tree. A manual payment for {R}{R} with three untapped
+    /// Mountains and one application left: the first tap spends it without
+    /// completing the cast, so the next sibling tap must end the search rather
+    /// than decrement the exhausted allowance.
+    #[test]
+    fn payment_search_stops_at_its_application_allowance() {
+        use super::finish_payment_terminal;
+        use crate::game::game_object::ObjectIncarnationRefExt;
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let owner = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(owner, ManaColor::Red);
+        }
+        let spell = scenario
+            .add_spell_to_hand(owner, "Twin Flames Probe", false)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("a manual cast reaches mana payment");
+        let mut state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "fixture precondition: the cast must wait for manual payment; got {:?}",
+            state.waiting_for
+        );
+        let cast = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&state.objects[&spell]),
+            state.objects[&spell].zone,
+        );
+
+        let mut budget = ProspectiveBudget {
+            payment_applications_remaining: 1,
+            ..Default::default()
+        };
+        let terminal = finish_payment_terminal(&mut state, owner, cast, &mut budget);
+
+        assert!(
+            terminal.is_none(),
+            "one application cannot pay {{R}}{{R}}, so the search must give up"
+        );
+        assert_eq!(
+            budget.payment_applications_remaining, 0,
+            "the allowance must end exhausted, never wrapped past zero"
+        );
     }
 
     #[test]
