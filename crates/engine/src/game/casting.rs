@@ -33035,6 +33035,7 @@ fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> b
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => false,
     }

@@ -5581,6 +5581,9 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
             history: HistoryReads::NONE,
         },
         PlayerScope::SourceChosenPlayer => Axes::NONE,
+        // CR 608.2c: a resolution-local choice — reads no event, sibling,
+        // projected or history axis.
+        PlayerScope::ChosenPlayer { .. } => Axes::NONE,
         // CR 513.1: turn-agnostic end-step deadline reached via the
         // `UntilNextStepOf` duration walk — a pure timing referent, no axes.
         PlayerScope::AnyTurn => Axes::NONE,

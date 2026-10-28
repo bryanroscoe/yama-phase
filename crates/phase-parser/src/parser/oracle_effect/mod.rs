@@ -43772,6 +43772,76 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     def
 }
 
+/// CR 608.2c + CR 109.4: after "choose a player" / "choose an opponent", a
+/// later "that player" in a player-axis quantity ("If that player has more cards
+/// in hand than you, draw cards equal to the difference") names the player
+/// chosen this way, not the ability's controller. The quantity grammar has no
+/// chain context and reads that anaphor as `PlayerScope::ScopedPlayer`; outside
+/// a per-player iteration that scope has no player to read, so rebind it to the
+/// `index`th `Choose(Player|Opponent)` of this chain. A node with its own
+/// `player_scope` (and everything below it) keeps `ScopedPlayer`, which there
+/// names the iterated player.
+fn bind_player_anaphor_to_chosen_player(
+    node: &mut AbilityDefinition,
+    next_index: &mut u8,
+    chosen: Option<u8>,
+) {
+    if node.player_scope.is_some() {
+        return;
+    }
+    if let Some(index) = chosen {
+        let mut rebind = |qty: &mut QuantityRef| {
+            if let Some(player @ PlayerScope::ScopedPlayer) = qty.player_scope_mut() {
+                *player = PlayerScope::ChosenPlayer { index };
+            }
+        };
+        each_quantity_expr_mut(&mut node.effect, &mut |expr| expr.each_ref_mut(&mut rebind));
+        if let Some(condition) = node.condition.as_mut() {
+            rebind_chosen_player_in_condition(condition, &mut rebind);
+        }
+    }
+    let chosen = if matches!(
+        &*node.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
+            ..
+        }
+    ) {
+        let index = *next_index;
+        *next_index = next_index.saturating_add(1);
+        Some(index)
+    } else {
+        chosen
+    };
+    if let Some(sub) = node.sub_ability.as_deref_mut() {
+        bind_player_anaphor_to_chosen_player(sub, next_index, chosen);
+    }
+    if let Some(other) = node.else_ability.as_deref_mut() {
+        bind_player_anaphor_to_chosen_player(other, next_index, chosen);
+    }
+}
+
+/// The condition half of [`bind_player_anaphor_to_chosen_player`]: quantity
+/// comparisons and their boolean combinations.
+fn rebind_chosen_player_in_condition(
+    condition: &mut AbilityCondition,
+    rebind: &mut dyn FnMut(&mut QuantityRef),
+) {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            lhs.each_ref_mut(rebind);
+            rhs.each_ref_mut(rebind);
+        }
+        AbilityCondition::Not { condition } => rebind_chosen_player_in_condition(condition, rebind),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                rebind_chosen_player_in_condition(condition, rebind);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// CR 602.1a + CR 605.1a: require the completed activation envelope before
 /// classifying this composition. Bare effect-body trial lowerings do not yet
 /// have their library-moving or loyalty costs and must not be refused early.
@@ -44484,6 +44554,7 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+    bind_player_anaphor_to_chosen_player(def, &mut 0, None);
 }
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {

@@ -338,3 +338,7 @@ mod furygale_flocking_tokens_per_opponent;
 mod study_hall_costed_any_color_land;
 
 mod blood_moon_urborg_layer4_dependency;
+
+mod chosen_player_anaphor_quantities;
+
+mod independent_game_state_conditional_sentences;
