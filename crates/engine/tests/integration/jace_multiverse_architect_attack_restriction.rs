@@ -133,3 +133,63 @@ fn jace_does_not_trigger_on_his_controllers_own_turn() {
         "CR 603.1: 'on each opponent's turn' — no payment is asked on P0's own turn"
     );
 }
+
+/// CR 608.2d + CR 118.1: "they may pay {2}" asks the opponent whose turn it is,
+/// and that opponent pays. Jace's controller is never asked, and an opponent
+/// who pays may attack Jace.
+#[test]
+fn the_opponent_is_asked_and_pays_for_jace() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jace = scenario
+        .add_planeswalker_from_oracle(P0, "Jace, Multiverse Architect", "Jace", 4, JACE)
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let islands = [
+        scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue),
+        scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue),
+    ];
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P1 };
+
+    let mut asked = false;
+    for _ in 0..40 {
+        let waiting = runner.state().waiting_for.clone();
+        let action = match waiting {
+            WaitingFor::DeclareAttackers { .. } => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => {
+                assert_eq!(
+                    other.acting_players(),
+                    vec![P1],
+                    "only the opponent whose turn it is decides on Jace's {{2}}: {other:?}"
+                );
+                asked = true;
+                match other {
+                    WaitingFor::OptionalEffectChoice { .. } => {
+                        GameAction::DecideOptionalEffect { accept: true }
+                    }
+                    WaitingFor::UnlessPayment { .. } => GameAction::PayUnlessCost { pay: true },
+                    _ => engine::ai_support::AiDecisionContract::issue(runner.state(), P1)
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| candidate.action)
+                        .find(|action| !matches!(action, GameAction::CancelCast))
+                        .expect("the engine offers an answer"),
+                }
+            }
+        };
+        runner.act(action).expect("the decision is accepted");
+    }
+    assert!(asked, "Jace must offer P1 the {{2}}");
+    assert!(
+        islands.iter().all(|id| runner.state().objects[id].tapped),
+        "P1 paid the {{2}} with its own lands"
+    );
+    runner
+        .declare_attackers(&[(bears, AttackTarget::Planeswalker(jace))])
+        .expect("an opponent who paid may attack Jace");
+}
