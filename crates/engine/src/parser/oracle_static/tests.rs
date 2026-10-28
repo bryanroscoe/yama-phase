@@ -21376,6 +21376,28 @@ fn lands_you_control_every_basic_land_type_prismatic_omen() {
     }
 }
 
+// --- CR 205.3i + CR 604.3: "~ is every nonbasic land type" ---
+
+#[test]
+fn self_ref_every_nonbasic_land_type_is_cda() {
+    // Planar Nexus. The self-reference grant defines the land's own subtypes,
+    // so it is a CDA that functions in all zones.
+    let def = parse_static_line("~ is every nonbasic land type.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def.characteristic_defining);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddAllNonbasicLandTypes]
+    );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    // A trailing clause is outside the grant and must not be dropped.
+    assert!(
+        parse_static_line("~ is every nonbasic land type and is a creature.").is_none_or(|def| def
+            .modifications
+            != vec![ContinuousModification::AddAllNonbasicLandTypes])
+    );
+}
+
 // --- CR 702.73a + CR 205.3: "[subject] {is|are} every creature type" ---
 
 #[test]

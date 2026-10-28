@@ -1992,6 +1992,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 205.3i + CR 604.3: "~ is every nonbasic land type" (Planar Nexus), the
+    // land-type sibling of the self-reference CDA above.
+    if let Some(def) = parse_self_every_nonbasic_land_type(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 702.16k: Player-subject protection ("You have protection from <X>")
     // must be claimed before the permanent-subject continuous path, which would
     // otherwise grant the protection keyword to permanents you control instead
