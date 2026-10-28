@@ -5534,6 +5534,21 @@ pub(crate) fn strip_for_each_prefix_with_difference(
                 if is_chain_veil_for_each_grant(&lower) {
                     return (None, None, text.to_string());
                 }
+                // CR 608.2c + CR 109.5: "for each opponent who …, <body naming
+                // that player>" iterates the players — the body acts on EACH of
+                // them (Peacekeeper Avatar: "… attach it to a creature that
+                // player controls"). A bare repeat count would lose that binding,
+                // so only a body with no per-player anaphor is lifted.
+                if matches!(
+                    qty,
+                    QuantityRef::PlayerCount {
+                        filter: crate::types::ability::PlayerFilter::ControlsCount { .. }
+                            | crate::types::ability::PlayerFilter::PlayerAttribute { .. }
+                    }
+                ) && nom_primitives::scan_contains(remainder, "that player")
+                {
+                    return (None, None, text.to_string());
+                }
                 let offset = text.len() - remainder.len();
                 return (
                     Some(QuantityExpr::Ref { qty }),
@@ -6692,6 +6707,33 @@ pub(super) fn rebind_subject_only_body_recipient(effect: &mut Effect) {
     }
 }
 
+/// CR 109.4 + CR 107.1: the comparison head of a "controls <cmp> <type> than
+/// you" predicate, after the verb. Returns the per-candidate comparator against
+/// the controller's own count and an additive margin on that count:
+/// - "more " → (GT, 0) — Oreskos Explorer;
+/// - "fewer " → (LT, 0) — Voice of Many ("each opponent who controls fewer
+///   creatures than you");
+/// - "at least N more " → (GE, N) — Surveyor's Scope ("players who control at
+///   least two more lands than you");
+/// - "at least N fewer " → (LE, -N).
+fn parse_control_count_comparative(input: &str) -> OracleResult<'_, (Comparator, i32)> {
+    alt((
+        value((Comparator::GT, 0), tag("more ")),
+        value((Comparator::LT, 0), tag("fewer ")),
+        |i| {
+            let (i, _) = tag("at least ").parse(i)?;
+            let (i, n) = nom_primitives::parse_number(i)?;
+            let n = i32::try_from(n).map_err(|_| oracle_err(i))?;
+            alt((
+                value((Comparator::GE, n), tag(" more ")),
+                value((Comparator::LE, -n), tag(" fewer ")),
+            ))
+            .parse(i)
+        },
+    ))
+    .parse(input)
+}
+
 /// CR 109.4 + CR 109.5: Parse the shared "who controls [comparator] [count]
 /// [type-phrase]" control predicate — the comparison axis (presence or
 /// comparative) plus the controlled-permanent filter.
@@ -6728,10 +6770,10 @@ pub(crate) fn parse_controls_permanent_object<'a>(
     // " than you" so the isolated type text and the trailing remainder both stay
     // in original case. `split_once_on_lower` is a structural boundary lookup
     // (permitted), not parsing dispatch.
-    if let Some(((), after_verb)) = nom_on_lower(rest, &lower, |i| {
+    if let Some(((comparator, margin), after_verb)) = nom_on_lower(rest, &lower, |i| {
         let (i, _) = tag("who ").parse(i)?;
-        let (i, _) = alt((tag("controls more "), tag("control more "))).parse(i)?;
-        Ok((i, ()))
+        let (i, _) = alt((tag("controls "), tag("control "))).parse(i)?;
+        parse_control_count_comparative(i)
     }) {
         let after_verb_lower = after_verb.to_lowercase();
         if let Some((type_text, comparative_remainder)) =
@@ -6752,12 +6794,16 @@ pub(crate) fn parse_controls_permanent_object<'a>(
                 // than silently mis-counting.
                 _ => return None,
             };
-            return Some((
-                Comparator::GT,
-                you_count,
-                bare_filter,
-                comparative_remainder,
-            ));
+            // CR 107.1: "at least N more … than you" compares against the
+            // controller's count offset by N.
+            let you_count = match margin {
+                0 => you_count,
+                offset => QuantityExpr::Offset {
+                    inner: Box::new(you_count),
+                    offset,
+                },
+            };
+            return Some((comparator, you_count, bare_filter, comparative_remainder));
         }
     }
 
