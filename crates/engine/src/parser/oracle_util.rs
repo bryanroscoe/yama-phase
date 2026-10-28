@@ -904,6 +904,11 @@ enum CountBinder {
     EqualTo,
     WhereX,
     ForEach,
+    /// CR 107.1: "<N> <noun> plus an additional [M] <noun> for each <quantity>"
+    /// — the head count plus `per_each` (default one) for each counted thing.
+    PlusAdditionalForEach {
+        per_each: u32,
+    },
 }
 
 impl CountHead {
@@ -914,13 +919,19 @@ impl CountHead {
         match (self, binder) {
             (CountHead::Deferred | CountHead::Absent, CountBinder::EqualTo)
             | (CountHead::VariableX(_), CountBinder::WhereX)
-            | (CountHead::Counted(_) | CountHead::VariableX(_), CountBinder::ForEach) => true,
+            | (
+                CountHead::Counted(_) | CountHead::VariableX(_),
+                CountBinder::ForEach | CountBinder::PlusAdditionalForEach { .. },
+            ) => true,
             (CountHead::Counted(_) | CountHead::VariableX(_), CountBinder::EqualTo)
             | (
                 CountHead::Deferred | CountHead::Absent | CountHead::Counted(_),
                 CountBinder::WhereX,
             )
-            | (CountHead::Deferred | CountHead::Absent, CountBinder::ForEach) => false,
+            | (
+                CountHead::Deferred | CountHead::Absent,
+                CountBinder::ForEach | CountBinder::PlusAdditionalForEach { .. },
+            ) => false,
         }
     }
 }
@@ -930,8 +941,31 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
         value(CountBinder::EqualTo, tag("equal to ")),
         value(CountBinder::WhereX, tag("where x is ")),
         value(CountBinder::ForEach, tag("for each ")),
+        parse_plus_additional_for_each_binder,
     ))
     .parse(input)
+}
+
+/// CR 107.1: "plus an additional [M] <noun> for each " — Commander's Insight
+/// ("draws X cards plus an additional card for each time they've cast a
+/// commander …"), Taste of Paradise ("gain 3 life plus an additional 3 life for
+/// each …"). The restated noun carries no information beyond the head's; the
+/// optional M is the per-each amount (one when absent). Consumes through
+/// "for each " so the quantity follows, like the bare "for each" binder.
+fn parse_plus_additional_for_each_binder(input: &str) -> OracleResult<'_, CountBinder> {
+    let (input, _) = tag("plus an additional ").parse(input)?;
+    let (input, per_each) = opt(terminated(
+        super::oracle_nom::primitives::parse_number,
+        space1,
+    ))
+    .parse(input)?;
+    let (input, _) = terminated(take_until(" for each "), tag(" for each ")).parse(input)?;
+    Ok((
+        input,
+        CountBinder::PlusAdditionalForEach {
+            per_each: per_each.unwrap_or(1),
+        },
+    ))
 }
 
 /// The head of a count position ("a number of", a count word, or none) and the
@@ -1050,6 +1084,29 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             )?;
             (
                 super::oracle_ir::ast::replace_fixed_quantity(count, for_each),
+                None,
+            )
+        }
+        // CR 107.1: the head count plus `per_each` for each counted thing.
+        CountBinder::PlusAdditionalForEach { per_each } => {
+            let (CountHead::Counted(count) | CountHead::VariableX(count)) = head else {
+                return None;
+            };
+            let for_each = super::oracle_quantity::parse_for_each_clause_expr_with_context(
+                &quantity.to_lowercase(),
+                ctx,
+            )?;
+            let additional = match i32::try_from(per_each).ok()? {
+                1 => for_each,
+                factor => QuantityExpr::Multiply {
+                    factor,
+                    inner: Box::new(for_each),
+                },
+            };
+            (
+                QuantityExpr::Sum {
+                    exprs: vec![count, additional],
+                },
                 None,
             )
         }

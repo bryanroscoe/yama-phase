@@ -3636,8 +3636,11 @@ pub(crate) fn parse_static_line_inner(
     // --- CR 601.2f: Cost modification statics ---
     // Patterns: "[Type] spells [you/your opponents] cast cost {N} less/more to cast"
     // Also: "Noncreature spells cost {1} more to cast" (Thalia, no "you cast")
+    // CR 903.3: "Your commander costs …" (Myth Unbound) names commander spells
+    // without the word "spell".
     if nom_primitives::scan_contains(tp.lower, "cost")
-        && nom_primitives::scan_contains(tp.lower, "spell")
+        && (nom_primitives::scan_contains(tp.lower, "spell")
+            || nom_primitives::scan_contains(tp.lower, "your commander"))
         && (nom_primitives::scan_contains(tp.lower, "less")
             || nom_primitives::scan_contains(tp.lower, "more"))
     {

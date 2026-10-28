@@ -4733,7 +4733,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::CostXPaid
         | QuantityRef::CounterAddedThisTurn { .. }
@@ -5072,7 +5072,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => false,
     }

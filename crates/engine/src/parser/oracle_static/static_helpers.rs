@@ -182,6 +182,23 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    // CR 903.3 + CR 601.2f: "Your commander costs {1} less to cast …" (Myth
+    // Unbound) — the commander spell(s) the controller owns.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("your commanders"),
+        tag("your commander"),
+    )))
+    .parse(base)
+    .is_ok()
+    {
+        return Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::IsCommander,
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+        ])));
+    }
+
     let that_split: Result<(&str, (&str, &str)), nom::Err<OracleError<'_>>> = all_consuming(alt((
         (
             take_until(" that's "),
