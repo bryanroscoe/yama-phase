@@ -21628,6 +21628,50 @@ fn self_animation_card_type_replacement_preserves_other_modifications() {
     );
 }
 
+/// CR 205.1a + CR 205.1b: "becomes a blue Frog with base power and toughness
+/// 1/1" (Turn to Frog, Snakeform, Polymorphist's Jest) sets the creature types
+/// but names no card type, so it must not replace card types: an artifact
+/// creature stays an artifact (the cards' rulings). A descriptor that names a
+/// core type ("becomes a 1/1 white Human creature") still replaces them.
+#[test]
+fn bare_becomes_creature_type_keeps_card_types() {
+    let modifications = |text: &str| {
+        let lower = text.to_lowercase();
+        super::type_change::parse_bare_becomes_type_replacement_modifications(
+            &crate::parser::oracle_util::TextPair::new(text, &lower),
+        )
+    };
+    let frog = modifications("becomes a blue Frog with base power and toughness 1/1");
+    assert!(
+        !frog
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "a creature type alone must not set card types: {frog:?}"
+    );
+    let remove_at = frog.iter().position(|m| {
+        *m == ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }
+    });
+    let frog_at = frog.iter().position(|m| {
+        *m == ContinuousModification::AddSubtype {
+            subtype: "Frog".to_string(),
+        }
+    });
+    assert!(
+        matches!((remove_at, frog_at), (Some(r), Some(f)) if r < f),
+        "Frog replaces the creature types: {frog:?}"
+    );
+
+    let human = modifications("becomes a 1/1 white Human creature");
+    assert!(
+        human.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature]
+        }),
+        "a named core type sets card types: {human:?}"
+    );
+}
+
 // --- CantCastDuring: turn/phase-scoped casting prohibitions ---
 
 #[test]
