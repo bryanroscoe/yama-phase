@@ -5,7 +5,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::anychar;
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, success, value, verify};
+use nom::combinator::{
+    all_consuming, eof, not, opt, peek, recognize, rest, success, value, verify,
+};
 use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -1805,7 +1807,24 @@ fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
     for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
-    clause
+    truncate_token_keyword_clause_before_relative_clause(clause)
+}
+
+/// Strip a relative clause after the keyword list ("with flying that attack
+/// that opponent this turn if able"): it describes the tokens' behaviour, not
+/// more keywords. "that many" / "that much" is a quantity, not a relative
+/// clause, and is kept.
+fn truncate_token_keyword_clause_before_relative_clause(text: &str) -> &str {
+    let lower = text.to_ascii_lowercase();
+    let relative_clause = (
+        tag::<_, _, nom::error::Error<&str>>(" that "),
+        not(alt((tag("many"), tag("much")))),
+    );
+    let head_len = match many_till(anychar, peek(relative_clause)).parse(lower.as_str()) {
+        Ok((rest, _)) => lower.len() - rest.len(),
+        Err(_) => return text,
+    };
+    &text[..head_len]
 }
 
 /// Strip a token keyword clause at the first `marker` (e.g. `" equal to "`).
@@ -3177,6 +3196,32 @@ mod tests {
     fn keyword_clause_no_where() {
         let kws = parse_token_keyword_clause("with flying");
         assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// "… Elemental creature tokens with flying that attack that opponent this
+    /// turn if able." The relative clause is not a keyword.
+    #[test]
+    fn keyword_clause_stops_at_a_relative_clause() {
+        let kws =
+            parse_token_keyword_clause("with flying that attack that opponent this turn if able");
+        assert_eq!(kws, vec![Keyword::Flying]);
+        let kws = parse_token_keyword_clause("with lifelink that are tapped and attacking");
+        assert_eq!(kws, vec![Keyword::Lifelink]);
+    }
+
+    /// "that many" is a quantity, not a relative clause: the clause is left
+    /// whole for the keyword parser.
+    #[test]
+    fn relative_clause_cut_keeps_that_many() {
+        let clause = "haste or that many 3/1 green Dog creature tokens with vigilance";
+        assert_eq!(
+            truncate_token_keyword_clause_before_relative_clause(clause),
+            clause
+        );
+        assert_eq!(
+            truncate_token_keyword_clause_before_relative_clause("flying that attack"),
+            "flying"
+        );
     }
 
     /// Issue #2854 (Broodspinner): "with flying equal to …" must not treat the
