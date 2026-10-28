@@ -1573,7 +1573,9 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
 /// the object carries no self-referential harmful `Taps` trigger.
 fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option<Option<u16>> {
     let obj = state.objects.get(&object_id)?;
-    let source_context = trigger_source_context_for_latch(state, obj);
+    // Built only for a `Taps` trigger with a card filter to evaluate: most mana
+    // sources have none, and the snapshot copies the source's trigger list.
+    let source_context = std::cell::OnceCell::new();
     let mut harm_amounts = obj
         .trigger_definitions
         .iter_all()
@@ -1585,7 +1587,7 @@ fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option
                     state,
                     object_id,
                     filter,
-                    &source_context,
+                    source_context.get_or_init(|| trigger_source_context_for_latch(state, obj)),
                 )
             })
         })

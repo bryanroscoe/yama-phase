@@ -2964,13 +2964,29 @@ impl GameObject {
         to: Zone,
     ) -> crate::types::game_state::ZoneChangeRecord {
         crate::types::game_state::ZoneChangeRecord {
+            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
+            ..self.snapshot_for_trigger_source_context(object_id, from, to)
+        }
+    }
+
+    /// [`Self::snapshot_for_zone_change`] without the record-level copy of the
+    /// trigger list, for a caller that reads only the record's trigger source
+    /// context (whose `trigger_entries` carries the same list) and then drops
+    /// the record. The record's own `trigger_definitions` is left empty.
+    pub(crate) fn snapshot_for_trigger_source_context(
+        &self,
+        object_id: ObjectId,
+        from: Option<Zone>,
+        to: Zone,
+    ) -> crate::types::game_state::ZoneChangeRecord {
+        crate::types::game_state::ZoneChangeRecord {
             object_id,
             name: self.name.clone(),
             core_types: self.card_types.core_types.clone(),
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
-            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
+            trigger_definitions: Vec::new(),
             trigger_source_context: Some(TriggerSourceContext {
                 identity: ObjectIdentityBinding::new(
                     ObjectIncarnationRef::from_object(self),

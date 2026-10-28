@@ -2415,15 +2415,18 @@ pub fn trigger_source_context_for_latch(
 ) -> TriggerSourceContext {
     #[cfg(test)]
     note_trigger_source_latch_visit(source);
-    let mut record = source.snapshot_for_zone_change(source.id, Some(source.zone), source.zone);
+    let mut record =
+        source.snapshot_for_trigger_source_context(source.id, Some(source.zone), source.zone);
     record.attachments = super::zones::capture_attachment_snapshot(state, source);
     record.linked_exile_snapshot =
         super::zones::capture_linked_exile_snapshot(state, source.id, source.zone);
     record.combat_status = super::zones::capture_combat_status(state, source.id);
     record.sync_trigger_source_context();
+    // The record is a scratch snapshot that is dropped here, so move its
+    // context out rather than cloning it.
     let mut source_context = record
-        .trigger_source_context()
-        .cloned()
+        .trigger_source_context
+        .take()
         .expect("zone-change source snapshot always owns its trigger source context");
     source_context.cards_exiled_this_turn = state
         .cards_exiled_with_source_this_turn
@@ -2912,6 +2915,37 @@ fn record_matched_batched_zone_change_replay(state: &mut GameState, matched: &Ma
     }
 }
 
+/// Rejects, before its source context is built, a live source that the zone
+/// guard in [`collect_matching_triggers_inner`] would reject definition by
+/// definition: none of its trigger entries functions in `zone_filter`.
+///
+/// Exact, not a heuristic. Unless the event is the source's own zone change
+/// (whose record may supply latched entries, CR 603.10a), the scan reads the
+/// live source's own entries (an active subset of them, or its phase-out
+/// subset) with no granted-keyword additions here, and the zone guard admits a
+/// definition only if [`trigger_definition_functions_in_zone`] holds for it.
+fn live_source_cannot_trigger_in_zone(
+    source: TriggerSource<'_>,
+    event: &GameEvent,
+    zone_filter: Option<Zone>,
+    cached_granted_keyword_triggers: Option<&[(KeywordKind, TriggerDefinition)]>,
+) -> bool {
+    let (TriggerSource::Live(source_obj), Some(zone), None) =
+        (source, zone_filter, cached_granted_keyword_triggers)
+    else {
+        return false;
+    };
+    let own_zone_change = matches!(
+        event,
+        GameEvent::ZoneChanged { object_id, .. } if *object_id == source_obj.id
+    );
+    !own_zone_change
+        && !source_obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| trigger_definition_functions_in_zone(entry.definition(), zone))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -3110,6 +3144,14 @@ fn collect_matching_triggers_inner(
     visit: TriggerSourceVisit,
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
+    if live_source_cannot_trigger_in_zone(
+        source,
+        event,
+        zone_filter,
+        cached_granted_keyword_triggers,
+    ) {
+        return pending;
+    }
     let source_context = match source {
         TriggerSource::Live(source_obj) => {
             trigger_source_context_for_event(state, source_obj, event)
@@ -48793,6 +48835,121 @@ pub mod tests {
         assert!(state
             .objects
             .shares_object_with(&granted.objects, recovering));
+    }
+
+    /// The latch context equals the context of a full zone-change snapshot
+    /// completed the same way: building it without the record-level trigger
+    /// list and moving it out of the scratch record changes nothing.
+    #[test]
+    fn latch_source_context_equals_the_full_snapshot_context() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Latch Source", 2, 2);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.trigger_definitions
+                .push(TriggerDefinition::new(TriggerMode::Attacks));
+            let mut graveyard_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+            graveyard_trigger.trigger_zones = vec![Zone::Graveyard];
+            obj.trigger_definitions.push(graveyard_trigger);
+        }
+        let obj = &state.objects[&source];
+        let full = obj.snapshot_for_zone_change(source, Some(obj.zone), obj.zone);
+        let partial = obj.snapshot_for_trigger_source_context(source, Some(obj.zone), obj.zone);
+        assert_eq!(full.trigger_definitions.len(), 2);
+        assert!(partial.trigger_definitions.is_empty());
+        assert_eq!(
+            ZoneChangeRecord {
+                trigger_definitions: full.trigger_definitions.clone(),
+                ..partial
+            },
+            full
+        );
+
+        let mut record = full;
+        record.attachments = crate::game::zones::capture_attachment_snapshot(&state, obj);
+        record.linked_exile_snapshot =
+            crate::game::zones::capture_linked_exile_snapshot(&state, source, obj.zone);
+        record.combat_status = crate::game::zones::capture_combat_status(&state, source);
+        record.sync_trigger_source_context();
+        let mut expected = record
+            .trigger_source_context()
+            .cloned()
+            .expect("a zone-change snapshot owns its source context");
+        expected.cards_exiled_this_turn = state
+            .cards_exiled_with_source_this_turn
+            .get(&source)
+            .cloned()
+            .unwrap_or_default();
+        let latched = trigger_source_context_for_latch(&state, obj);
+        assert_eq!(latched.trigger_entries.len(), 2);
+        assert!(latched == expected);
+    }
+
+    /// A live source with no entry functioning in the scanned zone is rejected
+    /// before its context is built. Its own zone change (whose record may
+    /// supply latched entries, CR 603.10a), an unfiltered scan and supplied
+    /// granted-keyword triggers are never rejected, nor is a source with an
+    /// entry that functions in the zone (CR 113.6b).
+    #[test]
+    fn live_source_rejection_needs_no_entry_functioning_in_the_zone() {
+        let mut state = setup();
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let recurring = off_zone_test_card(&mut state, 1, Zone::Graveyard);
+        let mut graveyard_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        graveyard_trigger.trigger_zones = vec![Zone::Graveyard];
+        state
+            .objects
+            .get_mut(&recurring)
+            .unwrap()
+            .trigger_definitions
+            .push(graveyard_trigger);
+        let other_event = zone_changed_event(
+            ObjectId(9999),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            vec![],
+        );
+        let own_event = zone_changed_event(plain, Zone::Hand, Zone::Graveyard, vec![], vec![]);
+        let live = |id| TriggerSource::Live(&state.objects[&id]);
+        let graveyard = Some(Zone::Graveyard);
+
+        assert!(live_source_cannot_trigger_in_zone(
+            live(plain),
+            &other_event,
+            graveyard,
+            None
+        ));
+        assert!(!live_source_cannot_trigger_in_zone(
+            live(recurring),
+            &other_event,
+            graveyard,
+            None
+        ));
+        assert!(live_source_cannot_trigger_in_zone(
+            live(recurring),
+            &other_event,
+            Some(Zone::Exile),
+            None
+        ));
+        assert!(!live_source_cannot_trigger_in_zone(
+            live(plain),
+            &own_event,
+            graveyard,
+            None
+        ));
+        assert!(!live_source_cannot_trigger_in_zone(
+            live(plain),
+            &other_event,
+            None,
+            None
+        ));
+        assert!(!live_source_cannot_trigger_in_zone(
+            live(plain),
+            &other_event,
+            graveyard,
+            Some(&[])
+        ));
     }
 
     /// CR 113.6b + CR 613.1f: the off-zone companion pre-check answers per
