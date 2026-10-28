@@ -2143,6 +2143,7 @@ mod display_identity_serde;
 mod etb_trigger_order_mana_window;
 mod event_window_trigger_gate;
 mod hashep_oasis_sacrifices_itself;
+mod jace_multiverse_architect_attack_restriction;
 mod lazotep_quarry_x_ability_with_tap;
 mod magnificent_end_tapped_target_cost;
 mod planar_nexus_every_nonbasic_land_type;
