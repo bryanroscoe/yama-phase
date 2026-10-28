@@ -95855,3 +95855,77 @@ fn then_for_each_opponent_attribute_prefix_repeats_body() {
     let json = serde_json::to_string(&parsed.triggers).expect("serialize");
     assert!(json.contains("\"PlayerAttribute\""), "{json}");
 }
+
+/// CR 120.1 + CR 608.2c: an unrepresentable source-to-recipient maximum stays
+/// a gap on the instruction whose amount it is, rather than binding X to a
+/// different quantity.
+#[test]
+fn unsupported_source_recipient_damage_quantity_reaches_a_gap() {
+    let expression =
+        "the greatest amount of damage dealt by a source to a permanent or player this turn";
+    assert_eq!(
+        super::lower::parse_where_x_quantity_expression(expression),
+        None
+    );
+    let text = "Draw X cards, where X is the greatest amount of damage dealt by a source to a permanent or player this turn.";
+    let parsed = parse_card(text, "Unsupported damage quantity", &[], &["Sorcery"]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let def = &parsed.abilities[0];
+    assert_eq!(def.kind, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "expected a gap on the draw instruction, got {def:#?}"
+    );
+    assert_eq!(def.description.as_deref(), Some(text));
+}
+
+/// CR 120.1 + CR 608.2i: the supported opponent-recipient noncombat total binds
+/// X to the historical sum, without turning "this turn" into a duration.
+#[test]
+fn supported_damage_history_quantity_still_binds_where_x() {
+    use crate::types::ability::{DamageChannel, DamageKindFilter};
+
+    let text = "Draw X cards, where X is the total amount of noncombat damage dealt to your opponents this turn.";
+    let parsed = parse_card(text, "Supported damage quantity", &[], &["Sorcery"]);
+    assert_card_has_no_gap(&parsed);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let def = &parsed.abilities[0];
+    let Effect::Draw { count, .. } = def.effect.as_ref() else {
+        panic!("expected a draw instruction, got {def:#?}");
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
+                channel: DamageChannel::Total,
+            },
+        }
+    );
+    assert!(def.duration.is_none(), "{def:#?}");
+}
+
+/// CR 120.1 + CR 608.2c: Impact Resonance stays unsupported as a whole; its
+/// X is the largest damage one source dealt to one permanent or player.
+#[test]
+fn impact_resonance_quantity_remains_explicitly_unsupported() {
+    let text = "Impact Resonance deals X damage divided as you choose among any number of target creatures, where X is the greatest amount of damage dealt by a source to a permanent or player this turn.";
+    let parsed = parse_card(text, "Impact Resonance", &[], &["Instant"]);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let def = &parsed.abilities[0];
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "{def:#?}"
+    );
+}
