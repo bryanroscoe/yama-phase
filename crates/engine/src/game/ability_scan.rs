@@ -634,7 +634,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
                         acc = acc.or(scan_target_filter(filter, target_ctx, mode));
                     }
                 }
-                EachDamageRecipient::EachController => {}
+                EachDamageRecipient::EachController | EachDamageRecipient::Itself => {}
             }
             acc
         }
