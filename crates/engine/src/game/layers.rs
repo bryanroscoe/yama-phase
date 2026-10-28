@@ -7886,10 +7886,14 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
     )
 }
 
-/// The static-source half of [`collect_shared_active_continuous_effects_matching`]:
-/// functioning statics and the Ring emblem, narrowed to the modifications
-/// `keep` accepts, without the stored transients.
-pub(crate) fn collect_static_source_continuous_effects_matching(
+/// The first part of [`collect_shared_active_continuous_effects_matching`]:
+/// the functioning static sources, narrowed to the modifications `keep`
+/// accepts, with what that part had to evaluate. The gather is this part, then
+/// [`collect_live_transient_effects_matching`], then
+/// [`collect_ring_emblem_effects_matching`], each run with its own pass; a
+/// pass's dependence only records what it evaluated, so the three parts
+/// concatenated are that gather element for element.
+pub(crate) fn collect_static_source_effects_matching(
     state: &GameState,
     keep: fn(&ContinuousModification) -> bool,
 ) -> (Vec<ActiveContinuousEffect>, GatherDependence) {
@@ -7898,8 +7902,41 @@ pub(crate) fn collect_static_source_continuous_effects_matching(
     for_each_static_effect_source(state, |state, obj| {
         effects.extend(static_source_effects_in_pass(state, obj, &mut pass));
     });
-    gather_ring_emblem_continuous_effects(state, &mut effects, pass.admission());
     (effects, pass.into_dependence())
+}
+
+/// The second part of [`collect_shared_active_continuous_effects_matching`]:
+/// the live stored transients, narrowed to the modifications `keep` accepts.
+/// See [`collect_static_source_effects_matching`].
+pub(crate) fn collect_live_transient_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> (Vec<ActiveContinuousEffect>, GatherDependence) {
+    let mut pass = GatherPass::matching(keep);
+    let mut effects = Vec::new();
+    gather_transient_continuous_effects_with(
+        state,
+        &mut effects,
+        transient_effect_is_live,
+        &mut pass,
+    );
+    (effects, pass.into_dependence())
+}
+
+/// The last part of [`collect_shared_active_continuous_effects_matching`]: the
+/// Ring emblem's effects, if `keep` accepts their modification. Evaluates no
+/// filter or condition. See [`collect_static_source_effects_matching`].
+pub(crate) fn collect_ring_emblem_effects_matching(
+    state: &GameState,
+    keep: fn(&ContinuousModification) -> bool,
+) -> Vec<ActiveContinuousEffect> {
+    let mut effects = Vec::new();
+    gather_ring_emblem_continuous_effects(
+        state,
+        &mut effects,
+        ModificationAdmission::Matching(keep),
+    );
+    effects
 }
 
 /// The transient half of [`collect_shared_active_continuous_effects_matching`],

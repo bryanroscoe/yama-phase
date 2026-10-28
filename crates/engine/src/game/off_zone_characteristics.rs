@@ -2,8 +2,9 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::filter::FilterContext;
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, active_effect_condition_controller,
-    base_static_source_may_reach, collect_shared_active_continuous_effects_matching,
-    collect_static_source_continuous_effects_matching, evaluate_condition_with_recipient,
+    base_static_source_may_reach, collect_live_transient_effects_matching,
+    collect_ring_emblem_effects_matching, collect_shared_active_continuous_effects_matching,
+    collect_static_source_effects_matching, evaluate_condition_with_recipient,
     order_active_continuous_effects, transient_modifications_reaching, GatherDependence,
 };
 use crate::game::quantity::resolve_quantity;
@@ -87,8 +88,16 @@ enum SharedGather {
     /// A gather that evaluated no filter and no condition, so it is a pure
     /// function of the scoped state and every query may read it.
     Reusable(std::rc::Rc<[ActiveContinuousEffect]>),
-    /// The gather had to evaluate a filter or a condition; every query in this
-    /// scope gathers for itself.
+    /// The static sources and the Ring emblem evaluated no filter and no
+    /// condition, so every query may read them, but the live transients had to
+    /// evaluate a liveness gate; every query gathers the transients for itself
+    /// and reads the rest from here, in the gather's order.
+    StaticsReusable {
+        statics: std::rc::Rc<[ActiveContinuousEffect]>,
+        ring: std::rc::Rc<[ActiveContinuousEffect]>,
+    },
+    /// The static sources had to evaluate a filter or a condition; every query
+    /// in this scope gathers for itself.
     ContextDependent,
 }
 
@@ -124,6 +133,11 @@ enum OffZoneKeywordFrameLookup {
     Pending,
     /// A scope covers it and holds a shareable gather.
     Reusable(std::rc::Rc<[ActiveContinuousEffect]>),
+    /// A scope covers it and holds the shareable parts of its gather.
+    StaticsReusable {
+        statics: std::rc::Rc<[ActiveContinuousEffect]>,
+        ring: std::rc::Rc<[ActiveContinuousEffect]>,
+    },
     /// A scope covers it but its gather cannot be shared.
     ContextDependent,
 }
@@ -142,6 +156,12 @@ fn lookup_off_zone_keyword_frame(state: &GameState) -> OffZoneKeywordFrameLookup
             Some(SharedGather::Reusable(shared)) => {
                 OffZoneKeywordFrameLookup::Reusable(std::rc::Rc::clone(shared))
             }
+            Some(SharedGather::StaticsReusable { statics, ring }) => {
+                OffZoneKeywordFrameLookup::StaticsReusable {
+                    statics: std::rc::Rc::clone(statics),
+                    ring: std::rc::Rc::clone(ring),
+                }
+            }
             Some(SharedGather::ContextDependent) => OffZoneKeywordFrameLookup::ContextDependent,
         }
     })
@@ -152,7 +172,10 @@ fn lookup_off_zone_keyword_frame(state: &GameState) -> OffZoneKeywordFrameLookup
 /// `Pending` is left as it is.
 fn store_off_zone_keyword_gather(state: &GameState, gather: SharedGather) {
     #[cfg(test)]
-    let fills = usize::from(matches!(gather, SharedGather::Reusable(_)));
+    let fills = usize::from(matches!(
+        gather,
+        SharedGather::Reusable(_) | SharedGather::StaticsReusable { .. }
+    ));
     let stored = with_off_zone_keyword_frames(|frames| {
         let Some(frame) = frames
             .iter_mut()
@@ -165,7 +188,9 @@ fn store_off_zone_keyword_gather(state: &GameState, gather: SharedGather) {
                 frame.gather = gather;
                 true
             }
-            SharedGather::Reusable(_) | SharedGather::ContextDependent => false,
+            SharedGather::Reusable(_)
+            | SharedGather::StaticsReusable { .. }
+            | SharedGather::ContextDependent => false,
         }
     });
     #[cfg(test)]
@@ -410,20 +435,41 @@ pub(crate) fn collect_applicable_off_zone_keyword_effects(
         OffZoneKeywordFrameLookup::Pending => {
             #[cfg(test)]
             record_off_zone_keyword_scope(|counts| counts.matched += 1);
-            let (effects, dependence) = collect_shared_active_continuous_effects_matching(
-                state,
-                supports_off_zone_keyword_query,
-            );
-            match dependence {
-                GatherDependence::ContextDependent => {
+            // The shared gather in its three parts, so a part that evaluated
+            // nothing can be shared even when another part cannot.
+            let (mut statics, statics_dependence) =
+                collect_static_source_effects_matching(state, supports_off_zone_keyword_query);
+            let (transients, transients_dependence) =
+                collect_live_transient_effects_matching(state, supports_off_zone_keyword_query);
+            let ring = collect_ring_emblem_effects_matching(state, supports_off_zone_keyword_query);
+            match (statics_dependence, transients_dependence) {
+                (GatherDependence::ContextDependent, _) => {
                     store_off_zone_keyword_gather(state, SharedGather::ContextDependent);
                     #[cfg(test)]
                     record_off_zone_keyword_scope(|counts| counts.context_fall_opens += 1);
-                    applicable_from_owned_gather(state, obj, effects)
+                    statics.extend(transients);
+                    statics.extend(ring);
+                    applicable_from_owned_gather(state, obj, statics)
                 }
-                GatherDependence::Structural => {
+                (GatherDependence::Structural, GatherDependence::ContextDependent) => {
+                    let statics: std::rc::Rc<[ActiveContinuousEffect]> = statics.into();
+                    let ring: std::rc::Rc<[ActiveContinuousEffect]> = ring.into();
+                    store_off_zone_keyword_gather(
+                        state,
+                        SharedGather::StaticsReusable {
+                            statics: std::rc::Rc::clone(&statics),
+                            ring: std::rc::Rc::clone(&ring),
+                        },
+                    );
+                    #[cfg(test)]
+                    record_off_zone_keyword_scope(|counts| counts.context_fall_opens += 1);
+                    applicable_from_split_gather(state, obj, &statics, transients, &ring)
+                }
+                (GatherDependence::Structural, GatherDependence::Structural) => {
                     // Elements are moved into the shared slice, not cloned.
-                    let shared: std::rc::Rc<[ActiveContinuousEffect]> = effects.into();
+                    statics.extend(transients);
+                    statics.extend(ring);
+                    let shared: std::rc::Rc<[ActiveContinuousEffect]> = statics.into();
                     store_off_zone_keyword_gather(
                         state,
                         SharedGather::Reusable(std::rc::Rc::clone(&shared)),
@@ -431,6 +477,17 @@ pub(crate) fn collect_applicable_off_zone_keyword_effects(
                     applicable_from_shared_gather(state, obj, &shared)
                 }
             }
+        }
+        OffZoneKeywordFrameLookup::StaticsReusable { statics, ring } => {
+            #[cfg(test)]
+            record_off_zone_keyword_scope(|counts| {
+                counts.matched += 1;
+                counts.hits += 1;
+                counts.context_fall_opens += 1;
+            });
+            let (transients, _) =
+                collect_live_transient_effects_matching(state, supports_off_zone_keyword_query);
+            applicable_from_split_gather(state, obj, &statics, transients, &ring)
         }
         OffZoneKeywordFrameLookup::Reusable(shared) => {
             #[cfg(test)]
@@ -493,6 +550,44 @@ fn applicable_from_shared_gather(
         own_base_static_keyword_effects(state, obj)
             .into_iter()
             .filter(|effect| off_zone_keyword_effect_applies(state, obj.id, obj.zone, effect)),
+    );
+    applicable
+}
+
+/// Finishes a query from a scope's shared static and Ring parts and this
+/// query's own transient part: the applicable effects of each part in the
+/// gather's order (shared ones cloned, the transients moved), then the
+/// object's own applicable base-static effects, exactly as
+/// [`applicable_from_shared_gather`] reads one whole shared gather.
+fn applicable_from_split_gather(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    statics: &[ActiveContinuousEffect],
+    transients: Vec<ActiveContinuousEffect>,
+    ring: &[ActiveContinuousEffect],
+) -> Vec<ActiveContinuousEffect> {
+    let applies = |effect: &ActiveContinuousEffect| {
+        off_zone_keyword_effect_applies(state, obj.id, obj.zone, effect)
+    };
+    let mut applicable: Vec<ActiveContinuousEffect> = statics
+        .iter()
+        .filter(|effect| applies(effect))
+        .cloned()
+        .collect();
+    #[cfg(test)]
+    let shared_statics = applicable.len();
+    applicable.extend(transients.into_iter().filter(|effect| applies(effect)));
+    #[cfg(test)]
+    let before_ring = applicable.len();
+    applicable.extend(ring.iter().filter(|effect| applies(effect)).cloned());
+    #[cfg(test)]
+    record_off_zone_keyword_scope(|counts| {
+        counts.shared_clones += shared_statics + (applicable.len() - before_ring);
+    });
+    applicable.extend(
+        own_base_static_keyword_effects(state, obj)
+            .into_iter()
+            .filter(|effect| applies(effect)),
     );
     applicable
 }
@@ -623,10 +718,12 @@ pub(crate) fn base_statics_can_grant_off_zone_keyword_kind(
 pub(crate) fn off_zone_keyword_companions_may_exist(
     state: &GameState,
 ) -> impl Fn(&crate::game::game_object::GameObject, Zone) -> bool + '_ {
-    let (static_effects, dependence) = collect_static_source_continuous_effects_matching(
+    let (mut static_effects, dependence) =
+        collect_static_source_effects_matching(state, may_add_off_battlefield_keyword_companion);
+    static_effects.extend(collect_ring_emblem_effects_matching(
         state,
         may_add_off_battlefield_keyword_companion,
-    );
+    ));
     let static_context_dependent = dependence == GatherDependence::ContextDependent;
     let transients =
         transient_modifications_reaching(state, may_add_off_battlefield_keyword_companion);
@@ -2773,7 +2870,9 @@ mod tests {
         (keywords, off_zone_keyword_scope_counts())
     }
 
-    /// A keyword transient makes scoped queries fall open, with results equal to unscoped ones.
+    /// A keyword transient makes scoped queries gather the transients for
+    /// themselves while sharing the static sources, with results equal to
+    /// unscoped ones.
     #[test]
     fn scope_falls_open_on_keyword_relevant_transient() {
         let (mut state, source, cards) = sharing_board();
@@ -2802,9 +2901,128 @@ mod tests {
         assert_eq!(inside, outside);
         assert_eq!(
             (counts.fills, counts.hits, counts.context_fall_opens),
-            (0, 0, 3),
+            (1, 2, 3),
             "{counts:?}"
         );
+    }
+
+    /// Transient source conditions can see a different recursion context on
+    /// each query even though the state and the structural statics are unchanged.
+    #[test]
+    fn split_keyword_gather_rechecks_recursive_transient_conditions() {
+        let (mut state, source, cards) = sharing_board();
+        let transient_id = state
+            .add_transient_continuous_effect(
+                source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: cards[1] },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(7),
+                }],
+                Some(StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::SpecificObject { id: cards[0] },
+                            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                                FilterProp::InAnyZone {
+                                    zones: vec![Zone::Graveyard],
+                                },
+                                FilterProp::HasKeywordKind {
+                                    value: KeywordKind::Flashback,
+                                },
+                            ])),
+                        ],
+                    }),
+                }),
+            )
+            .expect("the transient is installed");
+
+        // The probe has only granted flashback. While its own query is on the
+        // recursion stack the condition sees printed keywords and is false;
+        // another card's query can see its granted flashback and admit the TCE.
+        assert!(state.objects[&cards[0]].base_keywords.is_empty());
+        let (suppressed, dependence) = {
+            let _probe = OffZoneRecursionGuard::enter(cards[0]);
+            collect_live_transient_effects_matching(&state, supports_off_zone_keyword_query)
+        };
+        assert_eq!(dependence, GatherDependence::ContextDependent);
+        assert!(
+            suppressed.is_empty(),
+            "the recursive context must suppress the transient"
+        );
+        let (live, _) =
+            collect_live_transient_effects_matching(&state, supports_off_zone_keyword_query);
+        assert!(live
+            .iter()
+            .any(|effect| effect.transient_id == Some(transient_id)));
+
+        // Compare every contribution field, including producer identity and
+        // output position, against the ordinary query with no scope frame.
+        let query = |id| {
+            effective_off_zone_keyword_contributions(&state, id)
+                .into_iter()
+                .map(|entry| (entry.keyword, entry.origin, entry.producer_output_index))
+                .collect::<Vec<_>>()
+        };
+        let target = query(cards[1]);
+        assert_eq!(
+            target,
+            vec![(
+                Keyword::Dredge(7),
+                Some(TriggerProducerOrigin::Transient {
+                    continuous_effect_id: transient_id,
+                    modification_index: 0,
+                }),
+                0,
+            )],
+            "the transient must replace the structural Dredge(1) contribution"
+        );
+
+        for order in [
+            [cards[0], cards[1], cards[2], cards[0], cards[1]],
+            [cards[1], cards[0], cards[1], cards[2], cards[0]],
+            [cards[2], cards[1], cards[0], cards[1], cards[2]],
+        ] {
+            let outside = order.map(query);
+            reset_off_zone_keyword_scope_counts();
+            with_off_zone_keyword_scope(&state, || {
+                let mut held = None;
+                let inside = order.map(|id| {
+                    let before = off_zone_keyword_scope_counts();
+                    let result = query(id);
+                    let after = off_zone_keyword_scope_counts();
+                    if id == cards[1] {
+                        assert!(
+                            after.matched > before.matched + 1,
+                            "the transient condition must query the other card: {before:?} -> {after:?}"
+                        );
+                    }
+                    let OffZoneKeywordFrameLookup::StaticsReusable { statics, ring } =
+                        lookup_off_zone_keyword_frame(&state)
+                    else {
+                        panic!("reach-guard: this fixture must select the split gather");
+                    };
+                    assert_eq!(statics.len(), 3, "structural grants must be cached");
+                    if let Some((prior_statics, prior_ring)) = &held {
+                        assert!(std::rc::Rc::ptr_eq(prior_statics, &statics));
+                        assert!(std::rc::Rc::ptr_eq(prior_ring, &ring));
+                    } else {
+                        held = Some((statics, ring));
+                    }
+                    result
+                });
+                assert_eq!(inside, outside, "query order {order:?}");
+            });
+            let counts = off_zone_keyword_scope_counts();
+            assert_eq!(counts.fills, 1, "{counts:?}");
+            assert!(
+                counts.hits > 0 && counts.context_fall_opens > 0,
+                "{counts:?}"
+            );
+            assert_eq!(off_zone_keyword_scope_depth(), 0);
+            OFF_ZONE_KEYWORD_STACK.with(|stack| assert!(stack.borrow().is_empty()));
+        }
     }
 
     /// A keyword-inner granted static makes scoped queries fall open, with unscoped results.
