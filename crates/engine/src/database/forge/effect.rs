@@ -264,7 +264,7 @@ fn translate_put_counter(
     let count = resolve_quantity(params, "CounterNum", resolver);
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::PutCounter {
-        counter_type,
+        counter_type: crate::types::counter::parse_counter_type(&counter_type),
         count,
         target,
     })
@@ -321,6 +321,9 @@ fn translate_token(
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        supertypes: Vec::new(),
+        static_abilities: Vec::new(),
+        enter_with_counters: Vec::new(),
     })
 }
 
@@ -383,6 +386,11 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        enters_modified_if: None,
     })
 }
 
@@ -412,6 +420,7 @@ fn translate_mana(
         ManaProduction::AnyOneColor {
             count: amount,
             color_options: ManaColor::ALL.to_vec(),
+            contribution: Default::default(),
         }
     } else if colors.len() == 1 {
         // Single color with amount: repeat the color N times.
@@ -420,21 +429,29 @@ fn translate_mana(
         match amount {
             QuantityExpr::Fixed { value } => {
                 let repeated = vec![colors[0]; value as usize];
-                ManaProduction::Fixed { colors: repeated }
+                ManaProduction::Fixed {
+                    colors: repeated,
+                    contribution: Default::default(),
+                }
             }
             _ => ManaProduction::AnyOneColor {
                 count: amount,
                 color_options: colors,
+                contribution: Default::default(),
             },
         }
     } else {
         // Multiple colors: the full set is produced once (Amount$ is unusual here).
-        ManaProduction::Fixed { colors }
+        ManaProduction::Fixed {
+            colors,
+            contribution: Default::default(),
+        }
     };
 
     Ok(Effect::Mana {
         produced,
         restrictions: Vec::new(),
+        grants: Vec::new(),
         expiry: None,
         target: None,
     })
@@ -447,11 +464,15 @@ fn translate_discard(
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "NumCards", resolver);
     let target = resolve_defined(params);
-    let random = params.get("Mode") == Some("Random");
+    let selection = if params.get("Mode") == Some("Random") {
+        crate::types::ability::CardSelectionMode::Random
+    } else {
+        crate::types::ability::CardSelectionMode::Chosen
+    };
     Ok(Effect::Discard {
         count,
         target,
-        random,
+        selection,
         unless_filter: None,
         filter: None,
     })
@@ -467,6 +488,7 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
     Ok(Effect::Sacrifice {
         target,
         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        min_count: 1,
     })
 }
 
@@ -531,6 +553,11 @@ fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError>
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        conditional_enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        enters_modified_if: None,
     })
 }
 
