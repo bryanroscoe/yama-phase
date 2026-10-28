@@ -2163,6 +2163,7 @@ mod commanders_plate_protection;
 mod display_identity_serde;
 mod etb_trigger_order_mana_window;
 mod event_window_trigger_gate;
+mod furygale_flocking_tokens_per_opponent;
 mod hashep_oasis_sacrifices_itself;
 mod jace_multiverse_architect_attack_restriction;
 mod lazotep_quarry_x_ability_with_tap;

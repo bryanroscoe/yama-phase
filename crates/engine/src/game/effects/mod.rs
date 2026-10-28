@@ -23286,6 +23286,7 @@ fn resolve_chain_body(
             // CR 405.3 + CR 707.10: a batch of copies of several spells is
             // ordered by its controller, one copy at a time.
             let copy_order_fixed = per_member_copy_counts.then_some(0);
+            let mut repeated_tokens: Vec<ObjectId> = Vec::new();
             while iteration < iterations {
                 if open_spell_copy_order_choice(
                     state,
@@ -23506,6 +23507,18 @@ fn resolve_chain_body(
                         );
                     }
                     break;
+                }
+                // CR 608.2c: an instruction after the loop that names the
+                // created tokens ("For each opponent, create two … tokens. They
+                // gain haste until end of turn.") names every token the
+                // repeated instruction made, not only the last iteration's.
+                if !repeated_full_chain && matches!(effective.effect, Effect::Token { .. }) {
+                    for id in &state.last_created_token_ids {
+                        if !repeated_tokens.contains(id) {
+                            repeated_tokens.push(*id);
+                        }
+                    }
+                    state.last_created_token_ids = repeated_tokens.clone();
                 }
                 iteration += 1;
             }
