@@ -12214,6 +12214,15 @@ pub enum PlayerScope {
     /// `chosen_attributes` so a CDA P/T can track e.g. the chosen player's hand
     /// or graveyard size (Entropic Specter, Sewer Nemesis).
     SourceChosenPlayer,
+    /// CR 608.2c + CR 109.4: The player chosen by the Nth `Effect::Choose`
+    /// (`ChoiceType::Player` / `ChoiceType::Opponent`) earlier in this resolving
+    /// ability chain (`index` is 0-based), read from
+    /// `ResolvedAbility.chosen_players[index]`. The player-scalar-axis analogue
+    /// of `ControllerRef::ChosenPlayer { index }` and
+    /// `PlayerFilter::ChosenPlayer { index }`: "choose an opponent. If that
+    /// player has more cards in hand than you, draw cards equal to the
+    /// difference" (Sandstone Oracle). Resolution-scoped, like those siblings.
+    ChosenPlayer { index: u8 },
     /// CR 513.1 + CR 611.2a + CR 603.7b: turn-AGNOSTIC deadline — the referenced
     /// step's NEXT occurrence regardless of whose turn ("the next end step", e.g.
     /// Niko, Light of Hope), as opposed to `Controller` ("your next end step",
@@ -13007,7 +13016,8 @@ fn player_scope_is_selected_dependent(scope: &PlayerScope) -> bool {
     match scope {
         PlayerScope::Target
         | PlayerScope::RecipientController
-        | PlayerScope::ParentObjectTarget { .. } => true,
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::ChosenPlayer { .. } => true,
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
         | PlayerScope::Opponent { .. }
@@ -17988,6 +17998,7 @@ impl StaticMode {
             | PlayerScope::AllPlayers { .. }
             | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
+            | PlayerScope::ChosenPlayer { .. }
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
         }
@@ -29120,6 +29131,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
     }
@@ -29137,6 +29149,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
+        | PlayerScope::ChosenPlayer { .. }
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
     }
@@ -37668,10 +37681,13 @@ impl ContinuousEffectOnset {
 /// condition/effect may presuppose the preceding sibling's effect actually ran
 /// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
 /// `GainControl` produced a target), so it is skipped alongside a failed
-/// predecessor. The sole narrow exception is a direct dependent
-/// `SequentialSibling` whose condition is `AbilityUseCountThisTurn`: ordinal
-/// clauses are evaluated in their written order under CR 608.2c even after an
-/// earlier ordinal is false. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// predecessor. Two narrow exceptions are evaluated in their written order
+/// under CR 608.2c even after an earlier gate is false: a direct dependent
+/// `SequentialSibling` whose condition is `AbilityUseCountThisTurn` (ordinal
+/// clauses), and one whose condition reads only the game state from the
+/// source's point of view and nothing an earlier instruction produced
+/// (Sunset Revelry's "If an opponent has more ... than you" sentences).
+/// `ReplicatedOrBranch` marks a sibling produced by per-item
 /// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
 /// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
 /// keyword, so it must be evaluated regardless of any other branch's outcome.
