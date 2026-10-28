@@ -300,10 +300,13 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 ///
 /// Conservative by design: `false` only costs a simulation, so any shape this
 /// does not fully model must return `false` rather than guess.
-pub(crate) fn structurally_valid_named_choice_answer(
-    state: &GameState,
-    action: &GameAction,
-) -> bool {
+///
+/// A `true` result proves structural legality for this exact action at this
+/// immutable state; `false` requests the caller's ordinary validation path,
+/// rather than rejecting the answer. Both the engine simulation filter and AI
+/// planner consume this proof. It must not be retained across state changes or
+/// used to bypass actor authorization or the final authorized application.
+pub fn structurally_valid_named_choice_answer(state: &GameState, action: &GameAction) -> bool {
     let (
         WaitingFor::NamedChoice {
             choice_type,
