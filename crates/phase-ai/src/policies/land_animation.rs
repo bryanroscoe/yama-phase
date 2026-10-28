@@ -5,11 +5,14 @@
 //! color requirements, and combat value.
 
 use engine::game::game_object;
-use engine::types::ability::{Effect, ManaProduction};
+use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, ManaProduction};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaCost, ManaCostShard};
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
 use super::activation::turn_only;
@@ -32,6 +35,16 @@ const TAPPED_LAND_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 /// Bonus for animating when sufficient alternative mana sources exist.
 const SUFFICIENT_MANA_BONUS: f64 = 0.3;
+
+/// Penalty for animating a land outside any window in which it could attack or
+/// block this turn, or when the combat AI would not attack with it. Same
+/// critical floor as [`TAPPED_LAND_PENALTY`]: the activation buys a creature
+/// that won't fight before it stops being one.
+const NO_COMBAT_WINDOW_PENALTY: f64 = -super::registry::CRITICAL_MAX;
+
+/// Penalty for animating a land that is already a creature: the activation
+/// spends its cost and adds nothing the land doesn't already have this turn.
+const ALREADY_CREATURE_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 pub struct LandAnimationPolicy;
 
@@ -120,6 +133,35 @@ impl TacticalPolicy for LandAnimationPolicy {
             );
         }
 
+        // CR 508.1a + CR 509.1a: a man-land's animation lasts until end of
+        // turn, so it only pays off if the creature can attack or block this
+        // turn.
+        if !has_combat_window(ctx.state, ctx.ai_player, obj, ability_def) {
+            return PolicyVerdict::critical(
+                NO_COMBAT_WINDOW_PENALTY,
+                PolicyReason::new("land_animation_no_combat_window"),
+            );
+        }
+
+        if obj.card_types.core_types.contains(&CoreType::Creature) {
+            return PolicyVerdict::critical(
+                ALREADY_CREATURE_PENALTY,
+                PolicyReason::new("land_animation_already_creature"),
+            );
+        }
+
+        // CR 508.1: on its own turn the AI animates a man-land to attack with
+        // it, so ask the combat AI whether it would attack with the animated
+        // body on this board.
+        if ctx.state.active_player == ctx.ai_player
+            && !animated_land_would_attack(ctx.state, ctx.ai_player, *source_id, ability_def)
+        {
+            return PolicyVerdict::critical(
+                NO_COMBAT_WINDOW_PENALTY,
+                PolicyReason::new("land_animation_would_not_attack"),
+            );
+        }
+
         // Check if this is the only source of a critical color
         let is_critical_color_source = is_only_source_of_color(ctx, *source_id);
         if is_critical_color_source {
@@ -143,6 +185,115 @@ impl TacticalPolicy for LandAnimationPolicy {
             reason: PolicyReason::new("land_animation_score"),
         }
     }
+}
+
+/// Whether a land animated now could still fight this turn.
+///
+/// - On the AI's own turn it can attack only if attackers haven't been declared
+///   yet (CR 508.1) and, unless the animated body has haste, the AI has
+///   controlled the land continuously since the turn began (CR 302.6 +
+///   CR 508.1a; the engine's `summoning_sick` flag).
+/// - On an opponent's turn it can only block, which needs a creature attacking
+///   the AI: the window is the declare-attackers step once attackers are
+///   declared (CR 509.1a).
+///
+/// "Could" is not "will": this only rules out windows where no attack or block
+/// is possible at all.
+fn has_combat_window(
+    state: &GameState,
+    ai_player: PlayerId,
+    land: &game_object::GameObject,
+    ability: &AbilityDefinition,
+) -> bool {
+    if state.active_player == ai_player {
+        let before_attacks = matches!(
+            state.phase,
+            Phase::Untap | Phase::Upkeep | Phase::Draw | Phase::PreCombatMain | Phase::BeginCombat
+        );
+        let can_attack = !land.summoning_sick
+            || crate::manland::extract_body(ability)
+                .is_some_and(|body| body.has_keyword(&Keyword::Haste));
+        return before_attacks && can_attack;
+    }
+    state.phase == Phase::DeclareAttackers
+        && state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .any(|attacker| attacker.defending_player == ai_player)
+        })
+}
+
+/// CR 508.1: whether the combat AI would attack with `land_id` once animated,
+/// judged on the current board. The animation is previewed on a copy of the
+/// state: the land becomes a creature with the animated body's power,
+/// toughness and keywords. A body whose size the activation sets from X
+/// (Lair of the Hydra) is sized by the mana the AI could put into X. An
+/// ability whose body can't be read is let through.
+fn animated_land_would_attack(
+    state: &GameState,
+    ai_player: PlayerId,
+    land_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> bool {
+    let Some(body) = crate::manland::extract_body(ability) else {
+        return true;
+    };
+    let (power, toughness) = if body.power > 0 || body.toughness > 0 {
+        (body.power, body.toughness)
+    } else {
+        let x = x_mana_available(state, ai_player, land_id, ability);
+        (x, x)
+    };
+    if power <= 0 {
+        return false;
+    }
+    let mut preview = state.clone();
+    let Some(land) = preview.objects.get_mut(&land_id) else {
+        return true;
+    };
+    if !land.card_types.core_types.contains(&CoreType::Creature) {
+        land.card_types.core_types.push(CoreType::Creature);
+    }
+    land.power = Some(power);
+    land.toughness = Some(toughness);
+    for keyword in &body.keywords {
+        if !land.keywords.contains(keyword) {
+            land.keywords.push(keyword.clone());
+        }
+    }
+    crate::combat_ai::choose_attackers(&preview, ai_player).contains(&land_id)
+}
+
+/// Mana the AI could spend on X for `ability`: its untapped lands other than
+/// `land_id`, less the colored symbols in the cost (at least 0).
+fn x_mana_available(
+    state: &GameState,
+    ai_player: PlayerId,
+    land_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> i32 {
+    let other_untapped = state
+        .battlefield
+        .iter()
+        .filter(|&&id| id != land_id)
+        .filter_map(|id| state.objects.get(id))
+        .filter(|o| {
+            o.controller == ai_player
+                && o.card_types.core_types.contains(&CoreType::Land)
+                && !o.tapped
+        })
+        .count() as i32;
+    let colored = match ability.cost.as_ref() {
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost { shards, .. },
+        }) => shards
+            .iter()
+            .filter(|shard| !matches!(shard, ManaCostShard::X))
+            .count() as i32,
+        _ => 0,
+    };
+    (other_untapped - colored).max(0)
 }
 
 /// Check if this land is the only source of a critical color for the AI.
@@ -342,7 +493,172 @@ mod tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         Arc::make_mut(&mut obj.abilities).push(ability);
+        // CR 302.6: a land the AI has controlled since its turn began.
+        obj.summoning_sick = false;
+        obj.entered_battlefield_turn = Some(0);
+        state.turn_number = state.turn_number.max(2);
         id
+    }
+
+    /// A manland whose animation is affordable from three other lands, so the
+    /// tapped-source rule doesn't fire and only the combat window decides.
+    fn affordable_manland(state: &mut GameState) -> ObjectId {
+        let source_id = land_with_ability(state, animate_ability_with_mana_cost());
+        mana_land(state, ManaColor::White);
+        mana_land(state, ManaColor::Black);
+        mana_land(state, ManaColor::White);
+        source_id
+    }
+
+    #[test]
+    fn animation_before_own_combat_is_allowed() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = affordable_manland(&mut state);
+        state.active_player = AI;
+        state.phase = Phase::PreCombatMain;
+        assert_eq!(
+            reason_kind(&policy_verdict(&state, source_id)),
+            "land_animation_score"
+        );
+    }
+
+    #[test]
+    fn animation_after_own_attacks_is_penalized() {
+        // CR 508.1: attackers are declared once; animating in the second main
+        // phase buys a creature that can neither attack nor block.
+        let mut state = GameState::new_two_player(42);
+        let source_id = affordable_manland(&mut state);
+        state.active_player = AI;
+        state.phase = Phase::PostCombatMain;
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_no_combat_window");
+        let PolicyVerdict::Score { delta, .. } = verdict else {
+            panic!("expected score verdict");
+        };
+        assert_eq!(delta, NO_COMBAT_WINDOW_PENALTY);
+    }
+
+    #[test]
+    fn animating_a_land_played_this_turn_is_penalized() {
+        // CR 302.6: it hasn't been under the AI's control since the turn began.
+        let mut state = GameState::new_two_player(42);
+        let source_id = affordable_manland(&mut state);
+        state.objects.get_mut(&source_id).unwrap().summoning_sick = true;
+        state.active_player = AI;
+        state.phase = Phase::PreCombatMain;
+        assert_eq!(
+            reason_kind(&policy_verdict(&state, source_id)),
+            "land_animation_no_combat_window"
+        );
+    }
+
+    #[test]
+    fn animating_a_hasty_land_played_this_turn_is_allowed() {
+        // CR 508.1a: a creature with haste can attack the turn it comes under
+        // its controller's control.
+        let mut state = GameState::new_two_player(42);
+        let mut ability = animate_ability_with_mana_cost();
+        if let Effect::Animate { keywords, .. } = &mut *ability.effect {
+            keywords.push(Keyword::Haste);
+        }
+        let source_id = land_with_ability(&mut state, ability);
+        mana_land(&mut state, ManaColor::White);
+        mana_land(&mut state, ManaColor::Black);
+        mana_land(&mut state, ManaColor::White);
+        state.objects.get_mut(&source_id).unwrap().summoning_sick = true;
+        state.active_player = AI;
+        state.phase = Phase::PreCombatMain;
+        assert_eq!(
+            reason_kind(&policy_verdict(&state, source_id)),
+            "land_animation_score"
+        );
+    }
+
+    #[test]
+    fn animation_into_a_bigger_untapped_blocker_is_penalized() {
+        // The combat AI won't attack a 2/2 into an untapped 6/6, so animating
+        // the land precombat only spends the mana.
+        let mut state = GameState::new_two_player(42);
+        let source_id = affordable_manland(&mut state);
+        state.active_player = AI;
+        state.phase = Phase::PreCombatMain;
+        let blocker = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Big Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let b = state.objects.get_mut(&blocker).unwrap();
+            b.card_types.core_types.push(CoreType::Creature);
+            b.power = Some(6);
+            b.toughness = Some(6);
+            b.base_power = Some(6);
+            b.base_toughness = Some(6);
+            b.summoning_sick = false;
+            b.entered_battlefield_turn = Some(0);
+        }
+        assert_eq!(
+            reason_kind(&policy_verdict(&state, source_id)),
+            "land_animation_would_not_attack"
+        );
+    }
+
+    #[test]
+    fn animating_a_land_that_is_already_a_creature_is_penalized() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = affordable_manland(&mut state);
+        state.active_player = AI;
+        state.phase = Phase::PreCombatMain;
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_already_creature");
+        let PolicyVerdict::Score { delta, .. } = verdict else {
+            panic!("expected score verdict");
+        };
+        assert_eq!(delta, ALREADY_CREATURE_PENALTY);
+    }
+
+    #[test]
+    fn animation_on_opponents_turn_needs_an_attack_on_the_ai() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = affordable_manland(&mut state);
+        state.active_player = PlayerId(1);
+        state.phase = Phase::End;
+        assert_eq!(
+            reason_kind(&policy_verdict(&state, source_id)),
+            "land_animation_no_combat_window",
+            "nothing to block in the opponent's end step"
+        );
+
+        // CR 509.1a: once a creature attacks the AI, an animated land can block.
+        let attacker = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.phase = Phase::DeclareAttackers;
+        state.combat = Some(engine::game::combat::CombatState {
+            attackers: vec![engine::game::combat::AttackerInfo::new(
+                attacker,
+                engine::game::combat::AttackTarget::Player(AI),
+                AI,
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            reason_kind(&policy_verdict(&state, source_id)),
+            "land_animation_score"
+        );
     }
 
     fn policy_verdict(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
