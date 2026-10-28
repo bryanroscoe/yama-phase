@@ -428,6 +428,7 @@ fn continuous_modification_quantity(
         | CM::AddAllCreatureTypes
         | CM::AddAllBasicLandTypes
         | CM::AddAllLandTypes
+        | CM::AddAllNonbasicLandTypes
         | CM::AddChosenSubtype { .. }
         | CM::AddChosenColor { .. }
         | CM::RemoveChosenKeyword
