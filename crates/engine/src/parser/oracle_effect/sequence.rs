@@ -2613,6 +2613,9 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("when "),
         tag("whenever "),
         tag("for each "),
+        // "Then for each opponent who …, <body>" (Great Unclean One, Wurmquake)
+        // — the same leading iteration prefix after a sequencing "then".
+        tag("then for each "),
         tag("then if "),
         // "then, if ..." (with comma after "then") — same scoping as "then if".
         // Regression: A Good Thing ("Then, if you have 1,000 or more life, you
