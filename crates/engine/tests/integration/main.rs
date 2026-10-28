@@ -2142,6 +2142,7 @@ mod commanders_plate_protection;
 mod display_identity_serde;
 mod etb_trigger_order_mana_window;
 mod event_window_trigger_gate;
+mod hashep_oasis_sacrifices_itself;
 mod magnificent_end_tapped_target_cost;
 mod put_target_count_entry_counters;
 mod risky_move_gain_control_trigger;
