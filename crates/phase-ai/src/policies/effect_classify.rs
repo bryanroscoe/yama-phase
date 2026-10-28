@@ -2,12 +2,12 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope,
-    PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue, QuantityExpr,
-    ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
-    TriggerDefinition, TypeFilter,
+    AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef, Effect,
+    EffectScope, FilterProp, PerpetualGrantModification, PerpetualModification, PlayerFilter,
+    PtValue, QuantityExpr, ResolvedAbility, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
 };
-use engine::types::counter::CounterType;
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
@@ -99,6 +99,129 @@ fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
         CounterType::Generic(s) if s.starts_with('+') => EffectPolarity::Beneficial,
         CounterType::Generic(s) if s.starts_with('-') => EffectPolarity::Harmful,
         CounterType::Generic(_) => EffectPolarity::Contextual,
+    }
+}
+
+/// CR 122.1 + CR 613.1: A named counter with no rules meaning of its own (Omo,
+/// Queen of Vesuva's everything counter) does whatever the static ability that
+/// cares about it says ("each land with an everything counter on it is every
+/// land type in addition to its other types").
+///
+/// The polarity is read off the statics of the object that places the counter:
+/// a static whose affected set requires at least one counter of this kind
+/// applies exactly to that counter's bearers, so its mode and modifications are
+/// the counter's effect on its bearer. A named counter defined elsewhere, or by
+/// statics that disagree, stays `Contextual`; every other counter keeps
+/// [`counter_sign_polarity`].
+pub(crate) fn counter_polarity_for_source(
+    counter_type: &CounterType,
+    source: Option<&GameObject>,
+) -> EffectPolarity {
+    let base = counter_sign_polarity(counter_type);
+    if base != EffectPolarity::Contextual || !matches!(counter_type, CounterType::Generic(_)) {
+        return base;
+    }
+    let Some(source) = source else {
+        return base;
+    };
+    combine_polarities(
+        source
+            .static_definitions
+            .iter_unchecked()
+            .filter(|sd| {
+                sd.affected
+                    .as_ref()
+                    .is_some_and(|filter| filter_requires_counter(filter, counter_type))
+            })
+            .map(static_definition_polarity),
+    )
+}
+
+/// One verdict from several signals: unanimous non-`Contextual` signals win,
+/// a mix of beneficial and harmful (or no signal at all) is `Contextual`.
+fn combine_polarities(polarities: impl Iterator<Item = EffectPolarity>) -> EffectPolarity {
+    let (mut beneficial, mut harmful) = (false, false);
+    for polarity in polarities {
+        match polarity {
+            EffectPolarity::Beneficial => beneficial = true,
+            EffectPolarity::Harmful => harmful = true,
+            EffectPolarity::Contextual => {}
+        }
+    }
+    match (beneficial, harmful) {
+        (true, false) => EffectPolarity::Beneficial,
+        (false, true) => EffectPolarity::Harmful,
+        _ => EffectPolarity::Contextual,
+    }
+}
+
+/// A static's effect on the objects it affects: its mode when that carries a
+/// polarity (CantAttack, CantBeBlocked, ...), else its modifications combined.
+fn static_definition_polarity(sd: &StaticDefinition) -> EffectPolarity {
+    match static_mode_polarity(&sd.mode) {
+        EffectPolarity::Contextual => {
+            combine_polarities(sd.modifications.iter().map(modification_polarity))
+        }
+        polarity => polarity,
+    }
+}
+
+/// Whether every object matching `filter` must carry at least one counter of
+/// `counter_type` ("each land with an everything counter on it").
+fn filter_requires_counter(filter: &TargetFilter, counter_type: &CounterType) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| prop_requires_counter(prop, counter_type)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| filter_requires_counter(filter, counter_type)),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty()
+                && filters
+                    .iter()
+                    .all(|filter| filter_requires_counter(filter, counter_type))
+        }
+        _ => false,
+    }
+}
+
+/// CR 122.1: "with a <kind> counter on it" — a count of that exact kind that
+/// can't be zero. "Without", "no more than" and dynamic thresholds don't count.
+fn prop_requires_counter(prop: &FilterProp, counter_type: &CounterType) -> bool {
+    let FilterProp::Counters {
+        counters: CounterMatch::OfType(kind),
+        comparator,
+        count: QuantityExpr::Fixed { value },
+    } = prop
+    else {
+        return false;
+    };
+    kind == counter_type
+        && match comparator {
+            Comparator::GE | Comparator::EQ => *value >= 1,
+            Comparator::GT => *value >= 0,
+            Comparator::LT | Comparator::LE | Comparator::NE => false,
+        }
+}
+
+/// [`effect_polarity`], with named counters classified by the statics of the
+/// object that places or removes them (see [`counter_polarity_for_source`]).
+/// Use it wherever the effect's source is known.
+pub(crate) fn effect_polarity_for_source(
+    effect: &Effect,
+    source: Option<&GameObject>,
+) -> EffectPolarity {
+    match effect {
+        Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
+            counter_polarity_for_source(counter_type, source)
+        }
+        Effect::RemoveCounter {
+            counter_type: Some(counter_type),
+            ..
+        } => invert(counter_polarity_for_source(counter_type, source)),
+        _ => effect_polarity(effect),
     }
 }
 
@@ -1070,7 +1193,9 @@ pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
     let effects = ctx.effects();
 
     // Check active effects for a clear polarity signal.
-    let dominant_polarity = effects.first().map(|e| effect_polarity(e));
+    let dominant_polarity = effects
+        .first()
+        .map(|e| effect_polarity_for_source(e, ctx.source_object()));
     match dominant_polarity {
         Some(EffectPolarity::Beneficial) => return true,
         Some(EffectPolarity::Harmful) => return false,
@@ -1580,7 +1705,12 @@ fn player_impact(
         Effect::LoseLife { amount, .. } => {
             -quantity_weight(state, source_controller, source_id, amount, 0.15)
         }
-        _ => match effect_polarity(effect) {
+        _ => match effect_polarity_for_source(
+            effect,
+            state
+                .zip(source_id)
+                .and_then(|(state, id)| state.objects.get(&id)),
+        ) {
             EffectPolarity::Beneficial => 1.0,
             EffectPolarity::Harmful => -1.0,
             EffectPolarity::Contextual => 0.0,
@@ -1976,6 +2106,12 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::AddAllCreatureTypes
+        // CR 205.3i + CR 305.6: gaining land types "in addition to its other
+        // types" adds the basic types' mana abilities and every land-type payoff
+        // and takes nothing away. Setting a land's subtype (CR 305.7, Blood
+        // Moon) is a different modification.
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::AddSubtype { .. } => EffectPolarity::Beneficial,
