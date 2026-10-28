@@ -2421,7 +2421,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
-        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. } => false,
     }
 }
 
@@ -2759,7 +2759,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
-        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. } => false,
     }
 }
 
@@ -3084,7 +3084,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::ManaSpentToCast { .. }
         // CR 903.4: color identity is fixed by the printed card.
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. }
         | QuantityRef::VoteCount { .. } => CharacteristicKinds::EMPTY,
     }
 }
@@ -3359,7 +3359,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
-        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount { .. } => false,
     }
 }
 
@@ -6008,9 +6008,14 @@ fn resolve_ref(
         QuantityRef::ColorsInCommandersColorIdentity => usize_to_i32_saturating(
             super::commander::commander_color_identity(state, controller).len(),
         ),
-        QuantityRef::CommanderCastFromCommandZoneCount => u32_to_i32_saturating(
-            super::commander::commander_casts_from_command_zone(state, controller),
-        ),
+        // CR 903.8: command-zone casts of `player`'s commander(s) this game.
+        QuantityRef::CommanderCastFromCommandZoneCount { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                u32_to_i32_saturating(super::commander::commander_casts_from_command_zone(
+                    state, p.id,
+                ))
+            })
+        }
         // CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
         // Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
         // or in the command zone" pattern. Returns the mana value of the first matching commander
@@ -14213,7 +14218,9 @@ mod tests {
         record_commander_cast(&mut state, opponent_commander);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+            qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);

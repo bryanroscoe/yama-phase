@@ -14282,7 +14282,9 @@ fn effect_copy_it_for_each_commander_cast_sets_repeat_for() {
     assert!(matches!(
         def.repeat_for,
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::CommanderCastFromCommandZoneCount
+            qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                player: PlayerScope::Controller,
+            }
         })
     ));
 }
@@ -95004,6 +95006,81 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
             target: TargetFilter::ScopedPlayer
         }
     ));
+}
+
+/// Parse a whole card and assert that no ability, trigger or static carries an
+/// unimplemented gap.
+fn parse_command_zone_cast_card(
+    text: &str,
+    name: &str,
+    card_type: &str,
+) -> crate::parser::oracle::ParsedAbilities {
+    let parsed = parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+    let json = serde_json::to_string(&(&parsed.abilities, &parsed.triggers, &parsed.statics))
+        .expect("serialize");
+    assert!(!json.contains("Unimplemented"), "unexpected gap: {json}");
+    parsed
+}
+
+/// CR 903.8 + CR 107.1: "draws X cards plus an additional card for each time
+/// they've cast a commander from the command zone this game" — the head count
+/// plus the target player's command-zone casts.
+#[test]
+fn commanders_insight_plus_additional_for_each_commander_cast() {
+    let parsed = parse_command_zone_cast_card(
+        "Target player draws X cards plus an additional card for each time they've cast a commander from the command zone this game.",
+        "Commander's Insight",
+        "Sorcery",
+    );
+    let Effect::Draw { count, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("expected Draw, got {:?}", parsed.abilities[0].effect);
+    };
+    assert_eq!(
+        count,
+        &QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CommanderCastFromCommandZoneCount {
+                        player: PlayerScope::Target,
+                    }
+                },
+            ],
+        }
+    );
+}
+
+/// CR 903.3 + CR 903.8 + CR 601.2f: "Your commander costs {1} less to cast for
+/// each time it's been cast from the command zone this game."
+#[test]
+fn myth_unbound_commander_cost_reduction_per_command_zone_cast() {
+    let parsed = parse_command_zone_cast_card(
+        "Your commander costs {1} less to cast for each time it's been cast from the command zone this game.\nWhenever your commander is put into the command zone from anywhere, draw a card.",
+        "Myth Unbound",
+        "Enchantment",
+    );
+    let crate::types::statics::StaticMode::ModifyCost {
+        spell_filter,
+        dynamic_count,
+        ..
+    } = &parsed.statics[0].mode
+    else {
+        panic!("expected ModifyCost, got {:?}", parsed.statics[0].mode);
+    };
+    assert!(matches!(
+        spell_filter,
+        Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::IsCommander)
+    ));
+    assert_eq!(
+        dynamic_count,
+        &Some(QuantityRef::CommanderCastFromCommandZoneCount {
+            player: PlayerScope::Controller,
+        })
+    );
 }
 
 /// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's

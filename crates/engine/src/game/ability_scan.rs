@@ -3145,7 +3145,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         },
         QuantityRef::ManaSpentToCast { .. } => Axes::CONSERVATIVE,
         QuantityRef::ColorsInCommandersColorIdentity => Axes::NONE,
-        QuantityRef::CommanderCastFromCommandZoneCount => Axes::NONE,
+        QuantityRef::CommanderCastFromCommandZoneCount { player } => scan_player_scope(player),
         QuantityRef::CommanderManaValue { owner, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_controller_ref(owner));
