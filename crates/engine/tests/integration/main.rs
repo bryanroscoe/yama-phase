@@ -334,3 +334,5 @@ mod jace_multiverse_architect_attack_restriction;
 mod zaffai_thunder_conductor_magecraft;
 
 mod furygale_flocking_tokens_per_opponent;
+
+mod study_hall_costed_any_color_land;

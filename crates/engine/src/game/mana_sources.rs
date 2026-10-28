@@ -698,6 +698,10 @@ pub(crate) fn live_land_mana_option_for_selection(
     selection: &ManaSourceSelection,
 ) -> Result<ManaSourceOption, EngineError> {
     let object_id = selection.source.object_id;
+    let deferred = matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    );
     let aura_sources = taps_for_mana_trigger_sources(state);
     let gates = mana_abilities::ManaActivationGates::compute(state);
     let mut matches = activatable_land_mana_options_indexed_gated(
@@ -708,13 +712,25 @@ pub(crate) fn live_land_mana_option_for_selection(
         &gates,
     )
     .into_iter()
-    .filter(|option| option.semantic_selection(state).as_ref() == Some(selection));
+    .filter(|option| {
+        option.semantic_selection(state).as_ref() == Some(selection)
+            || (deferred && manual_selection_for_option(state, option).as_ref() == Some(selection))
+    });
     let option = matches.next().ok_or_else(|| {
         EngineError::ActionNotAllowed(
             "Mana source selection is stale or no longer legal".to_string(),
         )
     })?;
-    if matches.next().is_some() {
+    // CR 605.3b: a deferred "one mana of any color" selection (the only form
+    // `activatable_mana_source_selections` offers for a land's any-color
+    // ability, Study Hall's "{1}, {T}: Add one mana of any color") names every
+    // per-color row of that one ability; its color is chosen as it resolves.
+    let ambiguous = if deferred {
+        matches.any(|other| other.ability_index != option.ability_index)
+    } else {
+        matches.next().is_some()
+    };
+    if ambiguous {
         return Err(EngineError::InvalidAction(
             "Mana source selection ambiguously matches multiple live options".to_string(),
         ));
@@ -991,6 +1007,17 @@ pub(crate) fn preflight_tap_land_action(
     .into_iter()
     .filter(|candidate| candidate == action)
     .count();
+    // CR 605.3b: a land's any-color ability is offered as one deferred
+    // selection whose color is chosen as it resolves; it names the per-color
+    // rows of that ability rather than any one of them.
+    if matches == 0
+        && matches!(
+            selection.output,
+            ManaSourceOutput::DeferredColorChoice { .. }
+        )
+    {
+        return live_land_mana_option_for_selection(state, waiting_player, selection).map(|_| ());
+    }
     match matches {
         1 => Ok(()),
         0 => Err(EngineError::ActionNotAllowed(
@@ -1002,30 +1029,14 @@ pub(crate) fn preflight_tap_land_action(
     }
 }
 
-/// Activate one already-revalidated live land-mana option.
+/// Activate one already-revalidated live mana option.
 ///
 /// This is the single manual-activation authority for indexed printed mana
 /// abilities and subtype/Aura-derived fallback rows. It owns the exact
 /// production override, triggered-mana override provenance, tap/cost payment,
 /// mana production, and undo bookkeeping.
-pub(crate) fn activate_mana_source_option(
-    state: &mut GameState,
-    player: PlayerId,
-    option: &ManaSourceOption,
-    events: &mut Vec<GameEvent>,
-    resume: ManaAbilityResume,
-) -> Result<WaitingFor, EngineError> {
-    activate_mana_source_option_with_output(
-        state,
-        player,
-        option,
-        ManaSourceOutput::Concrete(option.mana_type),
-        events,
-        resume,
-    )
-}
-
-/// Activate a live source using the preserved output provenance. Deferred
+///
+/// It activates using the preserved output provenance. Deferred
 /// flexible outputs deliberately pass no production override, so the existing
 /// ManaChoice flow remains the single authority for the eventual color choice.
 pub(crate) fn activate_mana_source_option_with_output(

@@ -15613,7 +15613,7 @@ fn apply_non_priority_pass_action(
             let wf =
                 handle_tap_land_for_mana(state, player, &selection, resume.clone(), &mut events)?;
             // CR 605.1b + CR 605.4a: the manual land tap has no cursor wrapper
-            // of its own — `activate_mana_source_option`'s no-ability branch
+            // of its own — `activate_mana_source_option_with_output`'s no-ability branch
             // taps and produces directly — so this arm IS its completed mana
             // frame and runs the same typed empty-ledger preparation the cursor
             // path runs internally. It resolves the TapsForMana triggered mana
@@ -19886,7 +19886,16 @@ pub(super) fn handle_tap_land_for_mana(
     // is revalidated against live engine-authored options before any cost or
     // production is applied.
     let option = mana_sources::live_land_mana_option_for_selection(state, player, selection)?;
-    mana_sources::activate_mana_source_option(state, player, &option, events, resume)
+    // CR 605.3b: a deferred any-color selection keeps its color choice for
+    // the ability's resolution; a concrete one produces the color it names.
+    mana_sources::activate_mana_source_option_with_output(
+        state,
+        player,
+        &option,
+        selection.output,
+        events,
+        resume,
+    )
 }
 
 /// CR 605.3b: Reverse a manual land tap — untap source and remove its mana from pool.
