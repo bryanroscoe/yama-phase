@@ -1772,7 +1772,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             }
         };
     let optional_player = optional_player_from_effect_body(&effect_without_if)
-        .or_else(|| after_structural_if.and_then(optional_player_from_effect_body));
+        .or_else(|| after_structural_if.and_then(optional_player_from_effect_body))
+        // CR 109.5 + CR 608.2c: on a phase trigger scoped to another player's
+        // turn ("at the beginning of combat on each opponent's turn, they
+        // may …"), "they" is that turn's player, bound as the scoped player.
+        .map(|player| {
+            if condition_introduces_scoped_phase_player(&cond_lower) {
+                TargetFilter::ScopedPlayer
+            } else {
+                player
+            }
+        });
 
     // CR 608.2c (resolution-order instructions): "You may" at the start of
     // the effect text makes the triggered effect optional at resolution.
@@ -2420,6 +2430,17 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         if let Some(ability) = execute.as_deref_mut() {
             if ability.optional_player.is_none() && ability.optional_for.is_none() {
                 ability.optional_player = Some(optional_player.clone());
+            }
+            // CR 608.2d + CR 118.1: "they may pay {N}": the player offered the
+            // choice is the one who pays. A bare "pay" clause defaults its payer
+            // to the ability's controller, and `PayCost` offers its choice to its
+            // payer, so without this the controller would pay for that player.
+            if let (Effect::PayCost { payer, .. }, Some(offered)) =
+                (&mut *ability.effect, ability.optional_player.as_ref())
+            {
+                if *payer == TargetFilter::Controller {
+                    *payer = offered.clone();
+                }
             }
         }
     }
