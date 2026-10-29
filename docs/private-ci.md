@@ -5,7 +5,9 @@ action-pin audit on saget. These remain GitHub Actions workflows with their
 existing test commands, test shards, WASM/Android checks and AI workloads.
 `CI_LINUX_RUNNER` selects JSON runner labels; unset retains GitHub-hosted Linux.
 The audit follows this fork's CI workflow ID, not the upstream repository's ID.
-CI explicitly installs stable Rust 1.98.1, matching the fork's stable-build policy.
+Production/lint/WASM/AI builds use stable Rust 1.98.1, matching the fork's
+stable-build policy. The test archive and shards retain pinned nightly-2026-04-19
+because probe-pin's existing libtest JSON tests require nightly; no tests are skipped.
 
 From the `bryanroscoe/sagetserver` checkout:
 
