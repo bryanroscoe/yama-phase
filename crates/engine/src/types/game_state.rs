@@ -24324,9 +24324,9 @@ declare_game_state! {
     /// persisting or not, and not resolution-scoped) and from the source's
     /// `ChosenAttribute::Color` history (which CR 607.2d readers own).
     ///
-    /// Written only on the exact-object binding path, so a `persist: false`
-    /// printed `Choose a color.` — the F1 class — still writes nothing and
-    /// still resolves to a no-op. That gate is what keeps F1 out of this change.
+    /// Compatibility record written only on the exact-object binding path.
+    /// Current-resolution color consumers use `named_color_this_resolution`,
+    /// which also records nonpersisting choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
@@ -24335,9 +24335,10 @@ declare_game_state! {
     /// of that color"). Unlike last_named_choice, a later choice of another
     /// kind (a number, a player) doesn't overwrite it, and a parked
     /// continuation doesn't clear it; unlike chosen_color_this_resolution,
-    /// a non-persisting chooser writes it, so its readers are only those that
-    /// name "that color" within the same resolution. Cleared at every
-    /// top-level resolution.
+    /// a non-persisting chooser writes it too. This is the current-resolution
+    /// authority for "that color" and transient chosen-color keyword snapshots.
+    /// Cleared at every top-level resolution; inline mana subresolutions save
+    /// and restore the outer answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
