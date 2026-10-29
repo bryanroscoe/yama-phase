@@ -1,0 +1,40 @@
+# Private fork CI
+
+The `bryanroscoe/yama-phase` fork can run its core CI, game-AI gates and trusted
+action-pin audit on saget. These remain GitHub Actions workflows with their
+existing test commands, test shards, WASM/Android checks and AI workloads.
+`CI_LINUX_RUNNER` selects JSON runner labels; unset retains GitHub-hosted Linux.
+The audit follows this fork's CI workflow ID, not the upstream repository's ID.
+
+From the `bryanroscoe/sagetserver` checkout:
+
+```sh
+python3 scripts/ci_runners.py register --repo yama-phase
+python3 scripts/ci_runners.py switch saget --repo yama-phase --apply
+python3 scripts/ci_runners.py switch github --repo yama-phase --apply
+```
+
+The saget value is `["self-hosted","Linux","X64","saget-ci"]`; hosted is
+`["ubuntu-24.04"]`. Omit `--apply` to preview. Newly scheduled jobs use the
+selection; assigned jobs finish on their original runner. Hosted private jobs
+need available account minutes. Existing GitHub artifact/data-cache transfers
+remain subject to the account's storage quota even with self-hosted compute.
+
+The private `saget-yama-phase-ci` worker has its own container, network, runner
+state, Cargo/tool/Android/Gradle caches and no Docker socket or production mounts.
+Fork PR execution must remain disabled at repository level. Tools install into
+writable project caches; checkout target symlinks preserve existing script/artifact
+paths. Rust target cache and bounded local sccache stay on saget instead of being
+uploaded as GitHub Cargo caches. Hosted-only disk pruning never runs here.
+
+All private workers share a two-CPU/12-GiB parent and a whole-job slot with Yama
+production builds. Local job budgets include that wait. This changes throughput
+and wall-clock timing; it does not reduce test/game counts or establish comparable
+performance evidence between hosted and saget hardware. Temporary checkouts are
+removed after jobs, while useful tools/dependency caches remain.
+
+Inherited release/deployment/maintenance workflows keep their existing hosted
+routing and are outside this CI migration. The two core-CI R2 publishing steps
+require the additional `CI_ENABLE_PUBLISHING == 'true'` opt-in, which is unset
+for this fork. Registration and CI validation do not authorize publishing,
+application deployment, upstream changes, or moving Yama's pinned engine revision.

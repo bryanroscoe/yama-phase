@@ -1,0 +1,28 @@
+name: Prepare private CI worker
+description: Configure dedicated writable tools and build outputs on the private runner.
+runs:
+  using: composite
+  steps:
+    - name: Prepare saget caches
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$GITHUB_REPOSITORY" = bryanroscoe/yama-phase
+        mkdir -p /ci-cache/tools /ci-cache/target /ci-cache/android /ci-cache/gradle /ci-cache/sccache
+        # Preserve scripts/artifact paths while compiling into one dedicated cache.
+        for path in target client/src-tauri/target; do
+          if [ -e "$path" ] || [ -L "$path" ]; then
+            test "$(readlink "$path")" = /ci-cache/target
+          else
+            mkdir -p "$(dirname "$path")"
+            ln -s /ci-cache/target "$path"
+          fi
+        done
+        echo 'RUNNER_TOOL_CACHE=/ci-cache/tools' >> "$GITHUB_ENV"
+        echo 'CARGO_BUILD_JOBS=2' >> "$GITHUB_ENV"
+        echo 'ANDROID_HOME=/ci-cache/android' >> "$GITHUB_ENV"
+        echo 'ANDROID_SDK_ROOT=/ci-cache/android' >> "$GITHUB_ENV"
+        echo 'GRADLE_USER_HOME=/ci-cache/gradle' >> "$GITHUB_ENV"
+        echo 'SCCACHE_DIR=/ci-cache/sccache' >> "$GITHUB_ENV"
+        echo 'SCCACHE_CACHE_SIZE=2G' >> "$GITHUB_ENV"

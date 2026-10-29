@@ -33,18 +33,23 @@ permissions:
 jobs:
   rust-lint:
     name: Rust lint (fmt, clippy, parser gate)
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
     # retain a bounded job while leaving room for the remaining lint gates.
-    timeout-minutes: 60
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 60 }}
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # Full history so the parser-combinator gate can diff against origin/main.
           fetch-depth: 0
 
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
@@ -52,7 +57,7 @@ jobs:
 
       - name: Enable sccache
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
@@ -214,12 +219,18 @@ jobs:
 
   rust-test-build:
     name: Rust tests (build archive)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 60 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - name: Free runner disk for Rust test linking
+        if: runner.environment == 'github-hosted'
         # Build the workspace's test binaries once. Keep the Rust caches intact
         # and reclaim only unused hosted-image payloads before setup-rust-toolchain
         # restores/saves Cargo state.
@@ -243,6 +254,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
@@ -250,7 +262,7 @@ jobs:
 
       - name: Enable sccache
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
@@ -299,20 +311,25 @@ jobs:
   rust-test:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Archive downloads can consume over 10 minutes before tests begin.
     # Keep a bounded job with time for each shard to finish its tests.
-    timeout-minutes: 30
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
       # available but does not build test binaries; those come from the archive.
       # Do not restore or save a Rust target cache: the archive is the cache.
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
@@ -352,16 +369,21 @@ jobs:
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
           fetch-depth: 2
 
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
@@ -369,7 +391,7 @@ jobs:
 
       - name: Enable sccache
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
@@ -700,7 +722,7 @@ jobs:
           jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.stamped.json
 
       - name: Upload data to R2 (preview)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: vars.CI_ENABLE_PUBLISHING == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -728,7 +750,7 @@ jobs:
         # bounded by distinct parser states, not commit count. best-effort
         # (continue-on-error): a missed publish just defers a PR's comment to
         # "baseline pending" until the next main push, never wedges main.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: vars.CI_ENABLE_PUBLISHING == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -749,14 +771,19 @@ jobs:
     # Its output (draft-pools.json) is not consumed by ci.yml — this is a
     # main-only smoke test that draft-pool-gen still compiles and runs.
     name: Draft pools (smoke)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    timeout-minutes: 20
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 20 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           # No wasm32 target: draft-pool-gen is a native binary. The target list
           # isn't part of the rust-cache key, so omitting it still shares the
           # rust-debug cache with card-data-gate.
@@ -799,13 +826,19 @@ jobs:
 
   wasm-check:
     name: WASM compile check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 10 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
@@ -817,13 +850,18 @@ jobs:
     # consumes this job's entire 15-minute timeout.
     if: ${{ false }}
     name: Tauri compile check + tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 15 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-tauri
           cache-workspaces: |
             . -> target
@@ -862,10 +900,15 @@ jobs:
 
   android-debug-apk:
     name: Android debug APK (ARM64)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -898,6 +941,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: aarch64-linux-android
           cache-shared-key: rust-tauri-android-arm64
           cache-workspaces: client/src-tauri -> target
@@ -971,8 +1015,8 @@ jobs:
 
   rust-check:
     name: Rust (fmt, clippy, test, coverage-gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     needs:
       - rust-lint
       - rust-test-build
@@ -982,7 +1026,7 @@ jobs:
       - wasm-check
       - tauri-check
       - android-debug-apk
-    if: always()
+    if: ${{ (always()) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - name: Check split Rust jobs
         env:
@@ -1010,11 +1054,16 @@ jobs:
 
   lobby-worker-test:
     name: Lobby worker (pnpm test)
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Cache-hit npm ci runs have exceeded five minutes; leave room for the measured slow tail.
-    timeout-minutes: 10
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 10 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1034,13 +1083,16 @@ jobs:
 
   card-bot-test:
     name: Card bot (bun test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The tests never touch git; don't leave the token in .git/config.
           persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -1057,12 +1109,16 @@ jobs:
 
   frontend:
     name: Frontend (lint, type-check, test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 15 }}
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1121,15 +1177,19 @@ jobs:
 
   draft-match-wasm-proof:
     name: Draft match proof (real WASM)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
           rustflags: ""

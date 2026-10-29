@@ -21,20 +21,25 @@ permissions:
 jobs:
   ai-gate:
     name: Paired-seed AI gate
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # 30m was too tight and flaked out on slow runners. Measured budget on a
     # cache miss: ~6.5m for the "Generate card data" step (5m `tool` build + gen)
     # + a cold debug build + the debug run itself (30 games at ~1.1m/game on a
     # slow runner ≈ 34m). Hosted-runner speed varies ~2x, so a fast runner
     # finishes well under 30m while a slow one overruns. 60m preserves the full
     # `--games 10` coverage; the ceiling only bills the failure case.
-    timeout-minutes: 60
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 60 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
       - name: Restore AI card data caches
@@ -51,8 +56,8 @@ jobs:
 
   ai-gate-nightly:
     name: Nightly AI gate drift monitor
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'schedule') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # The gate's workload flags MUST equal the corresponding fields in
     # crates/phase-ai/baselines/suite-baseline.json. The comparator refuses a pair
     # whose workloads disagree, so a divergent value here makes this job incapable
@@ -63,12 +68,17 @@ jobs:
     # registry, plus mirror classification at a low-power band — not a drift gate
     # at the band a larger per-matchup sample would give. The ceiling only bills
     # the failure case; a job that finishes early stops early.
-    timeout-minutes: 300
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 300 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
       - name: Restore AI card data caches
@@ -115,20 +125,25 @@ jobs:
 
   ai-perf-gate:
     name: Decision-cost perf gate
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Same runner-variance overrun as the paired gate above. Measured budget on
     # a cache miss: ~6.5m card-data gen + cold debug build + the perf suite
     # (PERF_SAMPLE_COUNT=5 cold child processes × 3 scenarios × PERF_ACTION_CAP
     # 3000 actions ≈ 21m in debug on a slow runner). The per-counter median
     # assertion (#4878) is variance-robust; the wall-clock is not. 60m gives
     # headroom without changing the fixed workload.
-    timeout-minutes: 60
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 60 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
       - name: Restore AI card data caches
@@ -151,14 +166,19 @@ jobs:
 
   ai-perf-gate-nightly:
     name: Nightly decision-cost perf drift monitor
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: ${{ (github.event_name == 'schedule') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
       - name: Restore AI card data caches

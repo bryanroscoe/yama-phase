@@ -33,11 +33,11 @@ permissions: {}
 jobs:
   audit:
     name: Audit action pins from base
-    # 246030356 is .github/workflows/ci.yml. Opaque, but a pull request can
+    # 398415720 is .github/workflows/ci.yml. Opaque, but a pull request can
     # rename that workflow and cannot renumber it.
-    if: github.event.workflow_run.workflow_id == 246030356
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: github.event.workflow_run.workflow_id == 398415720
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     # Read-only. This job handles the untrusted tree.
     permissions:
       contents: read
@@ -93,9 +93,9 @@ jobs:
   report:
     name: Report the audit result
     needs: audit
-    if: always() && github.event.workflow_run.workflow_id == 246030356
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: always() && github.event.workflow_run.workflow_id == 398415720
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     # The only job with a write token, and it never fetches or reads the
     # evaluated tree -- it publishes a verdict the audit job already reached.
     permissions:
