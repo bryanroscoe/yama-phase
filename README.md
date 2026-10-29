@@ -1,3 +1,6 @@
+> **Yama Phase:** private development fork for Yama. See the [fork guide](docs/YAMA.md).
+> Upstream project documentation follows below.
+
 <p align="center">
   <img src="client/public/logo.webp" alt="phase.rs" width="280" />
 </p>
