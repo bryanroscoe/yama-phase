@@ -1306,6 +1306,7 @@ mod nix_counter_no_mana_spent;
 mod no_witnesses_most_creatures_investigate;
 mod non_owner_cast_cost_payer;
 mod noncreature_loses_creature_types;
+mod nonpersisting_color_choice_grants;
 mod normal_cost_grant_no_mana_cost_9751;
 mod notion_thief_opponent_draw_redirect;
 mod nth_spell_ordinal_cost_reduction;
