@@ -42,7 +42,7 @@ const ACTIONS: ActionDef[] = [
 function CardActionButton({ action, disabled }: { action: ActionDef; disabled: boolean }) {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
-  const src = `/icons/sections/${action.icon}.png`;
+  const src = `${import.meta.env.BASE_URL}icons/sections/${action.icon}.png`;
   return (
     <MenuActionTile
       tone={action.tone}
@@ -119,7 +119,7 @@ function ResumeHero() {
       className="group relative w-full overflow-hidden rounded-card border border-ember/25 p-5 text-left transition-all duration-150 surface-card hover:-translate-y-[3px] hover:border-ember/40"
     >
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(130%_120%_at_92%_0%,rgba(180,83,30,0.28),transparent_46%)]" />
-      <img src="/logo_only.webp" alt="" aria-hidden="true" className="pointer-events-none absolute -right-10 top-1/2 w-44 -translate-y-1/2 -rotate-6 opacity-[0.06] grayscale" />
+      <img src={`${import.meta.env.BASE_URL}logo_only.webp`} alt="" aria-hidden="true" className="pointer-events-none absolute -right-10 top-1/2 w-44 -translate-y-1/2 -rotate-6 opacity-[0.06] grayscale" />
       <div className="relative flex flex-col gap-3">
         <div className="flex flex-col gap-3 min-[480px]:flex-row min-[480px]:items-center min-[480px]:gap-4">
           <div className="min-w-0 flex-1">
@@ -141,7 +141,7 @@ function ResumeHero() {
             </div>
           </div>
           <span className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-full border border-ember-soft/30 bg-ember/[0.12] px-4 py-2.5 text-sm font-medium text-ember-text transition-colors group-hover:border-ember-soft/50 min-[480px]:w-auto">
-            <img src="/icons/sections/resume.png" alt="" aria-hidden="true" className="h-4 w-4 opacity-80" />
+            <img src={`${import.meta.env.BASE_URL}icons/sections/resume.png`} alt="" aria-hidden="true" className="h-4 w-4 opacity-80" />
             {primary.cta}
           </span>
         </div>
@@ -303,7 +303,7 @@ function CoverageCard() {
   return (
     <button type="button" onClick={() => navigate("/coverage")} className={`${INFO_CARD} cursor-pointer text-left transition-colors hover:border-hairline-hover`}>
       <div className={`${SECTION_LABEL} mb-3 flex items-center gap-2`}>
-        <img src="/icons/sections/coverage.png" alt="" aria-hidden="true" className="h-3.5 w-3.5 opacity-70" />
+        <img src={`${import.meta.env.BASE_URL}icons/sections/coverage.png`} alt="" aria-hidden="true" className="h-3.5 w-3.5 opacity-70" />
         {t("home.coverage.heading")}
       </div>
       <div className="grid grid-cols-2 gap-x-5 gap-y-1.5">
@@ -330,7 +330,7 @@ export function HomeDashboard() {
   const masthead = (
     <div className="flex w-full flex-col items-start">
       <img
-        src="/wordmark.webp"
+        src={`${import.meta.env.BASE_URL}wordmark.webp`}
         alt="phase.rs"
         className="h-10 w-auto drop-shadow-[0_0_16px_rgba(251,146,60,0.25)]"
       />

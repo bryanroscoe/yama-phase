@@ -263,8 +263,12 @@ function buildManifest(buildHash: string): Plugin {
 export default defineConfig(({ mode }) => {
   const buildHash = gitHash();
   const offlineShellMarkerFilename = `offline-shell-${buildHash}.json`;
+  // Where the client is served: the site root by default, or a subpath (e.g.
+  // PHASE_BASE_PATH=/board/) when another site hosts it. Must end in "/".
+  const base = process.env.PHASE_BASE_PATH || "/";
 
   return {
+  base,
   resolve: {
     alias: {
       "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
@@ -295,7 +299,7 @@ export default defineConfig(({ mode }) => {
       manifest: false, // Use public/manifest.json
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
-        additionalManifestEntries: [{ url: `/${offlineShellMarkerFilename}`, revision: buildHash }],
+        additionalManifestEntries: [{ url: `${base}${offlineShellMarkerFilename}`, revision: buildHash }],
         ignoreURLParametersMatching: [/^utm_/, /^fbclid$/, /^phase-precache-probe$/],
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
         // Workbox's default globPatterns (`**/*.{js,wasm,css,html}`) omit fonts,
