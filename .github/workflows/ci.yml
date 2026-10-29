@@ -368,7 +368,11 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/5 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
+        run: |
+          # Each shard gets a fresh archive extraction. The persistent target
+          # cache is shared between jobs and must not hold nested archive output.
+          nextest_extract="$(mktemp -d "$RUNNER_TEMP/nextest.XXXXXX")"
+          cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/5 --archive-file nextest-archive.tar.zst --extract-to "$nextest_extract" --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)

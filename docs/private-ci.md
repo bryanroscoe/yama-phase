@@ -25,7 +25,8 @@ The private `saget-yama-phase-ci` worker has its own container, network, runner
 state, Cargo/tool/Android/Gradle caches and no Docker socket or production mounts.
 Fork PR execution must remain disabled at repository level. Tools install into
 writable project caches; checkout target symlinks preserve existing script/artifact
-paths. Rust target cache and bounded local sccache stay on saget instead of being
+paths. Each Nextest shard extracts its archive under disposable RUNNER_TEMP,
+so repeated shards cannot collide inside the persistent target cache. Rust target cache and bounded local sccache stay on saget instead of being
 uploaded as GitHub Cargo caches. Hosted-only disk pruning never runs here.
 
 All private workers share a two-CPU/12-GiB parent and a whole-job slot with Yama
