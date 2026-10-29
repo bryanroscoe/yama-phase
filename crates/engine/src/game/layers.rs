@@ -12237,7 +12237,7 @@ fn apply_continuous_effect_filtered(
     //     is baked live, every evaluation, right here);
     // (b) a resolution-generated `AddKeyword { HexproofFrom(ChosenColor) }` grant whose
     //     source announced no colour at all (the `None` fallback arm of
-    //     `snapshot_transient_modifications`, CR 609.3 + follow-up F1) — the
+    //     `snapshot_transient_modifications`, CR 609.3) — the
     //     modification is left unresolved and still needs this live read;
     // (c) `ContinuousModification::AddChosenColor` (CR 105.3) — Mondo Gecko,
     //     Foraging Wickermaw;

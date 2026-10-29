@@ -1369,9 +1369,8 @@ fn snapshot_transient_modifications(
                     ),
                 }
             }
-            // CR 608.2h: the granted "protection/hexproof from
-            // the [chosen] color" requires information from a specific object — the
-            // granting source's chosen colour — and CR 608.2h fixes that answer ONCE, when
+            // CR 608.2c + CR 608.2d: use this resolution's color answer first,
+            // then the source's linked answer (CR 607.2d). CR 608.2h fixes it ONCE, when
             // the effect is applied. Latch it into the payload here so the recipient's
             // keyword is self-contained and a LATER choice by the same source can no
             // longer retroactively change a grant that has already begun.
@@ -1403,12 +1402,8 @@ fn snapshot_transient_modifications(
                         crate::types::keywords::ProtectionTarget::Color(color),
                     ),
                 },
-                // CR 609.3 + follow-up F1: no colour was chosen, because a
-                // PRINTED `Choose a color.` still lowers `persist: false` in the
-                // in-chain imperative route. Measured: a minority of the seam-reaching
-                // pool cards take this arm (census `<SP>/census-base.out`). Leave the
-                // payload untouched so `game/layers.rs`'s existing unresolved handling
-                // stays byte-identical. This is what keeps F1 out of scope.
+                // CR 609.3: no local or linked answer; retain the unresolved
+                // payload for the existing layer handling.
                 None => modification.clone(),
             },
             ContinuousModification::AddKeyword {
@@ -1425,7 +1420,7 @@ fn snapshot_transient_modifications(
                         crate::types::keywords::HexproofFilter::Color(color),
                     ),
                 },
-                // Symmetric with the Protection arm above: CR 609.3 + F1.
+                // CR 609.3: preserve the unresolved payload when no answer exists.
                 None => modification.clone(),
             },
             // CR 608.2d + CR 608.2h: "becomes the creature type / basic land type of

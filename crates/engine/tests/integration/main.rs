@@ -352,3 +352,5 @@ mod each_creature_deals_damage_to_itself;
 mod entered_under_your_control_counter_gap_coverage;
 
 mod damage_history_quantity_gap_coverage;
+
+mod nonpersisting_color_choice_grants;
