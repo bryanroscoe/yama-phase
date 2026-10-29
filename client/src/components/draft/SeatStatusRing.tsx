@@ -114,7 +114,7 @@ function SeatBadge({ seat, isLocal, tally }: SeatBadgeProps) {
         aria-hidden="true"
       >
         <img
-          src={tally === "drafted" ? "/icons/cards.svg" : "/icons/packs.svg"}
+          src={tally === "drafted" ? `${import.meta.env.BASE_URL}icons/cards.svg` : `${import.meta.env.BASE_URL}icons/packs.svg`}
           alt=""
           className={`h-5 w-5 shrink-0 object-contain ${count === 0 ? "opacity-35 grayscale" : ""}`}
         />

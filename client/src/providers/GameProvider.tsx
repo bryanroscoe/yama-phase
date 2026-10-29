@@ -1541,7 +1541,7 @@ export function GameProvider({
                 );
               }
               useMultiplayerStore.getState().setConnectionStatus("disconnected");
-              window.location.href = "/multiplayer";
+              window.location.href = `${import.meta.env.BASE_URL}multiplayer`;
             }
           }
           if (event.type === "error" || event.type === "reconnectFailed") {

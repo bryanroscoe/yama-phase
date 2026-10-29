@@ -30,7 +30,7 @@ export function SplashScreen({ progress, onComplete, label }: SplashScreenProps)
           className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-gray-950"
         >
           <motion.img
-            src="/logo.webp"
+            src={`${import.meta.env.BASE_URL}logo.webp`}
             alt="phase.rs"
             className="mb-4 w-[160px]"
             initial={{ opacity: 0, scale: 0.8 }}
