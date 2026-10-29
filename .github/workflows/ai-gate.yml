@@ -39,6 +39,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
           cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
@@ -78,6 +79,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
           cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
@@ -143,6 +145,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
           cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 
@@ -178,6 +181,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
           cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-ai-gate
 

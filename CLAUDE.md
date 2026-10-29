@@ -7,7 +7,7 @@ repository and `upstream` is `phase-rs/phase`. Read [the fork guide](docs/YAMA.m
 plus a short stack of Yama commits, kept current by rebasing. Publishing upstream PRs or enabling
 upstream release/deployment workflows needs Bryan's instruction. The upstream rules below apply to
 every upstream candidate. On Bryan's Mac use `cargo +stable`, `CARGO_BUILD_JOBS=1`, and keep the
-machine's compiler guard (`~/.config/agent-hygiene/BUILD-LIMITS.md`). GitHub Actions is disabled here.
+machine's compiler guard (`~/.config/agent-hygiene/BUILD-LIMITS.md`). Only the reviewed private CI workflows run here; inherited release/deployment workflows remain disabled.
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 

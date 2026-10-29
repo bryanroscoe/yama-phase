@@ -5,6 +5,7 @@ action-pin audit on saget. These remain GitHub Actions workflows with their
 existing test commands, test shards, WASM/Android checks and AI workloads.
 `CI_LINUX_RUNNER` selects JSON runner labels; unset retains GitHub-hosted Linux.
 The audit follows this fork's CI workflow ID, not the upstream repository's ID.
+CI explicitly installs stable Rust 1.98.1, matching the fork's stable-build policy.
 
 From the `bryanroscoe/sagetserver` checkout:
 
@@ -33,8 +34,9 @@ and wall-clock timing; it does not reduce test/game counts or establish comparab
 performance evidence between hosted and saget hardware. Temporary checkouts are
 removed after jobs, while useful tools/dependency caches remain.
 
-Inherited release/deployment/maintenance workflows keep their existing hosted
-routing and are outside this CI migration. The two core-CI R2 publishing steps
+Only `ci.yml`, `ai-gate.yml` and `action-pin-audit.yml` are enabled at GitHub.
+All inherited release/deployment/maintenance workflows remain disabled and keep
+their existing hosted routing; they are outside this CI migration. The two core-CI R2 publishing steps
 require the additional `CI_ENABLE_PUBLISHING == 'true'` opt-in, which is unset
 for this fork. Registration and CI validation do not authorize publishing,
 application deployment, upstream changes, or moving Yama's pinned engine revision.
