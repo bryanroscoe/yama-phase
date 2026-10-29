@@ -366,11 +366,9 @@ pub(crate) fn bind_named_choice(
         }
     }
 
-    // CR 608.2d then CR 607.2d: record the colour THIS
-    // resolution announced, for `resolution_chosen_color`'s primary read.
-    // Gated on the exact-object binding captured above, so a `persist: false`
-    // printed `Choose a color.` (the F1 class) still writes nothing here and
-    // still falls through to `resolution_chosen_color`'s fallback.
+    // Preserve the narrower persisting-choice compatibility record. The
+    // resolution reader uses `named_color_this_resolution`, written above for
+    // every successful single-color answer, regardless of persistence.
     if persisting_color_answer {
         state.chosen_color_this_resolution = ChoiceValue::from_choice(choice_type, choice)
             .and_then(|value| match value {
@@ -396,7 +394,7 @@ pub(crate) fn resolution_chosen_color(
     state: &GameState,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Option<ManaColor> {
-    state.chosen_color_this_resolution.or_else(|| {
+    state.named_color_this_resolution.or_else(|| {
         state
             .objects
             .get(&source_id)
@@ -628,8 +626,8 @@ fn apply_choice_attributes(
     //   - `GameObject::chosen_color()` — CR 607.2d, the LINKED read: "what did
     //     this object's supplier choose". Oldest-since-entry (first match).
     //   - `choose::resolution_chosen_color()` — CR 608.2d, "what did THIS
-    //     resolution announce". Reads `state.chosen_color_this_resolution`
-    //     (written below by the exact-object binding path), falling back to
+    //     resolution announce". Reads `state.named_color_this_resolution`
+    //     (written by the common answer binder), falling back to
     //     `chosen_color()` for a linked anaphoric reader whose own chooser was
     //     suppressed.
     //   - `GameObject::current_chosen_color()` — "the current answer". Newest
