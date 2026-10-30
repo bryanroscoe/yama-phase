@@ -1,8 +1,9 @@
 // @vitest-environment node
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
-import { loadConfigFromFile, type Plugin, type PluginOption } from "vite";
+import { build, loadConfigFromFile, type Plugin, type PluginOption } from "vite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const CLIENT = path.resolve(__dirname, "../../..");
@@ -49,6 +50,40 @@ function emittedAssets(plugin: Plugin): Array<{ type: string; fileName: string; 
 }
 
 describe("build manifest", () => {
+  it.each([
+    { file: "1", cli: undefined, emitsFont: false },
+    { file: "1", cli: "0", emitsFont: true },
+    { file: "0", cli: "1", emitsFont: false },
+  ])("honors env-file text icons and CLI precedence: %j", async ({ file, cli, emitsFont }) => {
+    vi.stubEnv("VITE_TEXT_ICONS", cli);
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "phase-font-build-")));
+    try {
+      writeFileSync(path.join(root, ".env.production"), `VITE_TEXT_ICONS=${file}\n`);
+      writeFileSync(path.join(root, "index.html"), '<script type="module" src="./main.js"></script>');
+      const css = path.join(CLIENT, "node_modules/mana-font/css/mana.css");
+      writeFileSync(path.join(root, "main.js"), `import ${JSON.stringify(css)};`);
+      const { plugins } = await buildConfig();
+      const fontPlugin = plugins.find((p) => p.name === "trim-mana-font");
+      expect(fontPlugin).toBeDefined();
+      // Exercise the production plugin through Vite's real env-loading and
+      // asset-emission lifecycle, without compiling the unrelated engine WASM.
+      const result = await build({
+        configFile: false,
+        root,
+        envDir: root,
+        mode: "production",
+        logLevel: "silent",
+        plugins: [fontPlugin!],
+        build: { write: false, assetsInlineLimit: 0 },
+      });
+      if (Array.isArray(result) || !("output" in result)) throw new Error("expected one build output");
+      const fonts = result.output.filter((asset) => asset.type === "asset" && asset.fileName.endsWith(".woff2"));
+      expect(fonts.length > 0).toBe(emitsFont);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["/", "/board/", "/games/phase/"])("keeps local data and emitted manifests within %s", async (hostBase) => {
     dataDefaults(hostBase);
     const { base, define, plugins } = await buildConfig();
