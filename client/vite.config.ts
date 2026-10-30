@@ -10,6 +10,7 @@ import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
 import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
+import { visualPackCacheRoute } from "./src/config/visualPackCacheRoute";
 import type { Plugin } from "vite";
 
 generateProtocolVersions();
@@ -492,8 +493,7 @@ export default defineConfig(({ mode }) => {
             // Installed images are committed directly to this Cache Storage
             // bucket by the browser backend. The service worker only reads it;
             // installation owns every write and never revalidates an image.
-            urlPattern: ({ sameOrigin, url }) =>
-              sameOrigin && /^\/__visual-packs\/sha256\/[0-9a-f]{64}\.(jpg|png|webp|svg)$/.test(url.pathname),
+            urlPattern: visualPackCacheRoute,
             handler: "CacheOnly",
             options: {
               cacheName: "phase-visual-pack-scryfall-images-v1",

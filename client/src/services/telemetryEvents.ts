@@ -23,7 +23,15 @@ import { flushNow, installTelemetryLifecycle, trackEvent } from "./telemetry";
  *  component) pass it explicitly. */
 export function coarseRoute(pathname?: string): string {
   if (pathname === undefined && typeof window === "undefined") return "";
-  const path = pathname ?? window.location.pathname;
+  let path = pathname ?? window.location.pathname;
+  // Router callers already have a basename-relative pathname. Only global
+  // error/session hooks read the browser's full hosted path and must strip it.
+  if (pathname === undefined) {
+    const base = import.meta.env.BASE_URL.replace(/\/+$/, "");
+    if (base && (path === base || path.startsWith(`${base}/`))) {
+      path = path.slice(base.length);
+    }
+  }
   const segment = path.split("/").filter(Boolean)[0];
   return segment ? `/${segment}` : "/";
 }
