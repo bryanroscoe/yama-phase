@@ -43,3 +43,6 @@ their existing hosted routing; they are outside this CI migration. The two core-
 require the additional `CI_ENABLE_PUBLISHING == 'true'` opt-in, which is unset
 for this fork. Registration and CI validation do not authorize publishing,
 application deployment, upstream changes, or moving Yama's pinned engine revision.
+
+On saget, the first workflow step waits for CI capacity before checkout. The pre-job hook returns promptly so GitHub can report and cancel queued work. This step runs from RUNNER_TEMP, which exists before checkout, and verifies the runner supports the step-slot protocol. Install/adopt the reviewed sagetserver hooks before running these adapters. Hosted jobs skip this step.
+The Rust summary job still reports failed dependencies, but skips a cancelled workflow so obsolete runs cannot hold the CI concurrency group.

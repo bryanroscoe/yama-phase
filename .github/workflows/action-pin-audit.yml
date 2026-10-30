@@ -42,6 +42,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       # No `ref:` on purpose: the default is the default branch, which is what
       # makes the checker below the reviewed one.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -101,6 +107,12 @@ jobs:
     permissions:
       statuses: write
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - name: Publish the commit status
         env:
           GH_TOKEN: ${{ github.token }}
