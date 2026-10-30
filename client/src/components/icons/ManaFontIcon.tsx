@@ -32,6 +32,7 @@ function markReady(): void {
 }
 
 function startManaFontLoad(): void {
+  if (import.meta.env.VITE_TEXT_ICONS === "1") return;
   if (loadStarted) return;
   loadStarted = true;
   // Non-browser env (SSR/tests without a DOM) or a browser lacking the Font
