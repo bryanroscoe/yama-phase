@@ -221,7 +221,9 @@ pub(crate) fn handle_priority_pass_with_limit(
             let waiting_for = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 reset_priority(state);
                 WaitingFor::Priority {
-                    player: state.active_player,
+                    // CR 117.3b + CR 800.4j: resolving an entry after the active
+                    // player's departure cannot give that departed seat priority.
+                    player: super::engine::living_priority_seat(state),
                 }
             } else {
                 state.waiting_for.clone()
@@ -661,10 +663,11 @@ pub(crate) fn clear_priority_passes(state: &mut GameState) {
     state.priority_pass_count = 0;
 }
 
-/// Reset priority bookkeeping and grant priority to the active player.
+/// Reset priority bookkeeping and grant priority to the active player, or the
+/// next surviving player when that player has left the game (CR 800.4j).
 /// Callers own the concrete rule that grants priority for their flow.
 pub fn reset_priority(state: &mut GameState) {
-    state.priority_player = state.active_player;
+    state.priority_player = super::engine::living_priority_seat(state);
     clear_priority_passes(state);
 }
 
