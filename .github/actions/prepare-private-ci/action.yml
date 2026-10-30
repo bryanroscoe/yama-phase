@@ -19,7 +19,9 @@ runs:
             ln -s /ci-cache/target "$path"
           fi
         done
-        echo 'CARGO_BUILD_JOBS=2' >> "$GITHUB_ENV"
+        # Concurrent engine/test compilers can fill the entire 12 GiB pool
+        # and prevent the runner from renewing its GitHub job lease.
+        echo 'CARGO_BUILD_JOBS=1' >> "$GITHUB_ENV"
         echo 'ANDROID_HOME=/ci-cache/android' >> "$GITHUB_ENV"
         echo 'ANDROID_SDK_ROOT=/ci-cache/android' >> "$GITHUB_ENV"
         echo 'GRADLE_USER_HOME=/ci-cache/gradle' >> "$GITHUB_ENV"

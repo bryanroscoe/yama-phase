@@ -30,6 +30,9 @@ writable project caches; checkout target symlinks preserve existing script/artif
 paths. Each Nextest shard extracts its archive under disposable RUNNER_TEMP,
 so repeated shards cannot collide inside the persistent target cache. Rust target cache and bounded local sccache stay on saget instead of being
 uploaded as GitHub Cargo caches. Hosted-only disk pruning never runs here.
+Self-hosted Rust builds use one Cargo job: concurrent engine/test compilers can
+exhaust the 12-GiB pool and starve the runner's job-lease renewal. This preserves
+the compiler profiles and complete test suite; it only serializes compilation.
 
 All private workers share a four-CPU/12-GiB parent and two execution slots with
 root-selected memory reservations. CI shares the production gate; Yama production
