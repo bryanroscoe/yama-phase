@@ -9,19 +9,20 @@ PROFILE="${1:-wasm-dev}"
 # target/ for CI/deploy/setup callers that don't set it.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
-# Build a single WASM crate: compile, bind, optimize.
-build_wasm_crate() {
+# Compile both roots together so Cargo unifies their dependency features. In
+# separate invocations state-codec's serde_json/raw_value feature makes the
+# draft build compile a second engine/AI graph without that feature.
+echo "Building engine-wasm and draft-wasm (profile: $PROFILE)..."
+if [ "$PROFILE" = "release" ]; then
+  cargo build --package engine-wasm --package draft-wasm --target wasm32-unknown-unknown --release
+else
+  cargo build --package engine-wasm --package draft-wasm --target wasm32-unknown-unknown --profile "$PROFILE"
+fi
+
+# Bind and optimize each module from the shared build.
+bind_wasm_crate() {
   local PACKAGE="$1"
   local OUT_NAME="$2"
-
-  echo "Building $PACKAGE (profile: $PROFILE)..."
-
-  if [ "$PROFILE" = "release" ]; then
-    cargo build --package "$PACKAGE" --target wasm32-unknown-unknown --release
-  else
-    cargo build --package "$PACKAGE" --target wasm32-unknown-unknown --profile "$PROFILE"
-  fi
-
   wasm-bindgen \
     --target web \
     --out-dir "$WASM_OUT" \
@@ -66,9 +67,9 @@ assert_wasm_stack() {
 
 mkdir -p "$WASM_OUT"
 
-build_wasm_crate engine-wasm engine_wasm
+bind_wasm_crate engine-wasm engine_wasm
 assert_wasm_stack "$WASM_OUT/engine_wasm_bg.wasm" 200
-build_wasm_crate draft-wasm draft_wasm
+bind_wasm_crate draft-wasm draft_wasm
 
 echo ""
 echo "WASM build complete. Output in $WASM_OUT"

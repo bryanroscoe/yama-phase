@@ -1172,7 +1172,11 @@ jobs:
         run: cd client && pnpm install --frozen-lockfile
 
       - name: Build both WASM engines
-        run: ./scripts/build-wasm.sh wasm-dev
+        # Exercise the orchestration with mock tools before spending compiler time.
+        # The actual modules and isolated match proofs below remain mandatory.
+        run: |
+          python3 scripts/tests/test_build_wasm.py
+          ./scripts/build-wasm.sh wasm-dev
 
       - name: Require generated bindings
         run: |
