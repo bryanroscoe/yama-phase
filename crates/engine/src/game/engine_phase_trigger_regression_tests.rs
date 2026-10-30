@@ -6337,7 +6337,7 @@ fn jotun_owl_keeper_one_of_x_n_pays_combined_mana() {
                         if shards.as_slice() == [crate::types::mana::ManaCostShard::White]
                 ),
                 "first pick is Mana({{W}}) as selected by index 0; got {:?}",
-                &chosen[0]
+                chosen[0]
             );
         }
         other => panic!("expected second UnlessPaymentChooseCost, got {other:?}"),
