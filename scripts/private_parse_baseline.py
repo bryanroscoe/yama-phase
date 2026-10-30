@@ -14,6 +14,15 @@ import sys
 import tempfile
 
 
+def compiler_fingerprint(root, env=None):
+    env = os.environ if env is None else env
+    compiler = subprocess.check_output(["rustc", "-vV"], cwd=root, env=env)
+    settings = json.dumps({
+        "tool_codegen_units": env.get("CARGO_PROFILE_TOOL_CODEGEN_UNITS"),
+    }, sort_keys=True).encode()
+    return hashlib.sha256(compiler + b"\n" + settings).hexdigest()
+
+
 def identity(root, ref, atomic):
     sha = subprocess.check_output(
         ["git", "rev-parse", "--verify", ref + "^{commit}"], cwd=root, text=True
@@ -28,12 +37,11 @@ def identity(root, ref, atomic):
     with atomic.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
-    compiler = subprocess.check_output(["rustc", "-vV"], cwd=root)
     return {
         "base_sha": sha,
         "engine_hash": engine_hash,
         "input_hash": digest.hexdigest(),
-        "compiler_hash": hashlib.sha256(compiler).hexdigest(),
+        "compiler_hash": compiler_fingerprint(root),
     }
 
 
@@ -109,8 +117,7 @@ def build(root, atomic, output, expected):
                 archive.stdout.close()
             if archive.wait() != 0:
                 raise RuntimeError("cannot export baseline commit")
-        compiler = subprocess.check_output(["rustc", "-vV"], cwd=base, env=env)
-        if hashlib.sha256(compiler).hexdigest() != expected["compiler_hash"]:
+        if compiler_fingerprint(base, env) != expected["compiler_hash"]:
             raise ValueError("base compiler differs from the head compiler")
         data = base / "data"
         (data / "mtgjson").mkdir(parents=True, exist_ok=True)

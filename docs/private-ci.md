@@ -28,11 +28,18 @@ state, Cargo/tool/Android/Gradle caches and no Docker socket or production mount
 Fork PR execution must remain disabled at repository level. Tools install into
 writable project caches; checkout target symlinks preserve existing script/artifact
 paths. Each Nextest shard extracts its archive under disposable RUNNER_TEMP,
-so repeated shards cannot collide inside the persistent target cache. Rust target cache and bounded local sccache stay on saget instead of being
-uploaded as GitHub Cargo caches. Hosted-only disk pruning never runs here.
+so repeated shards cannot collide inside the persistent target cache. Rust target
+cache stays on saget instead of being uploaded as GitHub Cargo caches. Sccache is
+used only on hosted workers: a self-hosted daemon disconnect must not retry a long
+compiler outside Cargo's concurrency limit. Hosted-only disk pruning never runs here.
 Self-hosted Rust builds use one Cargo job: concurrent engine/test compilers can
-exhaust the 12-GiB pool and starve the runner's job-lease renewal. This preserves
-the compiler profiles and complete test suite; it only serializes compilation.
+exhaust the 12-GiB pool and starve the runner's job-lease renewal. Serializing
+Cargo preserves the complete test suite.
+Unmeasured CLI tools retain optimization level 1 and use 256 codegen units on
+saget, matching the existing test profile's partition count. This splits the
+CLI optimization units further; server, AI, benchmark and test profiles remain
+unchanged. Private parse-baseline compiler identity includes this setting,
+and cold baseline builds inherit it exactly.
 
 All private workers share a four-CPU/12-GiB parent and two execution slots with
 root-selected memory reservations. CI shares the production gate; Yama production

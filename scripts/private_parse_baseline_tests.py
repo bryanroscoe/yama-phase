@@ -39,6 +39,8 @@ if os.environ.get('BASELINE_TEST_FAIL') == 'true':
     sys.exit(7)
 assert pathlib.Path(os.environ['CARGO_TARGET_DIR']).is_absolute()
 assert os.environ['RUSTUP_TOOLCHAIN'] == 'fixture-toolchain'
+if os.environ.get('BASELINE_TEST_CODEGEN_EXPECTED'):
+    assert os.environ.get('CARGO_PROFILE_TOOL_CODEGEN_UNITS') == os.environ['BASELINE_TEST_CODEGEN_EXPECTED']
 if 'oracle-gen' in sys.argv:
     source = pathlib.Path('crates/engine/src/fixture.rs').read_text().strip()
     atomic = pathlib.Path('data/mtgjson/AtomicCards.json').read_text().strip()
@@ -117,6 +119,17 @@ else:
         expected = self.build()
         same = dict(expected, base_sha="f" * 40)
         baseline.validate(self.output, same)
+
+    def test_tool_codegen_settings_reach_base_and_reject_different_cached_builds(self):
+        with patch.dict(os.environ, {"CARGO_PROFILE_TOOL_CODEGEN_UNITS": "256",
+                                     "BASELINE_TEST_CODEGEN_EXPECTED": "256"}):
+            expected = self.build()
+            baseline.validate(self.output, expected)
+        with patch.dict(os.environ, {"CARGO_PROFILE_TOOL_CODEGEN_UNITS": "16"}):
+            changed = self.expected()
+            self.assertNotEqual(expected["compiler_hash"], changed["compiler_hash"])
+            with self.assertRaisesRegex(ValueError, "compiler_hash"):
+                baseline.validate(self.output, changed)
 
     def test_base_cannot_silently_use_its_own_nightly_override(self):
         self.tool("rustc", """

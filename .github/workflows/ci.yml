@@ -62,8 +62,10 @@ jobs:
           cache-shared-key: rust-debug
 
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: runner.environment == 'github-hosted'
 
       - name: Enable sccache
+        if: runner.environment == 'github-hosted'
         run: |
           echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
@@ -279,8 +281,10 @@ jobs:
           cache-shared-key: rust-debug
 
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: runner.environment == 'github-hosted'
 
       - name: Enable sccache
+        if: runner.environment == 'github-hosted'
         run: |
           echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
@@ -426,8 +430,10 @@ jobs:
           cache-shared-key: rust-debug
 
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: runner.environment == 'github-hosted'
 
       - name: Enable sccache
+        if: runner.environment == 'github-hosted'
         run: |
           echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
