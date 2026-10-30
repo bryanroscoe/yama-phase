@@ -508,7 +508,8 @@ jobs:
           BASE=HEAD
           if [ "$EVENT_NAME" = pull_request ]; then
             BASE="$(./scripts/parse-diff-base.sh "$PR_HEAD")"
-            git fetch --no-tags --depth=1 origin "$BASE"
+            # checkout's depth 2 already contains both merge parents and trees;
+            # persist-credentials:false deliberately removes later Git auth.
           fi
           python3 scripts/private_parse_baseline.py identify --ref "$BASE" >> "$GITHUB_OUTPUT"
 
@@ -719,7 +720,7 @@ jobs:
             echo "produced=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # The depth-2 checkout already supplies this parent and its full tree.
           BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
           HEAD_HASH="$(./scripts/engine-source-hash.sh HEAD)"
           if [ "$BASE_HASH" = "$HEAD_HASH" ]; then

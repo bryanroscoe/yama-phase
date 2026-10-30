@@ -4,8 +4,10 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -166,6 +168,48 @@ print('rustc fixture NIGHTLY' if pathlib.Path.cwd().name == 'private-parse-basel
         with self.assertRaises(FileExistsError):
             self.build()
         self.assertEqual(evidence.read_text(), "preserve")
+
+    def test_shipped_steps_use_shallow_merge_parents_without_origin_credentials(self):
+        # A docs-only PR and a parallel main commit produce a real synthetic
+        # merge. Clone it as checkout does, with only the merge and two parents.
+        self.source.write_text("BASE")
+        self.git("add", ".")
+        self.git("commit", "-qm", "docs-only PR")
+        head = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "--detach", self.base)
+        (self.repo / "main-note").write_text("parallel main change")
+        self.git("add", ".")
+        self.git("commit", "-qm", "main")
+        main = self.git("rev-parse", "HEAD")
+        self.git("merge", "--no-ff", "-qm", "synthetic PR merge", head)
+        self.git("branch", "synthetic-merge")
+        checkout = self.root / "shallow"
+        subprocess.run(["git", "clone", "--quiet", "--depth", "2", "--branch",
+                        "synthetic-merge", self.repo.as_uri(), str(checkout)], check=True)
+        # Any later fetch fails. No credentials or private repository needed.
+        subprocess.run(["git", "remote", "set-url", "origin", str(self.root / "no-origin")],
+                       cwd=checkout, check=True)
+        scripts = checkout / "scripts"
+        scripts.mkdir()
+        origin_scripts = Path(__file__).resolve().parent
+        for name in ("private_parse_baseline.py", "engine-source-hash.sh", "parse-diff-base.sh"):
+            shutil.copy2(origin_scripts / name, scripts / name)
+        data = checkout / "data/mtgjson"
+        data.mkdir(parents=True)
+        shutil.copy2(self.atomic, data / "AtomicCards.json")
+        output = self.root / "step-output"
+        output.touch()
+        env = dict(os.environ, EVENT_NAME="pull_request", PR_HEAD=head, HEAD_SHA=head,
+                   PR_NUMBER="8", PRIVATE_CI="true", GITHUB_OUTPUT=str(output))
+        workflow = (origin_scripts.parent / ".github/workflows/ci.yml").read_text()
+        for name in ("Identify private parse baseline", "Parse-detail diff vs base baseline"):
+            step = workflow.split("      - name: " + name + "\n", 1)[1].split("\n      - ", 1)[0]
+            shell = textwrap.dedent(step.split("        run: |\n", 1)[1])
+            subprocess.run(["bash", "-c", shell], cwd=checkout, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        self.assertIn("base_sha=" + main, output.read_text())
+        self.assertIn("cache_key=private-parse-baseline-v1-", output.read_text())
+        self.assertIn("produced=false", output.read_text())
 
 
 if __name__ == "__main__":
