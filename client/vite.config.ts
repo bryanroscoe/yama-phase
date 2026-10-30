@@ -115,8 +115,8 @@ function workspaceVersion(): string {
 // .github/workflows/{deploy,release}.yml — see those files.
 //
 // Resolution: at deploy time, set DATA_BASE_URL to the R2 prefix; defines
-// resolve to `${BASE}/<filename>`. Local dev with no env defaults to
-// site-root paths.
+// resolve to `${BASE}/<filename>`. Without a data override, files live under
+// the host's base path (the site root by default).
 //
 // `__CARD_DATA_URL__` is NOT manifest-driven — the WASM bundle is pinned to
 // a content-addressed `card-data-<hash>.json` URL via CARD_DATA_URL at build
@@ -125,7 +125,7 @@ function workspaceVersion(): string {
 // weight since no frontend code fetches it. Local dev falls back to the
 // public/ copy served at `/card-data.json` (also used by Tauri bundles and
 // phase-server via `data/card-data.json`).
-function dataFileDefines(mode: string, buildHash: string): Record<string, string> {
+function dataFileDefines(mode: string, buildHash: string, hostBase: string): Record<string, string> {
   const manifest = JSON.parse(
     readFileSync(path.resolve(__dirname, "../data-files.json"), "utf-8"),
   ) as string[];
@@ -136,7 +136,8 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
   const fileEnv = loadEnv(mode, path.resolve(__dirname, ".."), "");
   const envVar = (name: string): string =>
     process.env[name] ?? fileEnv[name] ?? "";
-  const base = process.env.DATA_BASE_URL || "";
+  const localBase = hostBase.replace(/\/+$/, "");
+  const base = (process.env.DATA_BASE_URL || localBase).replace(/\/+$/, "");
   const multiplayerServers = resolveMultiplayerServerUrls(envVar);
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
@@ -188,7 +189,7 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // Empty when unset (local dev, self-hosted builds) → the telemetry module
     // compiles to a permanent no-op and nothing is ever sent anywhere.
     __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
-    __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
+    __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || `${localBase}/card-data.json`),
     // Operator status message. Deliberately NOT manifest-driven: the deploy
     // workflow's upload loop reads data-files.json and (a) hard-errors when a
     // listed file was not generated into client/public/, and (b) re-uploads
@@ -196,17 +197,17 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // message the maintainer published out of band. It is published and cleared
     // by scripts/publish-status.sh alone; no CI job ever touches the object.
     // Same explicit, non-manifest shape as __CARD_DATA_URL__ above.
-    __STATUS_URL__: JSON.stringify(base ? `${base}/status.json` : "/status.json"),
+    __STATUS_URL__: JSON.stringify(`${base}/status.json`),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded
     // to `${DATA_BASE_URL}/card-data.<lng>.json` and stripped from the Pages
     // bundle — this template must point there, mirroring the manifest files. With
-    // no DATA_BASE_URL (local dev, Tauri offline) it resolves to the site-root
+    // no DATA_BASE_URL (local dev, Tauri offline) it resolves to the hosted
     // copy in public/. A missing sidecar (404) degrades to English per-field
     // (see ensureCardLocale). An explicit env override still wins.
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify(
       process.env.CARD_DATA_LOCALE_URL_TEMPLATE ||
-        (base ? `${base}/card-data.{lng}.json` : "/card-data.{lng}.json"),
+        `${base}/card-data.{lng}.json`,
     ),
     // Per-locale card-ART map URL template ({lng} replaced at runtime). Maps an
     // English Scryfall printing id to the same printing's localized sibling id,
@@ -216,7 +217,7 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // printing has no localized sibling. An explicit env override still wins.
     __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify(
       process.env.SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE ||
-        (base ? `${base}/scryfall-images.v2.{lng}.json` : "/scryfall-images.v2.{lng}.json"),
+        `${base}/scryfall-images.v2.{lng}.json`,
     ),
   };
   for (const filename of manifest) {
@@ -513,7 +514,7 @@ export default defineConfig(({ mode }) => {
     }),
     compression({ algorithms: ["brotliCompress"] }),
   ],
-  define: dataFileDefines(mode, buildHash),
+  define: dataFileDefines(mode, buildHash, base),
   worker: {
     plugins: () => [wasmEnvShim(), externalEngineWasm()],
   },
