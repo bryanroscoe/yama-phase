@@ -503,6 +503,7 @@ mod galion_elvenkings_butler_attack_pt_set;
 mod game_end_blocks_exile_returns;
 mod game_log_correctness;
 mod game_object_wire_shape;
+mod game_over_clears_pending_resolution_choice;
 mod game_over_starting_life_cost;
 mod game_state_boxed_ability_serde;
 mod game_state_stack_budget;
