@@ -1078,7 +1078,8 @@ jobs:
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Lint/typecheck plus the 10k-test coverage suite exceeded the old 15m cap.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
