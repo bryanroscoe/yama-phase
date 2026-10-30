@@ -77,6 +77,9 @@ function trimManaFont(): Plugin {
     enforce: "pre",
     transform(code, id) {
       if (!id.replace(/\\/g, "/").endsWith("mana-font/css/mana.css")) return;
+      // Some hosts load mana images from Scryfall and use text for the other
+      // icons, so they must not bundle this art font.
+      if (process.env.VITE_TEXT_ICONS === "1") return { code: "", map: null };
       const classes = code.replace(/@font-face\s*\{[^}]*\}/g, "");
       const woff2Face =
         '@font-face{font-family:"Mana";' +
@@ -269,6 +272,8 @@ export default defineConfig(({ mode }) => {
 
   return {
   base,
+  // Hosts may stage a public tree without modifying this checkout.
+  publicDir: process.env.PHASE_PUBLIC_DIR || "public",
   resolve: {
     alias: {
       "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
