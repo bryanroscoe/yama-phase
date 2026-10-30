@@ -23701,20 +23701,38 @@ fn exact_mana_ability_successors(
     player: PlayerId,
     selection: &ManaSourceSelection,
 ) -> Vec<GameState> {
-    let action = match super::mana_sources::priority_mana_route(&state, selection) {
-        Some(super::mana_sources::PriorityManaRoute::LandTap) => GameAction::TapLandForMana {
-            selection: selection.clone(),
-        },
+    // CR 601.2g + CR 605.3a-b: this is a speculative mana window, often
+    // inside an announcement (or its face election), not another public action.
+    // Reuse the mana reducers, as mana_ability_window_life_witness does. Opening
+    // apply_for_simulation here incorrectly consumes the enclosing action's
+    // trigger carrier and rejects legal routes at non-Priority cast prompts.
+    let mut events = Vec::new();
+    let result = match super::mana_sources::priority_mana_route(&state, selection) {
+        Some(super::mana_sources::PriorityManaRoute::LandTap) => {
+            super::engine::handle_tap_land_for_mana(
+                &mut state,
+                player,
+                selection,
+                ManaAbilityResume::Priority,
+                &mut events,
+            )
+        }
         Some(super::mana_sources::PriorityManaRoute::NonlandActivation) => {
-            GameAction::ActivateManaSource {
-                selection: selection.clone(),
-            }
+            super::mana_sources::activate_mana_source_selection(
+                &mut state,
+                player,
+                selection,
+                &mut events,
+                ManaAbilityResume::Priority,
+            )
         }
         None => return Vec::new(),
     };
-    if super::engine::apply_for_simulation(&mut state, player, action).is_err() {
+    let Ok(waiting) = result else {
         return Vec::new();
-    }
+    };
+    state.waiting_for = waiting;
+    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, 0);
     settle_exact_mana_ability_prompts(state, player, 3)
 }
 
@@ -23773,9 +23791,43 @@ fn settle_exact_mana_ability_prompts(
         .into_iter()
         .filter_map(|action| {
             let mut next = state.clone();
-            super::engine::apply_for_simulation(&mut next, player, action)
-                .ok()
-                .map(|_| settle_exact_mana_ability_prompts(next, player, remaining_steps - 1))
+            let mut events = Vec::new();
+            let result = match (state.waiting_for.clone(), action) {
+                (
+                    WaitingFor::PayManaAbilityMana {
+                        options,
+                        pending_mana_ability,
+                        ..
+                    },
+                    GameAction::PayManaAbilityMana { payment },
+                ) => super::mana_abilities::handle_pay_mana_ability_mana(
+                    &mut next,
+                    &options,
+                    &pending_mana_ability,
+                    &payment,
+                    &mut events,
+                ),
+                (
+                    WaitingFor::ChooseManaColor {
+                        choice,
+                        context: ManaChoiceContext::ManaAbility(pending),
+                        ..
+                    },
+                    GameAction::ChooseManaColor { choice: chosen, .. },
+                ) => super::mana_abilities::handle_choose_mana_color(
+                    &mut next,
+                    &pending,
+                    &choice,
+                    chosen,
+                    &mut events,
+                ),
+                _ => return None,
+            };
+            result.ok().map(|waiting| {
+                next.waiting_for = waiting;
+                super::triggers::resolve_tap_mana_triggers_inline(&mut next, &mut events, 0);
+                settle_exact_mana_ability_prompts(next, player, remaining_steps - 1)
+            })
         })
         .flatten()
         .collect()
