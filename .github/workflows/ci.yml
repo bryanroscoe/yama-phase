@@ -1128,8 +1128,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/prepare-private-ci
 
