@@ -1221,6 +1221,7 @@ mod mana_cost_reducers_issue_141;
 mod mana_display_self_sacrifice_clone_gate;
 mod mana_drain_refund;
 mod mana_payment_class_rows;
+mod mana_probe_announcement;
 mod mana_payment_preview;
 mod mana_role_fixture_migration;
 mod mana_spent_independent_conjuncts;
