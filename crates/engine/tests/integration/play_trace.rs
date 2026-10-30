@@ -1152,11 +1152,12 @@ fn play_trace_window_is_the_step() {
 }
 
 #[test]
-fn play_trace_records_only_the_outermost_apply() {
+fn play_trace_filter_mana_probes_stay_inside_outermost_apply() {
     let Some(db) = shared_card_db() else { return };
     let mut state = crate::loop_shortcut_drain_boards::lethal_lifegain_loss_board();
     // A filter land ("{W/U}, {T}: Add {W}{W}, {W}{U}, or {U}{U}.") per seat: the finish's
-    // castability check walks producer -> filter-land routes through nested applies.
+    // castability check walks producer -> filter-land routes. Those speculative mana
+    // reducers must stay inside the enclosing action, without reopening its boundary.
     let seats: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
     for seat in seats {
         place(&mut state, seat, "Mystic Gate", db);
@@ -1165,8 +1166,12 @@ fn play_trace_records_only_the_outermost_apply() {
     crate::loop_shortcut_drain_boards::drive_to_live_declarable_offer(&mut state);
     let run = play_trace_counters().since(before);
     assert!(
-        run.nested_applies > 0,
-        "reach: the finish re-enters the action boundary: {run:?}"
+        run.boundary_entries > 0 && run.probe_entries > 0,
+        "reach: the live finish and its legality probes ran: {run:?}"
+    );
+    assert_eq!(
+        run.nested_applies, 0,
+        "filter-mana search must not reopen the enclosing action boundary: {run:?}"
     );
     assert_eq!(
         run.actions_recorded, run.boundary_entries,
