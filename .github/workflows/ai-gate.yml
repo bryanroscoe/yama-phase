@@ -1,212 +1,138 @@
-name: AI gate
+name: Private main perf repeatability
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'crates/phase-ai/**'
-      - 'data/card-data.json'
-      - 'scripts/lib/mtgjson-fetch.sh'
-      - '.cargo/config.toml'
-      - '.github/actions/ai-card-data-cache/**'
-      - '.github/workflows/ai-gate.yml'
-  schedule:
-    - cron: "0 9 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: private-main-perf-repro-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
-  issues: write
+  pull-requests: write
 
 jobs:
-  ai-gate:
-    name: Paired-seed AI gate
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    # 30m was too tight and flaked out on slow runners. Measured budget on a
-    # cache miss: ~6.5m for the "Generate card data" step (5m `tool` build + gen)
-    # + a cold debug build + the debug run itself (30 games at ~1.1m/game on a
-    # slow runner ≈ 34m). Hosted-runner speed varies ~2x, so a fast runner
-    # finishes well under 30m while a slow one overruns. 60m preserves the full
-    # `--games 10` coverage; the ceiling only bills the failure case.
-    timeout-minutes: 60
+  perf-control:
+    if: github.repository == 'bryanroscoe/yama-phase' && github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, Linux, X64, saget-ci]
+    timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-shared-key: rust-ai-gate
-
-      - name: Restore AI card data caches
-        id: card-data-cache
-        uses: ./.github/actions/ai-card-data-cache
-
-      - name: Generate card data
-        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
+      - name: Wait for saget CI capacity
+        working-directory: ${{ runner.temp }}
         run: |
-          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
-
-      - name: Run quick AI gate
-        run: cargo ai-gate --games 10 --seed 10573729 --difficulty medium
-
-  ai-gate-nightly:
-    name: Nightly AI gate drift monitor
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    # The gate's workload flags MUST equal the corresponding fields in
-    # crates/phase-ai/baselines/suite-baseline.json. The comparator refuses a pair
-    # whose workloads disagree, so a divergent value here makes this job incapable
-    # of any verdict; crates/phase-ai/tests/gate_cli.rs reds if an invocation
-    # written down in this directory drifts from the baseline.
-    #
-    # What the leg buys at that workload: liveness across the whole matchup
-    # registry, plus mirror classification at a low-power band — not a drift gate
-    # at the band a larger per-matchup sample would give. The ceiling only bills
-    # the failure case; a job that finishes early stops early.
-    timeout-minutes: 300
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          cache-shared-key: rust-ai-gate
-
-      - name: Restore AI card data caches
-        id: card-data-cache
-        uses: ./.github/actions/ai-card-data-cache
-
-      - name: Generate card data
-        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: ./.github/actions/prepare-private-ci
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+        with:
+          toolchain: '1.98.1'
+          cache: false
+      - name: Verify exact private-main code
         run: |
-          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
-
-      - name: Run full AI gate
-        id: gate
+          set -euo pipefail
+          BASE=dd276b0f626c868f43804d0d0cd300d8e7369fbf
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          git diff --exit-code "$BASE" HEAD -- crates Cargo.toml Cargo.lock .cargo protocol data
+          git rev-parse HEAD > perf-control-source.txt
+          ./scripts/engine-source-hash.sh "$BASE" >> perf-control-source.txt
+      - name: Retrieve benchmark input for fingerprint verification
+        run: |
+          mkdir -p data
+          curl -fSL --retry 3 --max-time 180 https://data.phase-rs.dev/preview/card-data.json -o data/card-data.json
+          test -s data/card-data.json
+      - name: Validate unchanged private-main candidate baseline
+        id: repro
         continue-on-error: true
         run: |
-          # bash opens the redirect before cargo runs, so `target/` has to exist
-          # first. On a cardgen cache hit the `Generate card data` step above is
-          # skipped, and nothing else has invoked cargo yet — the redirect then
-          # dies with "No such file or directory" and the gate never executes.
-          mkdir -p target
-          cargo ai-gate --full-suite --games 10 --seed 10573729 --difficulty medium > target/ai-gate-report.md
-
-      - name: Open or update drift issue
-        if: steps.gate.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title="Nightly AI gate drift"
-          if [ ! -s target/ai-gate-report.md ]; then
-            echo "AI gate failed without a drift report" >&2
-            exit 1
-          fi
-          body="$(cat target/ai-gate-report.md)"
-          existing="$(gh issue list --label ai-gate-drift --state open --json number --jq '.[0].number')"
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
-          else
-            gh issue create --title "$title" --label ai-gate-drift --body "$body"
-          fi
-
-      - name: Fail only on infrastructure errors
-        if: steps.gate.outcome == 'cancelled'
-        run: exit 1
-
-  ai-perf-gate:
-    name: Decision-cost perf gate
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    # Same runner-variance overrun as the paired gate above. Measured budget on
-    # a cache miss: ~6.5m card-data gen + cold debug build + the perf suite
-    # (PERF_SAMPLE_COUNT=5 cold child processes × 3 scenarios × PERF_ACTION_CAP
-    # 3000 actions ≈ 21m in debug on a slow runner). The per-counter median
-    # assertion (#4878) is variance-robust; the wall-clock is not. 60m gives
-    # headroom without changing the fixed workload.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          set -euo pipefail
+          mkdir -p target/perf-repro
+          build_start=$(date +%s)
+          cargo build --profile server-release --bin ai-perf-gate
+          build_seconds=$(( $(date +%s) - build_start ))
+          # Reuse the authoritative profile in the dedicated CI cache. Never
+          # create the script's second target/ai compiler tree on the worker.
+          BIN="$PWD/target/server-release/ai-perf-gate"
+          BASELINE="$PWD/target/perf-repro/perf-baseline.json"
+          cp crates/phase-ai/baselines/perf-baseline.json "$BASELINE"
+          "$BIN" --baseline "$BASELINE" --refresh-baseline --current-output target/perf-repro/refresh-current.json > target/perf-repro/baseline-delta.md
+          verify_input() {
+            python3 - "$1" <<'PY_INPUT'
+          import json, os, sys
+          report = json.load(open(sys.argv[1]))
+          assert report['git_sha'] == os.environ['GITHUB_SHA'][:12]
+          assert report['schema_version'] == 6
+          assert report['card_data_hash'] == 'cea608c514890427e9d9ddc39536155d56f8ea31'
+          assert report['base_seed'] == 2654435769
+          assert report['action_cap'] == 3000
+          assert report['sample_count'] == 5
+          assert report['scenarios'] == ['red-mirror', 'affinity-mirror', 'enchantress-mirror']
+          assert len(report['counters']) == 45
+          PY_INPUT
+          }
+          verify_input "$BASELINE"
+          inputs=(); band_fail=0
+          : > target/perf-repro/timings.txt
+          for i in $(seq 1 25); do
+            out="$PWD/target/perf-repro/run-$i.json"
+            start=$(date +%s)
+            if ! "$BIN" --baseline "$BASELINE" --current-output "$out" > "target/perf-repro/run-$i.md"; then band_fail=1; fi
+            elapsed=$(( $(date +%s) - start ))
+            echo "$elapsed" >> target/perf-repro/timings.txt
+            echo "Repro run $i/25: ${elapsed}s"
+            verify_input "$out"
+            inputs+=(--repro-input "$out")
+          done
+          if "$BIN" --baseline "$BASELINE" --repro-report "${inputs[@]}" > target/perf-repro/margin.md; then margin_rc=0; else margin_rc=$?; fi
+          # Preserve the upstream 25-minute budget rule. This build may reuse
+          # warm CI cache, so a pass is NOT proof of a cold-build budget.
+          python3 - "$build_seconds" "$band_fail" "$margin_rc" <<'PY_SUMMARY'
+          import json, pathlib, sys
+          root = pathlib.Path('target/perf-repro')
+          times = [int(x) for x in (root/'timings.txt').read_text().splitlines()]
+          assert len(times) == 25
+          build, band, margin = map(int, sys.argv[1:])
+          budget = max(times) * 2.5 + build
+          summary = dict(validation_runs=25, input_verification='success',
+              band_fail=band, margin_rc=margin, build_seconds=build,
+              build_cache='persistent CI cache; not a cold-build proof',
+              max_run_seconds=max(times), upstream_budget_seconds=1500,
+              measured_budget_seconds=budget, budget_pass=budget < 1500,
+              candidate_only=True, baseline_committed=False)
+          (root/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+          print(json.dumps(summary, indent=2))
+          sys.exit(0 if band == 0 and margin == 0 and budget < 1500 else 1)
+          PY_SUMMARY
+      - name: Preserve repeatability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          cache-shared-key: rust-ai-gate
-
-      - name: Restore AI card data caches
-        id: card-data-cache
-        uses: ./.github/actions/ai-card-data-cache
-
-      - name: Generate card data
-        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
-        run: |
-          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
-
-      # server-release profile (authoritative, set by the `cargo ai-perf-gate` alias):
-      # counter VALUES are profile-independent, and the shared rust-ai-gate cache stays
-      # coherent because every job in this workflow builds the same profile — the
-      # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
-      # the first run after the dev -> server-release move.
-      # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
-      - name: Run decision-cost perf gate
-        run: cargo ai-perf-gate
-
-  ai-perf-gate-nightly:
-    name: Nightly decision-cost perf drift monitor
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-shared-key: rust-ai-gate
-
-      - name: Restore AI card data caches
-        id: card-data-cache
-        uses: ./.github/actions/ai-card-data-cache
-
-      - name: Generate card data
-        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
-        run: |
-          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
-
-      # server-release profile (authoritative, set by the `cargo ai-perf-gate` alias):
-      # counter VALUES are profile-independent, and the shared rust-ai-gate cache stays
-      # coherent because every job in this workflow builds the same profile — the
-      # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
-      # the first run after the dev -> server-release move.
-      # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
-      # `cargo` build progress goes to stderr and spawned children are Stdio::null on
-      # stdout, so the redirect captures only the binary's clean markdown table.
-      - name: Run decision-cost perf gate
-        id: gate
+          name: private-main-perf-repeatability
+          retention-days: 7
+          path: |
+            perf-control-source.txt
+            target/perf-repro/
+      - name: Report repeatability completion on the tracked PR
         continue-on-error: true
-        run: |
-          # bash opens the redirect before cargo runs, so `target/` has to exist
-          # first. On a cardgen cache hit the `Generate card data` step above is
-          # skipped, and nothing else has invoked cargo yet — the redirect then
-          # dies with "No such file or directory" and the gate never executes.
-          mkdir -p target
-          cargo ai-perf-gate > target/ai-perf-gate-report.md
-
-      - name: Open or update drift issue
-        if: steps.gate.outcome == 'failure'
+        if: always()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title="Nightly decision-cost perf drift"
-          if [ ! -s target/ai-perf-gate-report.md ]; then
-            echo "Decision-cost perf gate failed without a drift report" >&2
-            exit 1
-          fi
-          body="$(cat target/ai-perf-gate-report.md)"
-          existing="$(gh issue list --label ai-perf-drift --state open --json number --jq '.[0].number')"
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
-          else
-            gh issue create --title "$title" --label ai-perf-drift --body "$body"
-          fi
-
-      - name: Fail only on infrastructure errors
-        if: steps.gate.outcome == 'cancelled'
+          REPRO_OUTCOME: ${{ steps.repro.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const file = 'target/perf-repro/summary.json';
+            const summary = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : 'No complete validation summary; inspect logs.';
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: 8,
+              body: `Private-main perf repeatability completed: ${process.env.REPRO_OUTCOME || 'not run'}. Reference engine/AI code dd276b0f626c868f43804d0d0cd300d8e7369fbf; diagnostic ${context.sha}.\n\n` +
+                `Candidate baseline only; no committed baseline, widened band, CI waiver, or cold-build budget claim. Normal saget-ci routing remains in place. [Run and artifacts](${url}).\n\n` +
+                '```json\n' + summary + '\n```',
+            });
+      - name: Preserve validation verdict
+        if: always() && steps.repro.outcome != 'success'
         run: exit 1
