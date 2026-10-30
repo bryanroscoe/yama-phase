@@ -72,14 +72,18 @@ function externalEngineWasm(): Plugin {
 // glyph classes (no vendored copy, updates on version bump). enforce:"pre" so
 // this runs before Vite's CSS plugin resolves url()s into emitted assets.
 function trimManaFont(): Plugin {
+  let textIcons = false;
   return {
     name: "trim-mana-font",
     enforce: "pre",
+    configResolved(config) {
+      textIcons = config.env.VITE_TEXT_ICONS === "1";
+    },
     transform(code, id) {
       if (!id.replace(/\\/g, "/").endsWith("mana-font/css/mana.css")) return;
       // Some hosts load mana images from Scryfall and use text for the other
       // icons, so they must not bundle this art font.
-      if (process.env.VITE_TEXT_ICONS === "1") return { code: "", map: null };
+      if (textIcons) return { code: "", map: null };
       const classes = code.replace(/@font-face\s*\{[^}]*\}/g, "");
       const woff2Face =
         '@font-face{font-family:"Mana";' +
