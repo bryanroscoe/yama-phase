@@ -63,3 +63,5 @@ and export; it uses existing CI capacity and private Actions storage quotas.
 
 On saget, the first workflow step waits for CI capacity before checkout. The pre-job hook returns promptly so GitHub can report and cancel queued work. This step runs from RUNNER_TEMP, which exists before checkout, and verifies the runner supports the step-slot protocol. Install/adopt the reviewed sagetserver hooks before running these adapters. Hosted jobs skip this step.
 The Rust summary job still reports failed dependencies, but skips a cancelled workflow so obsolete runs cannot hold the CI concurrency group.
+AI gates also cancel superseded runs of the same PR. Manual and scheduled suites
+use separate groups so a PR update does not displace those workloads.
