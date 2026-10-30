@@ -143,6 +143,11 @@ jobs:
         # that weakens it fails here instead of shipping unnoticed.
         run: python3 scripts/release_dispatch_guard_tests.py
 
+      - name: Private parse baseline tests
+        run: |
+          python3 scripts/private_parse_baseline_tests.py
+          node --test scripts/private-parse-comment.test.mjs
+
       - name: Preview data wait tests
         # The manifest is signed only after this script sees its data URLs
         # served, so the tests drive it against a local HTTP server. They also
@@ -492,6 +497,28 @@ jobs:
             data/card-names.json
           key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
+      - name: Identify private parse baseline
+        id: private-baseline
+        if: github.event.repository.private && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          BASE=HEAD
+          if [ "$EVENT_NAME" = pull_request ]; then
+            BASE="$(./scripts/parse-diff-base.sh "$PR_HEAD")"
+            git fetch --no-tags --depth=1 origin "$BASE"
+          fi
+          python3 scripts/private_parse_baseline.py identify --ref "$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Restore private parse baseline
+        if: github.event.repository.private && github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .private-parse-baseline/coverage-data.json
+          key: ${{ steps.private-baseline.outputs.cache_key }}
+
       - name: Cache card-data gate results
         # Proof-of-passage cache for the two expensive steps that are pure
         # functions of the same hashed inputs: `card-data-validate` and
@@ -640,7 +667,7 @@ jobs:
             --fail-on-engine
 
       - name: Parse-detail diff vs base baseline
-        # PR-only review aid (NEVER blocks — continue-on-error): surfaces the
+        # PR-only review aid: surfaces the
         # field-level parse changes this PR introduces, for the reviewing LLM.
         # Unlike the regression check above (supported flips only), this diffs
         # the full parse_details tree.
@@ -659,10 +686,13 @@ jobs:
         # hit; only the new bin links).
         id: parsediff
         if: github.event_name == 'pull_request'
-        continue-on-error: true
+        # Private cache misses rebuild the exact base. Missing private evidence
+        # is a failed gate; public behavior stays intact.
+        continue-on-error: ${{ !github.event.repository.private }}
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PRIVATE_CI: ${{ github.event.repository.private && 'true' || 'false' }}
         run: |
           set -euo pipefail
           echo "$PR_NUMBER" > pr-number.txt
@@ -678,6 +708,10 @@ jobs:
           # cards). Reading the base off the merge commit's parent keeps both
           # sides in lockstep no matter how stale (or main-merged) the PR is.
           if ! BASE_SHA="$(./scripts/parse-diff-base.sh "$HEAD_SHA")"; then
+            if [ "$PRIVATE_CI" = true ]; then
+              echo "::error::Cannot identify the exact private baseline parent."
+              exit 1
+            fi
             # An unmergeable PR has no synthetic merge parent. A shallow or
             # missing parent is never licensed to use the frozen webhook base:
             # that would bill intervening main changes to this PR.
@@ -691,6 +725,22 @@ jobs:
           if [ "$BASE_HASH" = "$HEAD_HASH" ]; then
             echo "Engine source unchanged vs base ($BASE_HASH) — no parse change possible; skipping."
             echo "produced=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$PRIVATE_CI" = true ]; then
+            # Preserve the HEAD diff binary before compiling the BASE on a
+            # cold miss into the same sequential target cache. Base generation
+            # cannot overwrite this binary or the head's coverage JSON.
+            cargo build --profile tool --features cli --bin coverage-parse-diff
+            DIFF_BIN="$(realpath target)/tool/coverage-parse-diff"
+            BASELINE=.private-parse-baseline/coverage-data.json
+            if ! python3 scripts/private_parse_baseline.py validate --ref "$BASE_SHA"; then
+              python3 scripts/private_parse_baseline.py build --ref "$BASE_SHA"
+            fi
+            "$DIFF_BIN" "$BASELINE" data/coverage-data.json \
+              --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+              --markdown parse-diff.md --json parse-diff.json
+            echo "produced=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
@@ -722,6 +772,17 @@ jobs:
             parse-diff.md
             parse-diff.json
             pr-number.txt
+
+      - name: Prepare private main parse baseline
+        if: github.event.repository.private && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python3 scripts/private_parse_baseline.py store --ref HEAD
+
+      - name: Save private main parse baseline
+        if: github.event.repository.private && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .private-parse-baseline/coverage-data.json
+          key: ${{ steps.private-baseline.outputs.cache_key }}
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards

@@ -31,18 +31,35 @@ paths. Each Nextest shard extracts its archive under disposable RUNNER_TEMP,
 so repeated shards cannot collide inside the persistent target cache. Rust target cache and bounded local sccache stay on saget instead of being
 uploaded as GitHub Cargo caches. Hosted-only disk pruning never runs here.
 
-All private workers share a two-CPU/12-GiB parent and a whole-job slot with Yama
-production builds. Local job budgets include that wait. This changes throughput
+All private workers share a four-CPU/12-GiB parent and two execution slots with
+root-selected memory reservations. CI shares the production gate; Yama production
+builds take it exclusively. Local job budgets include that wait. This changes throughput
 and wall-clock timing; it does not reduce test/game counts or establish comparable
 performance evidence between hosted and saget hardware. Temporary checkouts are
 removed after jobs, while useful tools/dependency caches remain.
 
-Only `ci.yml`, `ai-gate.yml` and `action-pin-audit.yml` are enabled at GitHub.
+Enable `ci.yml`, `ai-gate.yml`, `action-pin-audit.yml` and the trusted
+`coverage-parse-diff-comment.yml` after these adapters reach main. The comment
+workflow runs on the selected CI backend, reads artifacts without checking out
+PR code, and only posts evidence matching the current same-repository PR head.
 All inherited release/deployment/maintenance workflows remain disabled and keep
 their existing hosted routing; they are outside this CI migration. The two core-CI R2 publishing steps
 require the additional `CI_ENABLE_PUBLISHING == 'true'` opt-in, which is unset
 for this fork. Registration and CI validation do not authorize publishing,
 application deployment, upstream changes, or moving Yama's pinned engine revision.
+
+Private parse baselines do not use R2 or require `CI_ENABLE_PUBLISHING`. Main CI
+saves coverage in this repository's private GitHub Actions cache, keyed by engine
+source, exact MTGJSON input and compiler identity. PRs only restore these entries;
+they cannot save a replacement main baseline. On a miss, eviction, or mismatched
+metadata, CI exports the actual synthetic merge commit's base parent into
+RUNNER_TEMP and generates its coverage with the same MTGJSON bytes and compiler.
+The base build runs sequentially in the existing target cache, and its temporary
+source/output tree is removed afterward. Head coverage remains untouched.
+The resulting parse-diff artifact identifies both base and current PR head.
+Failure to obtain private evidence fails the card-data job instead of reporting
+an indefinitely pending public snapshot. A cold baseline adds a base engine build
+and export; it uses existing CI capacity and private Actions storage quotas.
 
 On saget, the first workflow step waits for CI capacity before checkout. The pre-job hook returns promptly so GitHub can report and cancel queued work. This step runs from RUNNER_TEMP, which exists before checkout, and verifies the runner supports the step-slot protocol. Install/adopt the reviewed sagetserver hooks before running these adapters. Hosted jobs skip this step.
 The Rust summary job still reports failed dependencies, but skips a cancelled workflow so obsolete runs cannot hold the CI concurrency group.
