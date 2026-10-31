@@ -34,15 +34,21 @@ permissions:
 jobs:
   comment:
     name: Sticky parse-diff comment
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     # Only PR-triggered CI runs produce the artifact. Skipping non-PR runs keeps
     # this job off main/merge_group entirely.
-    if: github.event.workflow_run.event == 'pull_request'
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.workflow_id == 398415720 && github.event.workflow_run.head_repository.full_name == github.repository
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - name: Download parse-diff artifact
         id: dl
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         # Absent artifact = the PR didn't change engine source (compute step
         # skipped its upload). Nothing to comment; degrade silently.
         continue-on-error: true
@@ -54,7 +60,7 @@ jobs:
 
       - name: Upsert sticky comment
         if: steps.dl.outcome == 'success'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const fs = require('fs');
@@ -65,12 +71,12 @@ jobs:
             // unreliable for forks). Absent => nothing to do.
             let prNumber;
             try {
-              prNumber = parseInt(fs.readFileSync(`${dir}/pr-number.txt`, 'utf8').trim(), 10);
+              prNumber = Number(fs.readFileSync(`${dir}/pr-number.txt`, 'utf8').trim());
             } catch {
               core.info('No pr-number.txt in artifact; nothing to comment.');
               return;
             }
-            if (!Number.isInteger(prNumber)) {
+            if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
               core.info('pr-number.txt malformed; skipping.');
               return;
             }
@@ -95,10 +101,20 @@ jobs:
             }
 
             const { owner, repo } = context.repo;
+            const run = context.payload.workflow_run;
+            const { data: pr } = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+            // The artifact is data, not authority to write on another PR or
+            // replace newer review evidence after a slow older run finishes.
+            if (pr.state !== 'open' || pr.head.sha !== run.head_sha ||
+                pr.head.repo.full_name !== `${owner}/${repo}` ||
+                !body.includes(run.head_sha)) {
+              core.info('Artifact does not identify the current same-repository PR head; skipping.');
+              return;
+            }
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: prNumber, per_page: 100,
             });
-            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+            const existing = comments.find(c => c.user.login === 'github-actions[bot]' && c.body && c.body.includes(MARKER));
 
             if (existing) {
               // EDIT in place — GitHub does not notify on edits, so re-pushes

@@ -33,26 +33,41 @@ permissions:
 jobs:
   rust-lint:
     name: Rust lint (fmt, clippy, parser gate)
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
     # retain a bounded job while leaving room for the remaining lint gates.
-    timeout-minutes: 60
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 60 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # Full history so the parser-combinator gate can diff against origin/main.
           fetch-depth: 0
 
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
+          components: rustfmt, clippy
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: runner.environment == 'github-hosted'
 
       - name: Enable sccache
+        if: runner.environment == 'github-hosted'
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
@@ -129,6 +144,11 @@ jobs:
         # tests read the guard's shell out of the committed workflow, so an edit
         # that weakens it fails here instead of shipping unnoticed.
         run: python3 scripts/release_dispatch_guard_tests.py
+
+      - name: Private parse baseline tests
+        run: |
+          python3 scripts/private_parse_baseline_tests.py
+          node --test scripts/private-parse-comment.test.mjs
 
       - name: Preview data wait tests
         # The manifest is signed only after this script sees its data URLs
@@ -214,12 +234,24 @@ jobs:
 
   rust-test-build:
     name: Rust tests (build archive)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 60 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - name: Free runner disk for Rust test linking
+        if: runner.environment == 'github-hosted'
         # Build the workspace's test binaries once. Keep the Rust caches intact
         # and reclaim only unused hosted-image payloads before setup-rust-toolchain
         # restores/saves Cargo state.
@@ -243,14 +275,18 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: 'nightly-2026-04-19'
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: runner.environment == 'github-hosted'
 
       - name: Enable sccache
+        if: runner.environment == 'github-hosted'
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
@@ -299,22 +335,34 @@ jobs:
   rust-test:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Archive downloads can consume over 10 minutes before tests begin.
     # Keep a bounded job with time for each shard to finish its tests.
-    timeout-minutes: 30
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5]
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
       # available but does not build test binaries; those come from the archive.
       # Do not restore or save a Rust target cache: the archive is the cache.
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: 'nightly-2026-04-19'
           target: wasm32-unknown-unknown
           cache: false
 
@@ -348,28 +396,46 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/5 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
+        run: |
+          # Each shard gets a fresh archive extraction. The persistent target
+          # cache is shared between jobs and must not hold nested archive output.
+          nextest_extract="$(mktemp -d "$RUNNER_TEMP/nextest.XXXXXX")"
+          cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/5 --archive-file nextest-archive.tar.zst --extract-to "$nextest_extract" --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
           fetch-depth: 2
 
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: runner.environment == 'github-hosted'
 
       - name: Enable sccache
+        if: runner.environment == 'github-hosted'
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=${{ runner.environment == 'github-hosted' }}" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
@@ -436,6 +502,29 @@ jobs:
             data/card-data.json
             data/card-names.json
           key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Identify private parse baseline
+        id: private-baseline
+        if: github.event.repository.private && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          BASE=HEAD
+          if [ "$EVENT_NAME" = pull_request ]; then
+            BASE="$(./scripts/parse-diff-base.sh "$PR_HEAD")"
+            # checkout's depth 2 already contains both merge parents and trees;
+            # persist-credentials:false deliberately removes later Git auth.
+          fi
+          python3 scripts/private_parse_baseline.py identify --ref "$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Restore private parse baseline
+        if: github.event.repository.private && github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .private-parse-baseline/coverage-data.json
+          key: ${{ steps.private-baseline.outputs.cache_key }}
 
       - name: Cache card-data gate results
         # Proof-of-passage cache for the two expensive steps that are pure
@@ -585,7 +674,7 @@ jobs:
             --fail-on-engine
 
       - name: Parse-detail diff vs base baseline
-        # PR-only review aid (NEVER blocks — continue-on-error): surfaces the
+        # PR-only review aid: surfaces the
         # field-level parse changes this PR introduces, for the reviewing LLM.
         # Unlike the regression check above (supported flips only), this diffs
         # the full parse_details tree.
@@ -604,10 +693,13 @@ jobs:
         # hit; only the new bin links).
         id: parsediff
         if: github.event_name == 'pull_request'
-        continue-on-error: true
+        # Private cache misses rebuild the exact base. Missing private evidence
+        # is a failed gate; public behavior stays intact.
+        continue-on-error: ${{ !github.event.repository.private }}
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PRIVATE_CI: ${{ github.event.repository.private && 'true' || 'false' }}
         run: |
           set -euo pipefail
           echo "$PR_NUMBER" > pr-number.txt
@@ -623,6 +715,10 @@ jobs:
           # cards). Reading the base off the merge commit's parent keeps both
           # sides in lockstep no matter how stale (or main-merged) the PR is.
           if ! BASE_SHA="$(./scripts/parse-diff-base.sh "$HEAD_SHA")"; then
+            if [ "$PRIVATE_CI" = true ]; then
+              echo "::error::Cannot identify the exact private baseline parent."
+              exit 1
+            fi
             # An unmergeable PR has no synthetic merge parent. A shallow or
             # missing parent is never licensed to use the frozen webhook base:
             # that would bill intervening main changes to this PR.
@@ -630,12 +726,28 @@ jobs:
             echo "produced=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # The depth-2 checkout already supplies this parent and its full tree.
           BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
           HEAD_HASH="$(./scripts/engine-source-hash.sh HEAD)"
           if [ "$BASE_HASH" = "$HEAD_HASH" ]; then
             echo "Engine source unchanged vs base ($BASE_HASH) — no parse change possible; skipping."
             echo "produced=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$PRIVATE_CI" = true ]; then
+            # Preserve the HEAD diff binary before compiling the BASE on a
+            # cold miss into the same sequential target cache. Base generation
+            # cannot overwrite this binary or the head's coverage JSON.
+            cargo build --profile tool --features cli --bin coverage-parse-diff
+            DIFF_BIN="$(realpath target)/tool/coverage-parse-diff"
+            BASELINE=.private-parse-baseline/coverage-data.json
+            if ! python3 scripts/private_parse_baseline.py validate --ref "$BASE_SHA"; then
+              python3 scripts/private_parse_baseline.py build --ref "$BASE_SHA"
+            fi
+            "$DIFF_BIN" "$BASELINE" data/coverage-data.json \
+              --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+              --markdown parse-diff.md --json parse-diff.json
+            echo "produced=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
@@ -667,6 +779,17 @@ jobs:
             parse-diff.md
             parse-diff.json
             pr-number.txt
+
+      - name: Prepare private main parse baseline
+        if: github.event.repository.private && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python3 scripts/private_parse_baseline.py store --ref HEAD
+
+      - name: Save private main parse baseline
+        if: github.event.repository.private && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .private-parse-baseline/coverage-data.json
+          key: ${{ steps.private-baseline.outputs.cache_key }}
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
@@ -700,7 +823,7 @@ jobs:
           jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.stamped.json
 
       - name: Upload data to R2 (preview)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: vars.CI_ENABLE_PUBLISHING == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -728,7 +851,7 @@ jobs:
         # bounded by distinct parser states, not commit count. best-effort
         # (continue-on-error): a missed publish just defers a PR's comment to
         # "baseline pending" until the next main push, never wedges main.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: vars.CI_ENABLE_PUBLISHING == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -749,14 +872,26 @@ jobs:
     # Its output (draft-pools.json) is not consumed by ci.yml — this is a
     # main-only smoke test that draft-pool-gen still compiles and runs.
     name: Draft pools (smoke)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    timeout-minutes: 20
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 20 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
+          cache: ${{ runner.environment == 'github-hosted' }}
           # No wasm32 target: draft-pool-gen is a native binary. The target list
           # isn't part of the rust-cache key, so omitting it still shares the
           # rust-debug cache with card-data-gate.
@@ -799,13 +934,26 @@ jobs:
 
   wasm-check:
     name: WASM compile check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 10 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
@@ -817,13 +965,25 @@ jobs:
     # consumes this job's entire 15-minute timeout.
     if: ${{ false }}
     name: Tauri compile check + tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 15 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: '1.98.1'
+          cache: ${{ runner.environment == 'github-hosted' }}
           cache-shared-key: rust-tauri
           cache-workspaces: |
             . -> target
@@ -862,10 +1022,21 @@ jobs:
 
   android-debug-apk:
     name: Android debug APK (ARM64)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -898,6 +1069,8 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          toolchain: '1.98.1'
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: aarch64-linux-android
           cache-shared-key: rust-tauri-android-arm64
           cache-workspaces: client/src-tauri -> target
@@ -971,8 +1144,8 @@ jobs:
 
   rust-check:
     name: Rust (fmt, clippy, test, coverage-gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     needs:
       - rust-lint
       - rust-test-build
@@ -982,8 +1155,15 @@ jobs:
       - wasm-check
       - tauri-check
       - android-debug-apk
-    if: always()
+    # Report failures, but let superseded workflow cancellation finish.
+    if: ${{ (!cancelled()) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - name: Check split Rust jobs
         env:
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
@@ -1010,11 +1190,22 @@ jobs:
 
   lobby-worker-test:
     name: Lobby worker (pnpm test)
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
     # Cache-hit npm ci runs have exceeded five minutes; leave room for the measured slow tail.
-    timeout-minutes: 10
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 10 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1034,13 +1225,22 @@ jobs:
 
   card-bot-test:
     name: Card bot (bun test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 5 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The tests never touch git; don't leave the token in .git/config.
           persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -1057,12 +1257,22 @@ jobs:
 
   frontend:
     name: Frontend (lint, type-check, test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 15 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/prepare-private-ci
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1121,15 +1331,26 @@ jobs:
 
   draft-match-wasm-proof:
     name: Draft match proof (real WASM)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_LINUX_RUNNER || '["ubuntu-24.04"]') }}
+    timeout-minutes: ${{ contains(vars.CI_LINUX_RUNNER, 'self-hosted') && 360 || 30 }}
     steps:
+      - name: Wait for saget CI capacity
+        if: runner.environment == 'self-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          test "${SAGET_CI_SLOT_PROTOCOL:-}" = step-v1
+          python3 /run/saget-ci/slot.py --step
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/prepare-private-ci
+
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          toolchain: '1.98.1'
+          cache: ${{ runner.environment == 'github-hosted' }}
           target: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
           rustflags: ""

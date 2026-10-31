@@ -65,5 +65,8 @@ Comprehensive Rules.
 
 ## Automation
 
-GitHub Actions is disabled here; the inherited workflows target upstream's infrastructure. Do
-not enable upstream's release or deployment workflows.
+Bryan requested private-project CI on saget on 2026-10-29. Only core CI, the game-AI gates
+and trusted action-pin audit are enabled for this fork; all other inherited workflows stay
+disabled. The inherited workflows target upstream infrastructure. Do not enable upstream's
+release or deployment workflows. See [private CI](private-ci.md) for the backend switch,
+stable Rust toolchain and isolation boundaries.
