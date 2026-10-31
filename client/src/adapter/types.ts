@@ -5311,7 +5311,18 @@ export type AiProposalSubmission =
   | { status: "stale"; reason: string }
   | { status: "rejected"; rejection: ActionRejection };
 
+/** Host-owned preferences for an attachment to a game already in progress.
+ * Temporary holds are deliberately separate from standing Full Control. */
+export interface GameplayPreferences {
+  phase_stops: PhaseStop[];
+  priority_passing_mode: PriorityPassingMode;
+  full_control: boolean;
+}
+
 export interface EngineAdapter {
+  /** undefined: initialize from local defaults; null: read-only attachment;
+   * otherwise adopt these host preferences without sending bootstrap actions. */
+  readonly initialGameplayPreferences?: GameplayPreferences | null;
   initialize(): Promise<void>;
   initializeGame(
     deckData?: unknown,

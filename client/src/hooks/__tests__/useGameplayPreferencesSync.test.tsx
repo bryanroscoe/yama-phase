@@ -34,6 +34,78 @@ describe("useGameplayPreferencesSync", () => {
 
   afterEach(() => cleanup());
 
+  it("adopts server preferences without dispatching bootstrap actions, then sends explicit changes", async () => {
+    const serverAdapter = {
+      initialGameplayPreferences: {
+        phase_stops: [{ phase: "Upkeep", scope: "OpponentsTurns" }],
+        priority_passing_mode: "Standard",
+        full_control: true,
+      },
+    } as unknown as EngineAdapter;
+    useGameStore.setState({ adapter: serverAdapter, gameState, engineCommitEpoch: 1 });
+    const hook = renderHook(() => useGameplayPreferencesSync());
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([{ phase: "Upkeep", scope: "OpponentsTurns" }]);
+    expect(useUiStore.getState().fullControl).toBe(true);
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+    hook.unmount();
+    renderHook(() => useGameplayPreferencesSync());
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: 2 });
+      usePreferencesStore.setState({ cardSize: "large" });
+    });
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+
+    act(() => usePreferencesStore.getState().setPhaseStops([]));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "SetPhaseStops", data: { stops: [] } }, serverAdapter, expect.any(Number),
+    );
+    act(() => useUiStore.getState().toggleFullControl());
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "SetPriorityPassingMode", data: { mode: "Standard" } }, serverAdapter, expect.any(Number),
+    );
+    // A genuinely new attachment adopts the host again, even on the same adapter.
+    act(() => useGameStore.setState({ gameSessionGeneration: nextGameSessionGeneration() }));
+    expect(useUiStore.getState().fullControl).toBe(true);
+    expect(usePreferencesStore.getState().phaseStops).toEqual([{ phase: "Upkeep", scope: "OpponentsTurns" }]);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves temporary server holds and pass modes when unrelated preferences change", async () => {
+    const serverAdapter = {
+      initialGameplayPreferences: { phase_stops: [], priority_passing_mode: "Standard", full_control: false },
+    } as unknown as EngineAdapter;
+    useUiStore.setState({ fullControl: true });
+    usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
+    useGameStore.setState({ adapter: serverAdapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+    expect(useUiStore.getState().fullControl).toBe(false);
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+
+    act(() => usePreferencesStore.getState().setPhaseStops([{ phase: "End", scope: "OwnTurn" }]));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "SetPhaseStops", data: { stops: [{ phase: "End", scope: "OwnTurn" }] } }, serverAdapter, expect.any(Number),
+    );
+    act(() => usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows"));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "SetPriorityPassingMode", data: { mode: "SkipLowUseWindows" } }, serverAdapter, expect.any(Number),
+    );
+  });
+
+  it("keeps a read-only server attachment from sending local defaults", () => {
+    const spectatorAdapter = { initialGameplayPreferences: null } as unknown as EngineAdapter;
+    useGameStore.setState({ adapter: spectatorAdapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+    act(() => useUiStore.getState().toggleFullControl());
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+  });
+
   it("waits for an installed snapshot, dedupes, and resends for a fresh lifecycle", async () => {
     renderHook(() => useGameplayPreferencesSync());
 

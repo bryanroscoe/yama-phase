@@ -64,6 +64,26 @@ function successfulSendFor(adapter: EngineAdapter, generation: number): LastSent
   return { adapter, generation };
 }
 
+function initializeServerPreferences(adapter: EngineAdapter, generation: number): void {
+  if (lastSent?.adapter === adapter && lastSent.generation === generation) return;
+  const initial = adapter.initialGameplayPreferences;
+  if (initial == null) return;
+
+  // Cache before hydrating: store subscriptions may request another drain.
+  // Neither attachment nor StrictMode remounts are player preference changes.
+  lastSent = {
+    adapter,
+    generation,
+    stops: initial.phase_stops.slice(),
+    mode: initial.full_control ? "FullControl" : initial.priority_passing_mode,
+  };
+  usePreferencesStore.setState({
+    phaseStops: initial.phase_stops.slice(),
+    priorityPassingMode: initial.priority_passing_mode,
+  });
+  useUiStore.setState({ fullControl: initial.full_control });
+}
+
 async function drainGameplayPreferenceSync(): Promise<void> {
   if (syncInFlight) return;
   syncInFlight = true;
@@ -78,7 +98,9 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         gameState,
       } = useGameStore.getState();
       if (!adapter || !gameState) continue;
+      if (adapter.initialGameplayPreferences === null) continue;
 
+      initializeServerPreferences(adapter, generation);
       const stops = usePreferencesStore.getState().phaseStops;
       const mode = effectivePriorityPassingMode();
       const sent = successfulSendFor(adapter, generation);
@@ -155,8 +177,8 @@ function sendGameplayPreferences(): void {
   void drainGameplayPreferenceSync();
 }
 
-/** Push engine-owned gameplay preferences once per game lifecycle and whenever
- * either preference changes. Mount exactly once in `GameProvider`. */
+/** Initialize local engines from device preferences; adopt host preferences on
+ * attachments. Then push changes. Mount exactly once in `GameProvider`. */
 export function useGameplayPreferencesSync(): void {
   useEffect(() => {
     const unsubGame = useGameStore.subscribe(
