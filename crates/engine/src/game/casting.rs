@@ -23162,7 +23162,29 @@ fn exact_mana_ability_successors(
         return Vec::new();
     };
     state.waiting_for = waiting;
-    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, 0);
+    if selection.ability_index.is_none() {
+        // CR 305.6 + CR 605.4a: the subtype-only tap produces directly, without
+        // an indexed ability's completed-frame cursor. Like the manual payment
+        // tap, this seam owns its completed frame: collect delayed mana bonuses
+        // before testing the route, using the consumed-occurrence-aware authority.
+        // Preserve a returned prompt; the bounded walker below fails closed on
+        // choices it cannot model. Indexed and color-choice reducers already
+        // collect their own frames and must not receive a second bonus scan.
+        if let Some(pause) = super::mana_abilities::collect_completed_mana_frame_events(
+            &mut state,
+            Vec::new(),
+            &mut events,
+            0,
+            crate::types::game_state::ManaTriggerFixedPointResume::Root {
+                player,
+                resume: Box::new(ManaAbilityResume::Priority),
+            },
+        ) {
+            state.waiting_for = pause;
+        }
+    } else {
+        super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, 0);
+    }
     settle_exact_mana_ability_prompts(state, player, 3)
 }
 
