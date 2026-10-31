@@ -95,11 +95,15 @@ fn targeted_cast_filter_probe_does_not_open_nested_action() {
 // CR 601.2g/h + 605.3a/b: explicitly take the filter route; the ordinary auto-
 // tap heuristic does not schedule it. Every payment/color choice is engine-issued.
 fn pay_through_filter_lands(r: &mut GameRunner) {
+    pay_through_filter_route(r, "Swamp", ManaType::Black);
+}
+
+fn pay_through_filter_route(r: &mut GameRunner, producer: &str, produced: ManaType) {
     assert!(matches!(
         r.state().waiting_for,
         WaitingFor::ManaPayment { player: P0, .. }
     ));
-    for name in ["Swamp", "Darkwater Catacombs", "Fetid Heath"] {
+    for name in [producer, "Darkwater Catacombs", "Fetid Heath"] {
         let source = r
             .state()
             .battlefield
@@ -107,7 +111,7 @@ fn pay_through_filter_lands(r: &mut GameRunner) {
             .copied()
             .find(|id| r.state().objects[id].name == name)
             .unwrap();
-        if name == "Swamp" {
+        if name == producer {
             let selection =
                 engine::game::mana_sources::activatable_mana_source_selections(r.state(), P0)
                     .into_iter()
@@ -127,8 +131,15 @@ fn pay_through_filter_lands(r: &mut GameRunner) {
                 WaitingFor::PayManaAbilityMana { options, .. } => {
                     let payment = options
                         .into_iter()
-                        .find(|payment| payment == &vec![ManaType::Black])
-                        .expect("black funds the filter");
+                        .find(|payment| {
+                            payment
+                                == &vec![if name == "Darkwater Catacombs" {
+                                    produced
+                                } else {
+                                    ManaType::Black
+                                }]
+                        })
+                        .expect("the producer or first filter funds the next filter");
                     r.act(GameAction::PayManaAbilityMana { payment }).unwrap();
                 }
                 WaitingFor::ChooseManaColor { .. } => {
@@ -247,4 +258,180 @@ fn single_target_cast_preserves_announcement_carrier_during_payment_probe() {
     assert_eq!(r.state().objects[&target].zone, Zone::Graveyard);
     assert!(r.state().stack.is_empty());
     assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+}
+
+// CR 605.1b/605.4a: Molten Tide's delayed, fixed bonus resolves immediately
+// after the Mountain's mana ability, before the producer -> filter route pays.
+// The body is the verified Oracle spell face of Pyre Rhymer // Molten Tide;
+// registering that body through resolution isolates the mana trigger seam.
+fn delayed_bonus_filter_board(
+    with_bonus: bool,
+    intrinsic_only: bool,
+    generic: u32,
+) -> (GameRunner, engine::types::identifiers::ObjectId) {
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::ManaUnit;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let mountain = s.add_basic_land(P0, ManaColor::Red);
+    s.add_real_card(
+        P0,
+        "Darkwater Catacombs",
+        Zone::Battlefield,
+        shared_card_db().unwrap(),
+    );
+    s.add_real_card(
+        P0,
+        "Fetid Heath",
+        Zone::Battlefield,
+        shared_card_db().unwrap(),
+    );
+    let spell = s
+        .add_creature_to_hand(P0, "Filter payment witness", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic,
+        })
+        .id();
+    let tide = with_bonus.then(|| {
+        s.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(9999), false, vec![])],
+        );
+        s.add_spell_to_hand_from_oracle(
+            P0,
+            "Molten Tide",
+            true,
+            "Until end of turn, whenever you tap a Mountain for mana, add an additional {R}.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id()
+    });
+    let mut r = s.build();
+    if let Some(tide) = tide {
+        r.cast(tide).resolve();
+        assert_eq!(
+            r.state().delayed_triggers.len(),
+            1,
+            "resolved spell registers its delayed mana bonus"
+        );
+    }
+    for player in &mut r.state_mut().players {
+        player.mana_pool.clear();
+    }
+    engine::game::layers::flush_layers(r.state_mut());
+    if intrinsic_only {
+        // CR 305.6: the basic subtype itself supplies the mana ability. This
+        // supported subtype-only source shape is installed after layer preparation:
+        // ordinary layer evaluation synthesizes an indexed ability. This is a
+        // reduced fallback-seam witness, not a naturally occurring replay.
+        let object = r.state_mut().objects.get_mut(&mountain).unwrap();
+        object.abilities = Default::default();
+        object.base_abilities = Default::default();
+    }
+    let probe = engine::game::casting::PriorityCastProbe::new(r.state(), P0);
+    let source = engine::game::mana_sources::activatable_mana_source_selections(probe.state(), P0)
+        .into_iter()
+        .find(|s| s.source.object_id == mountain)
+        .unwrap();
+    assert_eq!(
+        source.ability_index.is_none(),
+        intrinsic_only,
+        "reach the intended mana reducer"
+    );
+    (r, spell)
+}
+
+#[test]
+fn delayed_bonus_filter_route_is_offered_and_pays_exactly_once() {
+    assert_delayed_bonus_filter_route(false);
+}
+
+#[test]
+fn delayed_bonus_filter_route_with_intrinsic_producer_is_offered() {
+    assert_delayed_bonus_filter_route(true);
+}
+
+fn assert_delayed_bonus_filter_route(intrinsic_only: bool) {
+    let (mut r, spell) = delayed_bonus_filter_board(true, intrinsic_only, 2);
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: r.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    let before = serde_json::to_value(r.state()).unwrap();
+    let contract = AiDecisionContract::issue(r.state(), P0);
+    assert!(
+        contract.contains_action(r.state(), &action),
+        "the delayed bonus must fund the engine-issued filter route"
+    );
+    assert_eq!(
+        serde_json::to_value(r.state()).unwrap(),
+        before,
+        "preview cannot mutate live state"
+    );
+    r.act(action).unwrap();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    pay_through_filter_route(&mut r, "Mountain", ManaType::Red);
+    r.resolve_top();
+    assert_eq!(r.state().objects[&spell].zone, Zone::Battlefield);
+    assert_eq!(
+        r.state().players[0].mana_pool.total(),
+        0,
+        "base plus one bonus exactly pays the filter and spell"
+    );
+    assert_eq!(
+        r.state().delayed_triggers.len(),
+        1,
+        "multi-fire trigger stays installed"
+    );
+    assert!(r.state().stack.is_empty());
+}
+
+#[test]
+fn delayed_bonus_filter_route_is_not_offered_without_bonus() {
+    let (r, spell) = delayed_bonus_filter_board(false, true, 2);
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: r.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    let contract = AiDecisionContract::issue(r.state(), P0);
+    assert!(
+        !contract.contains_action(r.state(), &action),
+        "three lands without the bonus cannot pay four mana"
+    );
+    assert!(r
+        .state()
+        .battlefield
+        .iter()
+        .all(|id| !r.state().objects[id].tapped));
+}
+
+#[test]
+fn delayed_bonus_filter_route_cannot_spend_the_bonus_twice() {
+    for intrinsic_only in [false, true] {
+        let (r, spell) = delayed_bonus_filter_board(true, intrinsic_only, 3);
+        let action = GameAction::CastSpell {
+            object_id: spell,
+            card_id: r.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        let before = serde_json::to_value(r.state()).unwrap();
+        let contract = AiDecisionContract::issue(r.state(), P0);
+        assert!(
+            !contract.contains_action(r.state(), &action),
+            "three lands plus one bonus cannot pay five mana (intrinsic={intrinsic_only})"
+        );
+        assert_eq!(serde_json::to_value(r.state()).unwrap(), before);
+    }
 }
