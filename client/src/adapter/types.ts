@@ -5321,7 +5321,9 @@ export interface GameplayPreferences {
 
 export interface EngineAdapter {
   /** undefined: initialize from local defaults; null: read-only attachment;
-   * otherwise adopt these host preferences without sending bootstrap actions. */
+   * otherwise adopt these host preferences without sending bootstrap actions.
+   * Each accepted reconnect supplies a fresh immutable object, even when the
+   * adapter and game lifecycle remain the same. */
   readonly initialGameplayPreferences?: GameplayPreferences | null;
   initialize(): Promise<void>;
   initializeGame(

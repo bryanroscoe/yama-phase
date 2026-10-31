@@ -140,6 +140,9 @@ type PendingWork = PendingLocalAction | PendingRemoteUpdate;
 export type BoundGameSession = {
   adapter: EngineAdapter;
   generation: number;
+  /** Preference actions also belong to the accepted host attachment that
+   * supplied their UI settings; ordinary game actions omit this fence. */
+  preferenceEnvelope?: EngineAdapter["initialGameplayPreferences"];
 };
 
 type GameSessionPreferenceAction = Extract<
@@ -245,6 +248,7 @@ export function isBoundGameSessionCurrent(session: BoundGameSession | null): boo
     game.adapter === session.adapter
     && game.gameSessionGeneration === session.generation
     && game.gameState !== null
+    && (!("preferenceEnvelope" in session) || session.adapter.initialGameplayPreferences === session.preferenceEnvelope)
   );
 }
 
@@ -259,7 +263,8 @@ function sameBoundGameSession(
   a: BoundGameSession | null,
   b: BoundGameSession | null,
 ): boolean {
-  return a?.adapter === b?.adapter && a?.generation === b?.generation;
+  return a?.adapter === b?.adapter && a?.generation === b?.generation
+    && a?.preferenceEnvelope === b?.preferenceEnvelope;
 }
 
 /**
@@ -1023,15 +1028,15 @@ export async function previewInteractionResponse(
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is
- * still current. A late response from a disposed or resumed session is dropped
- * before snapshot fetch/commit, so it cannot overwrite the replacement game. */
+ * and host attachment are still current. Queued work and late responses from
+ * an older attachment are dropped before submission or snapshot fetch/commit. */
 export function dispatchActionForGameSession(
   action: GameSessionPreferenceAction,
   adapter: EngineAdapter,
   generation: number,
   actor: number = getPlayerId(),
 ): Promise<void> {
-  return dispatchActionInternal(action, actor, { adapter, generation });
+  return dispatchActionInternal(action, actor, { adapter, generation, preferenceEnvelope: adapter.initialGameplayPreferences });
 }
 
 /**
