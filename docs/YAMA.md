@@ -16,7 +16,10 @@ Both upstream licenses and authorship are retained.
 Yama's `GameStarted` envelope carries an optional top-level `gameplay_preferences`
 extension. It initializes the client from the existing match's standing settings
 without dispatching preference actions. A temporary priority hold stays separate
-from standing Full Control; null marks a read-only attachment. Ordinary Phase
+from standing Full Control; null marks a read-only attachment. Every accepted
+reconnect replaces this preference envelope, including on a reused adapter.
+Queued preference actions and late completions from the prior envelope are
+discarded; later explicit changes use the new envelope. Ordinary Phase
 servers omit the extension and retain device-default initialization. This is a
 Yama envelope extension, not a change to the Phase wire payload or protocol version;
 Yama pins the matching client and server together.

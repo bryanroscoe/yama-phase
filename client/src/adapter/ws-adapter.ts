@@ -2893,10 +2893,6 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        // Yama attachments carry host-owned settings outside the Phase wire
-        // payload. Install them before any event can commit the first snapshot.
-        // Ordinary Phase servers omit the extension and keep local initialization.
-        this.initialGameplayPreferences = msg.gameplay_preferences;
         const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; full_key?: FullSessionKey; events?: GameEvent[]; rewind_targets?: RewindOption[] };
         const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
           ? this.options.nativePregame
@@ -2906,9 +2902,16 @@ export class WebSocketAdapter implements EngineAdapter {
           playerToken: data.player_token,
           fullKey: data.full_key,
         })) break;
+        // Establish the join identity before validating its Full key. The
+        // accepted preference envelope must precede reconnect notifications,
+        // which can themselves wake subscriptions and retry queued work.
+        if (!this._gameCode && this.joinGameCode) this._gameCode = this.joinGameCode;
         if (nativeReconnect) {
           if (!this.acceptFullSessionKey(data.full_key)) break;
+        } else if (data.full_key && !this.acceptFullSessionKey(data.full_key)) {
+          break;
         }
+        this.initialGameplayPreferences = msg.gameplay_preferences;
         this.emit({ type: "bootstrapDelivered" });
         if (this.reconnectInFlight) {
           this.completeReconnect(true);
@@ -2950,11 +2953,6 @@ export class WebSocketAdapter implements EngineAdapter {
         }
         this.receivedGameStarted = true;
         // Joiners receive their player_token here (hosts get it via GameCreated).
-        // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
-        if (!this._gameCode && this.joinGameCode) {
-          this._gameCode = this.joinGameCode;
-        }
-        if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         if (!nativeReconnect && data.player_token) {
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });

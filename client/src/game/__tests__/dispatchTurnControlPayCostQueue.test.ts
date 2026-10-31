@@ -45,7 +45,7 @@ import {
   buildLegalActionsResult,
   buildPriorityWaitingFor,
 } from "../../test/factories/gameStateFactory";
-import { dispatchAction } from "../dispatch";
+import { dispatchAction, dispatchActionForGameSession } from "../dispatch";
 
 const MOUNTAIN_ID = 10;
 
@@ -161,6 +161,35 @@ describe("turn-control PayCost queueing (#6431)", () => {
     // second dispatch call, which is the window the queued action lands in.
     usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
     vi.useFakeTimers();
+  });
+
+  it.each([false, true])("fences preferences against a reconnect while queued/in-flight (queued: %s)", async (queued) => {
+    const state = buildGameState({ waiting_for: buildPriorityWaitingFor(), priority_player: 0 });
+    const legal = buildLegalActionsResult({ actions: [] });
+    let release!: () => void;
+    const pending = new Promise<SubmitResult>((resolve) => { release = () => resolve({ events: [] }); });
+    const adapter = {
+      ...baseAdapter(),
+      initialGameplayPreferences: { phase_stops: [], priority_passing_mode: "Standard" as const, full_control: false },
+      submitAction: vi.fn().mockReturnValueOnce(pending).mockResolvedValue({ events: [] }),
+      getState: vi.fn(async () => state),
+      getLegalActions: vi.fn(async () => legal),
+      getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({ state, legalResult: legal, seq: nextSnapshotSeq() })),
+    };
+    seedStore(adapter);
+    useGameStore.setState({ gameState: state, waitingFor: state.waiting_for });
+    const generation = useGameStore.getState().gameSessionGeneration;
+    const preference: Extract<GameAction, { type: "SetPhaseStops" }> = { type: "SetPhaseStops", data: { stops: [] } };
+    const first = queued ? dispatchAction({ type: "PassPriority" }, 0)
+      : dispatchActionForGameSession(preference, adapter, generation, 0);
+    const next = queued ? dispatchActionForGameSession(preference, adapter, generation, 0) : Promise.resolve();
+    adapter.initialGameplayPreferences = { phase_stops: [], priority_passing_mode: "Standard", full_control: true };
+    release();
+    await Promise.all([first, next]);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(1);
+    expect(adapter.getSnapshot).toHaveBeenCalledTimes(queued ? 1 : 0);
+    await dispatchActionForGameSession({ type: "SetPriorityPassingMode", data: { mode: "Standard" } }, adapter, generation, 0);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(2);
   });
 
   it.each([false, true])("clears both preference lists across fresh snapshots (game action already queued: %s)", async (gameActionInFlight) => {

@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameState } from "../../adapter/types";
+import type { EngineAdapter, GameState, GameplayPreferences } from "../../adapter/types";
 import { dispatchActionForGameSession } from "../../game/dispatch";
 import { useGameplayPreferencesSync } from "../useGameplayPreferencesSync";
 import {
@@ -34,6 +34,63 @@ describe("useGameplayPreferencesSync", () => {
   });
 
   afterEach(() => cleanup());
+
+  it("adopts each reconnect envelope on the same lifecycle without sending it back", async () => {
+    const server = { initialGameplayPreferences: {
+      phase_stops: [], priority_passing_mode: "Standard", full_control: false,
+    } as GameplayPreferences };
+    const serverAdapter = server as unknown as EngineAdapter;
+    useGameStore.setState({ adapter: serverAdapter, gameState, engineCommitEpoch: 1 });
+    const generation = useGameStore.getState().gameSessionGeneration;
+    renderHook(() => useGameplayPreferencesSync());
+
+    act(() => {
+      server.initialGameplayPreferences = {
+        phase_stops: [{ phase: "Draw", scope: "OwnTurn" }],
+        priority_passing_mode: "SkipLowUseWindows", full_control: true,
+      };
+      useGameStore.setState({ engineCommitEpoch: 2 });
+    });
+    expect(useGameStore.getState().gameSessionGeneration).toBe(generation);
+    expect(usePreferencesStore.getState().phaseStops).toEqual([{ phase: "Draw", scope: "OwnTurn" }]);
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("SkipLowUseWindows");
+    expect(useUiStore.getState().fullControl).toBe(true);
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+
+    act(() => useUiStore.getState().toggleFullControl());
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "SetPriorityPassingMode", data: { mode: "SkipLowUseWindows" } }, serverAdapter, generation,
+    );
+  });
+
+  it("drops an old preference completion before adopting a newer reconnect envelope", async () => {
+    const server = { initialGameplayPreferences: {
+      phase_stops: [], priority_passing_mode: "Standard", full_control: false,
+    } as GameplayPreferences };
+    const serverAdapter = server as unknown as EngineAdapter;
+    useGameStore.setState({ adapter: serverAdapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+    let finish!: () => void;
+    vi.mocked(dispatchActionForGameSession).mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    act(() => usePreferencesStore.getState().setPhaseStops([{ phase: "End", scope: "AllTurns" }]));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
+    act(() => {
+      // Both a pending mode change and an older stops response must lose to
+      // the accepted reconnect, even though the adapter/generation stay put.
+      usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
+      server.initialGameplayPreferences = {
+        phase_stops: [{ phase: "Upkeep", scope: "OwnTurn" }],
+        priority_passing_mode: "Standard", full_control: true,
+      };
+      useGameStore.setState({ engineCommitEpoch: 2 });
+    });
+    await act(async () => { finish(); });
+    expect(usePreferencesStore.getState().phaseStops).toEqual([{ phase: "Upkeep", scope: "OwnTurn" }]);
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
+    expect(useUiStore.getState().fullControl).toBe(true);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1);
+  });
 
   it("adopts server preferences without dispatching bootstrap actions, then sends explicit changes", async () => {
     const serverAdapter = {
