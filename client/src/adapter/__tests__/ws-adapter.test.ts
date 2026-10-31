@@ -308,6 +308,32 @@ describe("WebSocketAdapter", () => {
     await initPromise;
   });
 
+  it("installs host gameplay preferences before publishing an attachment snapshot", () => {
+    expect(adapter.initialGameplayPreferences).toBeUndefined();
+    const preferences = {
+      phase_stops: [{ phase: "Upkeep", scope: "OwnTurn" }],
+      priority_passing_mode: "Standard",
+      full_control: true,
+    };
+    const observed: unknown[] = [];
+    adapter.onEvent((event) => {
+      if (event.type === "stateChanged") observed.push(adapter.initialGameplayPreferences);
+    });
+    ws.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted",
+      gameplay_preferences: preferences,
+      data: { state: createMockState(), your_player: 0 },
+    }));
+    expect(observed).toEqual([preferences]);
+    expect(adapter.initialGameplayPreferences).toEqual(preferences);
+
+    ws.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted", gameplay_preferences: null,
+      data: { state: createMockState(), your_player: 255 },
+    }));
+    expect(adapter.initialGameplayPreferences).toBeNull();
+  });
+
   it("sends the payload-free authenticated whole-match concession intent", () => {
     expect(supportsMatchConcede(adapter)).toBe(true);
 

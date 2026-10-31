@@ -12,6 +12,7 @@ import type {
   GameFormat,
   GameLogEntry,
   GameState,
+  GameplayPreferences,
   LegalActionsResult,
   MatchConfig,
   ManaCost,
@@ -1594,6 +1595,7 @@ const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
  * for multiplayer games.
  */
 export class WebSocketAdapter implements EngineAdapter {
+  initialGameplayPreferences?: GameplayPreferences | null;
   readonly supportsMatchConcede = true;
   readonly supportsTakeback = true;
   readonly supportsTurnRewind = true;
@@ -2759,7 +2761,7 @@ export class WebSocketAdapter implements EngineAdapter {
     return this._serverInfo;
   }
 
-  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
+  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown; gameplay_preferences?: GameplayPreferences | null }): void {
     if (this.sessionIdentityRejected) return;
 
     switch (msg.type) {
@@ -2891,6 +2893,10 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
+        // Yama attachments carry host-owned settings outside the Phase wire
+        // payload. Install them before any event can commit the first snapshot.
+        // Ordinary Phase servers omit the extension and keep local initialization.
+        this.initialGameplayPreferences = msg.gameplay_preferences;
         const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; full_key?: FullSessionKey; events?: GameEvent[]; rewind_targets?: RewindOption[] };
         const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
           ? this.options.nativePregame
