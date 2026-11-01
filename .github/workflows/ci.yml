@@ -303,7 +303,7 @@ jobs:
           retention-days: 1
 
   rust-test:
-    name: Rust tests (shard ${{ matrix.shard }}/4)
+    name: Rust tests (shard ${{ matrix.shard }}/5)
     needs: rust-test-build
     runs-on: ubuntu-latest
     # A shard hit the 30-minute ceiling after over 10 minutes of archive setup;
