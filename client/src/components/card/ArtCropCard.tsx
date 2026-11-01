@@ -15,6 +15,7 @@ import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
+import { CreditedArt } from "./CreditedArt.tsx";
 import { CardBackFallback } from "./CardBackFallback.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
@@ -198,7 +199,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               {renderCardBack && (!faceDownMarker || !src) ? (
                 <CardBackFallback className="absolute inset-0 h-full w-full" />
               ) : src ? (
-                <img
+                <CreditedArt
                   src={src}
                   alt={cardName}
                   draggable={false}

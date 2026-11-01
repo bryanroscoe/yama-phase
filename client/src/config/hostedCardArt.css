@@ -1,0 +1,29 @@
+/* Opacity and filters composite through ancestors. Normalizing the image alone
+   cannot preserve it inside a phased/eliminated card, preview or moving overlay.
+   Keep their position/scale animation while the hosted app preserves the pixels. */
+html[data-hosted-card-art] [data-card-art],
+html[data-hosted-card-art] *:has([data-card-art]) {
+  opacity: 1 !important;
+  filter: none !important;
+  backdrop-filter: none !important;
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  mix-blend-mode: normal !important;
+}
+
+/* Small portraits cannot hold a readable artist name over the illustration. */
+html[data-hosted-card-art] [data-card-avatar] {
+  overflow: visible !important;
+}
+html[data-hosted-card-art] [data-card-avatar] > img {
+  border-radius: inherit;
+}
+html[data-hosted-card-art] [data-card-avatar] > [data-art-credit] {
+  top: 100%;
+  bottom: auto;
+  left: 50%;
+  right: auto;
+  width: max-content;
+  max-width: 8rem;
+  transform: translateX(-50%);
+}

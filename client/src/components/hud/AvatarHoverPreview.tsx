@@ -1,3 +1,4 @@
+import { CreditedArt, type ArtAttribution } from "../card/CreditedArt.tsx";
 import { type CSSProperties, type ReactNode, useCallback, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
@@ -9,6 +10,7 @@ interface Anchor {
 }
 
 interface Props {
+  attribution?: ArtAttribution;
   avatarUrl: string;
   label: string;
   children: ReactNode;
@@ -25,6 +27,7 @@ interface Props {
 const DEFAULT_ACCENT = "rgba(226, 232, 240, 0.9)";
 
 export function AvatarHoverPreview({
+  attribution = "card",
   avatarUrl,
   label,
   children,
@@ -58,6 +61,7 @@ export function AvatarHoverPreview({
   return (
     <div
       ref={ref}
+      data-card-avatar={attribution === "card" ? "" : undefined}
       className={className}
       style={style}
       title={title}
@@ -106,6 +110,7 @@ export function AvatarHoverPreview({
               transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
             >
               <PreviewCard
+                attribution={attribution}
                 avatarUrl={avatarUrl}
                 label={label}
                 accent={accent}
@@ -121,11 +126,13 @@ export function AvatarHoverPreview({
 }
 
 function PreviewCard({
+  attribution,
   avatarUrl,
   label,
   accent,
   onAvatarError,
 }: {
+  attribution: ArtAttribution;
   avatarUrl: string;
   label: string;
   accent: string;
@@ -143,7 +150,8 @@ function PreviewCard({
       }}
     >
       <div className="relative overflow-hidden rounded-[14px] border border-white/10 bg-slate-950">
-        <img
+        <CreditedArt
+          attribution={attribution}
           src={avatarUrl}
           alt={label}
           className="block h-auto w-72 max-w-[60vw] object-cover"

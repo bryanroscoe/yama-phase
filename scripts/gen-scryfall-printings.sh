@@ -60,10 +60,11 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
         faces: (if .card_faces then
           [.card_faces[] | {
             normal: (.image_uris.normal // null),
-            art_crop: (.image_uris.art_crop // null)
+            art_crop: (.image_uris.art_crop // null),
+            artist: (.artist // null)
           }]
         else
-          [{normal: .image_uris.normal, art_crop: .image_uris.art_crop}]
+          [{normal: .image_uris.normal, art_crop: .image_uris.art_crop, artist: (.artist // null)}]
         end)
       }
     }

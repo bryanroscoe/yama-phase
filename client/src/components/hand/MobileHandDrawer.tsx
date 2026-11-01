@@ -331,7 +331,7 @@ const DrawerCard = memo(function DrawerCard({
       {...handlers}
     >
       {src ? (
-        <img
+        <img data-card-art
           src={src}
           {...getCardImageSrcSetProps(src, rungs)}
           alt={cardName}

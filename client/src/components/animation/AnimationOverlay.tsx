@@ -234,6 +234,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     cardAnimationStyle === "webgl" &&
     vfxQuality !== "minimal" &&
     !reduceMotion &&
+    import.meta.env.VITE_HOSTED_CARD_ART !== "1" &&
     cardVfxSupported();
 
   const getObjectRect = useCallback(

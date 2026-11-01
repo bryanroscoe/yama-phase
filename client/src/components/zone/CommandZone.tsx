@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -276,7 +277,7 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
       <div className="absolute inset-0 rounded-[5px] border border-black bg-[#151515] p-[2px]">
         <div className="relative h-full w-full overflow-hidden rounded-[3px] border border-amber-500/40 bg-gradient-to-b from-amber-700 via-amber-900 to-stone-950">
           {artSrc ? (
-            <img
+            <CreditedArt
               src={artSrc}
               alt={group.sourceName ?? label}
               draggable={false}

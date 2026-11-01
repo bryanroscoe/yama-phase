@@ -140,7 +140,7 @@ export function CardImage({
           style={borderStyle ?? { border: "1px solid #4b5563" }}
         />
       ) : (
-        <img
+        <img data-card-art
           src={src!}
           {...getCardImageSrcSetProps(src, rungs)}
           alt={renderedAlt}

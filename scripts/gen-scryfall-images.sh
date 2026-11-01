@@ -105,13 +105,15 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       faces: (if $card.card_faces then
         [$card.card_faces[] | {
           normal: (.image_uris.normal // $card.image_uris.normal),
-          art_crop: (.image_uris.art_crop // $card.image_uris.art_crop),
+          art_crop: (.image_uris.art_crop // .image_uris.normal // (if .image_uris then null else $card.image_uris.art_crop end)),
+          artist: (if .image_uris then (.artist // null) else ($card.artist // null) end),
           orientation: face_orientation($card.layout; .type_line)
         }]
       else
         [{
           normal: $card.image_uris.normal,
           art_crop: $card.image_uris.art_crop,
+          artist: ($card.artist // null),
           orientation: face_orientation($card.layout; $card.type_line)
         }]
       end),
@@ -150,6 +152,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       faces: [{
         normal: $tok.image_uris.normal,
         art_crop: $tok.image_uris.art_crop,
+        artist: ($tok.artist // null),
         orientation: face_orientation($tok.layout; $tok.type_line)
       }],
       layout: $tok.layout,

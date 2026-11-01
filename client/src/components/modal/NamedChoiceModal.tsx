@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -468,7 +469,8 @@ function PlayerOptionButton({
         style={{ borderColor: `${seatColor}cc` }}
       >
         {activeAvatarSrc ? (
-          <img
+          <CreditedArt
+            attribution={avatarIdentity?.kind ?? "card"}
             src={activeAvatarSrc}
             alt=""
             className="h-full w-full object-cover"

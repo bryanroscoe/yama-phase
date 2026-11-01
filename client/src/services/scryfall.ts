@@ -6,6 +6,8 @@ import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
 type FaceOrientation = "landscape" | "portrait";
 
 interface ScryfallImageFace {
+  /** Artist for this exact printed image, not the Oracle card's default art. */
+  artist?: string | null;
   small?: string | null;
   normal?: string | null;
   art_crop?: string | null;
@@ -722,6 +724,7 @@ function isFlipLayout(layout: string | undefined): boolean {
 }
 
 export interface ScryfallCard {
+  artist?: string;
   id?: string;
   oracle_id?: string;
   name: string;
@@ -736,8 +739,82 @@ export interface ScryfallCard {
   image_uris?: Record<string, string>;
   card_faces?: Array<{
     name: string;
+    artist?: string;
     image_uris?: Record<string, string>;
   }>;
+}
+
+function imageCreditIdentity(src: string): { key: string; printingId?: string } | null {
+  try {
+    const url = new URL(src);
+    if (url.hostname === "cards.scryfall.io") {
+      const id = url.pathname.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[a-z]+$/i)?.[1];
+      const side = url.pathname.split("/").find((part) => part === "front" || part === "back");
+      if (id && side) return { key: `${id.toLowerCase()}:${side}`, printingId: id.toLowerCase() };
+    }
+    return { key: `${url.origin}${url.pathname}` };
+  } catch {
+    return null;
+  }
+}
+
+let creditedData: ScryfallDataMap | null = null;
+let creditedPrintings: PrintingsDataMap | null = null;
+const imageArtists = new Map<string, string>();
+const creditRequests = new Map<string, Promise<unknown>>();
+
+/** Resolve attribution by the displayed image's printing and face. Never use a card name. */
+export async function fetchImageArtist(src: string): Promise<string | null> {
+  const identity = imageCreditIdentity(src);
+  if (!identity) return null;
+  await loadScryfallData();
+  if (creditedData !== scryfallDataResolved || creditedPrintings !== printingsDataResolved) {
+    imageArtists.clear();
+    const entries = [
+      ...Object.values(scryfallDataResolved ?? {}),
+      ...Object.values(printingsDataResolved ?? {}).flat(),
+    ];
+    for (const entry of entries) {
+      for (const face of entry.faces) {
+        if (typeof face.artist !== "string" || !face.artist.trim()) continue;
+        for (const url of [face.normal, face.small, face.art_crop]) {
+          const key = url && imageCreditIdentity(url)?.key;
+          if (key) imageArtists.set(key, face.artist);
+        }
+      }
+    }
+    creditedData = scryfallDataResolved;
+    creditedPrintings = printingsDataResolved;
+  }
+  const known = imageArtists.get(identity.key);
+  if (known) return known;
+  if (!identity.printingId) return null;
+  const printingId = identity.printingId;
+  let request = creditRequests.get(printingId);
+  if (!request) {
+    request = rateLimitedFetch(`https://api.scryfall.com/cards/${printingId}`).then(async (response) => {
+      if (!response.ok) throw new Error(`Image attribution unavailable (${response.status})`);
+      const card: unknown = await response.json();
+      return card;
+    });
+    creditRequests.set(printingId, request);
+    void request.catch(() => creditRequests.delete(printingId));
+  }
+  const card = await request;
+  if (!card || typeof card !== "object") return null;
+  const root = card as Record<string, unknown>;
+  const faces = [root, ...(Array.isArray(root.card_faces) ? root.card_faces : [])];
+  for (const face of faces) {
+    if (!face || typeof face !== "object") continue;
+    const candidate = face as Record<string, unknown>;
+    if (typeof candidate.artist !== "string" || !candidate.artist.trim()) continue;
+    if (!candidate.image_uris || typeof candidate.image_uris !== "object") continue;
+    if (Object.values(candidate.image_uris).some((url) => typeof url === "string" && imageCreditIdentity(url)?.key === identity.key)) {
+      imageArtists.set(identity.key, candidate.artist);
+      return candidate.artist;
+    }
+  }
+  return null;
 }
 
 /** The engine-published key of `format`'s legality table; undefined when the card data records none. */
