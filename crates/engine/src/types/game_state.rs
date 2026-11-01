@@ -16564,7 +16564,7 @@ impl GameState {
 
         crate::game::priority::reset_priority(self);
         let waiting_for = WaitingFor::Priority {
-            player: self.active_player,
+            player: self.priority_player,
         };
         crate::game::public_state::sync_waiting_for(self, &waiting_for);
         crate::game::sba::check_state_based_actions(self, &mut Vec::new());

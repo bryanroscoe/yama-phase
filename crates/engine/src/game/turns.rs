@@ -675,7 +675,7 @@ pub(super) fn advance_after_empty_attackers(
     if !state.stack.is_empty() {
         priority::reset_priority(state);
         return WaitingFor::Priority {
-            player: state.active_player,
+            player: state.priority_player,
         };
     }
     mark_empty_attackers_end_combat(state, events);

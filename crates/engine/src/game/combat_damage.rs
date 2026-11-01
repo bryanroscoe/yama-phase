@@ -319,7 +319,7 @@ fn finish_combat_damage_sub_step(
                 // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
                 crate::game::priority::reset_priority(state);
                 return Some(WaitingFor::Priority {
-                    player: state.active_player,
+                    player: state.priority_player,
                 });
             }
             None
