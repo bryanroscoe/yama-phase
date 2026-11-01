@@ -392,7 +392,7 @@ pub(super) fn finish_declare_attackers(
     } else {
         priority::reset_priority(state);
         Ok(WaitingFor::Priority {
-            player: state.active_player,
+            player: state.priority_player,
         })
     }
 }
@@ -643,7 +643,7 @@ fn resume_declare_blockers(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_assign_combat_damage(
     state: &mut GameState,
-    player: PlayerId,
+    _player: PlayerId,
     attacker_id: ObjectId,
     total_damage: u32,
     blockers: &[DamageSlot],
@@ -707,7 +707,9 @@ pub(super) fn handle_assign_combat_damage(
             return Ok(waiting_for);
         }
         priority::reset_priority(state);
-        return Ok(WaitingFor::Priority { player });
+        return Ok(WaitingFor::Priority {
+            player: state.priority_player,
+        });
     }
 
     let attacker_info = state
@@ -855,7 +857,9 @@ pub(super) fn handle_assign_combat_damage(
         return Ok(waiting_for);
     }
     priority::reset_priority(state);
-    Ok(WaitingFor::Priority { player })
+    Ok(WaitingFor::Priority {
+        player: state.priority_player,
+    })
 }
 
 /// CR 510.1d + CR 702.22k: Record the active player's division of a banded
@@ -923,7 +927,7 @@ pub(super) fn handle_assign_blocker_damage(
     }
     priority::reset_priority(state);
     Ok(WaitingFor::Priority {
-        player: state.active_player,
+        player: state.priority_player,
     })
 }
 
@@ -1012,7 +1016,7 @@ fn next_blocker_or_finish_declaration(
     // activations (CR 702.49) — notably Sneak, which is restricted to this step.
     priority::reset_priority(state);
     Ok(WaitingFor::Priority {
-        player: state.active_player,
+        player: state.priority_player,
     })
 }
 
