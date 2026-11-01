@@ -109,7 +109,7 @@ export function WorkspaceCard({
     <div
       className={`${dragHidden ? "pointer-events-none absolute inset-x-0 top-0 w-full opacity-0" : "relative"} min-w-0 ${hoverRevealed ? "z-10" : ""}`}
       style={dragHidden
-        ? { ...(stackStyle ?? {}), marginTop: undefined }
+        ? { ...(stackStyle ?? {}), marginTop: undefined, ...(import.meta.env.VITE_HOSTED_CARD_ART === "1" ? { visibility: "hidden" as const } : {}) }
         : stackStyle ?? { marginTop: stackIndex === 0 ? undefined : "-123.3442622951%" }}
       data-instance-id={card.instanceId}
     >
@@ -178,6 +178,7 @@ export function WorkspaceCard({
           </span>
         ) : (
           <img
+          data-card-art
             key={src}
             src={src}
             alt={displayName}

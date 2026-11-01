@@ -125,7 +125,7 @@ function DragPreviewCard({ image, instanceId, width, height }: {
 }) {
   return image.src === null
     ? <span aria-hidden="true" data-drag-instance-id={instanceId} className="block rounded bg-neutral-900" style={{ width, height }} />
-    : <img data-drag-instance-id={instanceId} src={image.src} alt="" draggable={false} className="rounded object-contain" style={{ width, height }} />;
+    : <img data-card-art data-drag-instance-id={instanceId} src={image.src} alt="" draggable={false} className="rounded object-contain" style={{ width, height }} />;
 }
 
 function WorkspaceDragProjectionOverlay({
@@ -166,7 +166,7 @@ function WorkspaceDragProjectionOverlay({
       {previewImage?.src === null || previewImage === undefined ? (
         <span aria-hidden="true" className="block h-full w-full bg-neutral-900" />
       ) : (
-        <img src={previewImage.src} alt="" draggable={false} className="h-full w-full object-cover shadow-lg" />
+        <img data-card-art src={previewImage.src} alt="" draggable={false} className="h-full w-full object-cover shadow-lg" />
       )}
     </motion.div>
   );

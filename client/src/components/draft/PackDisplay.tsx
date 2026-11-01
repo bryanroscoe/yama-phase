@@ -219,7 +219,7 @@ function RetainedPackCard({ entry, fallbackWidth }: { entry: RetainedCard; fallb
       {entry.imageSrc === null ? (
         <span aria-hidden="true" className="block h-full w-full bg-neutral-900" />
       ) : (
-        <img src={entry.imageSrc} alt={entry.card.name} draggable={false} className="h-full w-full object-contain" />
+        <img data-card-art src={entry.imageSrc} alt={entry.card.name} draggable={false} className="h-full w-full object-contain" />
       )}
     </motion.div>
   );
@@ -427,6 +427,7 @@ function PackCard({
           <span className="flex h-full items-center justify-center bg-white/5 px-2 text-center text-xs text-white/50">{card.name}</span>
         ) : (
           <img
+          data-card-art
             src={src}
             alt={displayName}
             draggable={false}

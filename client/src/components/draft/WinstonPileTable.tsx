@@ -471,7 +471,7 @@ function RevealedCard({
           {card.name}
         </span>
       ) : (
-        <img src={src} alt={displayName} draggable={false} className="h-full w-full object-contain" />
+        <img data-card-art src={src} alt={displayName} draggable={false} className="h-full w-full object-contain" />
       )}
     </div>
   );
