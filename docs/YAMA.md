@@ -92,8 +92,11 @@ never by choosing the Oracle card's default printing. A missing credit leaves an
 identifiable text tile. External account avatars keep their separate identity.
 
 The hosted stylesheet preserves card pixels through their ancestor containers:
-no opacity, filters, masks or blending. Classic position/scale motion remains;
-image-altering WebGL flights are disabled in this build mode. Ordinary Phase builds
+no opacity, filters, masks or blending are applied to the illustration or its
+ancestors. Separate readability washes remain. Classic position/scale motion
+remains; deaths use the existing text effect, and image-altering WebGL flights
+and meld texture morphs are disabled in this build mode. Compact designation
+badges keep their glyphs, and report thumbnails show whole cards. Ordinary Phase builds
 do not enable this hosted policy. Missing back-face crops fall back to that face's
 full image, keeping the illustration and its credit together. Illustrations and mana symbols load from
 Scryfall at runtime; no card images are added to the bundle.

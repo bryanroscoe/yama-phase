@@ -127,6 +127,7 @@ export function DungeonMapPopover({ anchorEl, view, panelRef, announceAllRooms }
         >
           {src ? (
             <img
+          data-card-art
               src={src}
               alt={view.dungeon_name}
               className="absolute inset-0 h-full w-full object-contain"

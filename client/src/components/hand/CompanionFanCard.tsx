@@ -100,7 +100,8 @@ const CompanionFanCard = memo(function CompanionFanCard({
         className={`relative overflow-hidden rounded-lg border ${theme.cardBorder}`}
       >
         {src ? (
-          <img data-card-art
+          <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
             alt={cardName}

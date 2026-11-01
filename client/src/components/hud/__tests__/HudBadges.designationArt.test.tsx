@@ -92,6 +92,15 @@ describe("HudBadges designation art", () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps hosted designation glyphs without requesting an uncredited crop", () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
+    render(<MonarchBadge />);
+    expect(screen.getByLabelText("Monarch")).toHaveTextContent("👑");
+    expect(screen.getByLabelText("Monarch").querySelector("img")).toBeNull();
+    expect(fetchTokenImageUrl).not.toHaveBeenCalled();
   });
 
   it("shows the Monarch glyph first, then the token art", async () => {

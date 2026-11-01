@@ -81,6 +81,7 @@ export function CardTextboxPreview({
       style={{ aspectRatio: `${CARD_W} / ${CARD_H * (bottom - top)}` }}
     >
       <img
+          data-card-art
         src={src}
         {...getCardImageSrcSetProps(src, rungs)}
         alt=""

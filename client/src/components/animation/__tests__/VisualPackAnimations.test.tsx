@@ -140,6 +140,7 @@ afterEach(() => {
   currentSnapshot.clear();
   vi.clearAllMocks();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.useRealTimers();
 });
 
@@ -197,6 +198,29 @@ const STRIKE_SOUNDS = [
 ];
 
 describe("visual-pack animation consumers", () => {
+  it("publishes hosted melds without veiling the board or creating a texture forge", () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
+    seedMeld();
+    render(<AnimationOverlay containerRef={containerRef} />);
+    expect(screen.queryByTestId("meld-forge-animation")).toBeNull();
+    expect([...useAnimationStore.getState().veiledObjectIds]).toEqual([]);
+    expect(imageMock.calls).toEqual([]);
+  });
+
+  it("uses the hosted text death fallback without loading a canvas texture", () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
+    usePreferencesStore.setState({ cardAnimationStyle: "classic" });
+    const object = visibleObject({ id: 50, name: "Destroyed Creature", zone: "Battlefield" });
+    currentSnapshot.set(object.id, rect());
+    seedOverlay(state([object]), state([]), step({
+      type: "CreatureDestroyed", data: { object_id: object.id, source_id: null },
+    }));
+    render(<AnimationOverlay containerRef={containerRef} />);
+    expect(screen.getByText("Destroyed Creature")).toBeInTheDocument();
+    expect(document.querySelector("canvas")).toBeNull();
+    expect(imageMock.calls).toEqual([]);
+  });
+
   it("forges the pre-meld pair and reveals the melded permanent's combined face", () => {
     const { gisela, bruna } = seedMeld();
 
