@@ -172,7 +172,11 @@ jobs:
     name: Perf baseline repeatability and cold-build budget
     if: github.event_name == 'workflow_dispatch' && inputs.perf_repro
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # This diagnostic runs 26 full medians (baseline + 25 validations), not
+    # the 2.5 runs used in the acceptance-budget formula below. That budget
+    # permits runs approaching 10 minutes: allow 260 minutes plus setup/upload.
+    # The acceptance limit remains strictly build + 2.5 * slowest < 25 minutes.
+    timeout-minutes: 300
     permissions:
       contents: read
     steps:
