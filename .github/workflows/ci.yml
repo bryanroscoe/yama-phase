@@ -408,6 +408,19 @@ jobs:
             mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           fi
 
+      - name: Hash card-data inputs once
+        # Both caches describe the same immutable input set. Re-evaluating
+        # hashFiles for the large input tree can hit its 120-second limit.
+        id: card-data-inputs
+        env:
+          CARD_DATA_HASH: ${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+        run: |
+          if [[ ! "$CARD_DATA_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Expected a nonempty SHA-256 card-data input hash" >&2
+            exit 1
+          fi
+          printf 'hash=%s\n' "$CARD_DATA_HASH" >> "$GITHUB_OUTPUT"
+
       - name: Cache generated card data
         # Output of `oracle-gen` is deterministic given (MTGJSON input + engine
         # source). Hash both into the key; on hit, skip the ~30k-card pass.
@@ -420,12 +433,12 @@ jobs:
         # known-tokens.toml via build.rs → OUT_DIR embed. A PR touching only
         # those changes parser behaviour, so omitting them would serve stale
         # card-data from this cache and (via gates-cache below) skip the
-        # validate/coverage gates that would have caught it. hashFiles evaluates
-        # at step start against the clean checkout, so oracle-gen's later
+        # validate/coverage gates that would have caught it. The input hash is captured
+        # once above against the clean checkout, so oracle-gen's later
         # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
         #
         # The AI gate's shared card-data-cache action intentionally uses the
-        # same `cardgen-` key expression, so main pushes can seed generated
+        # same `cardgen-` prefix and hashFiles inputs, so main pushes can seed generated
         # entries that AI PR gates reuse. Both paths download AtomicCards.json
         # before evaluating the key so the gitignored MTGJSON input participates
         # in `hashFiles`.
@@ -435,7 +448,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-${{ steps.card-data-inputs.outputs.hash }}
 
       - name: Cache card-data gate results
         # Proof-of-passage cache for the two expensive steps that are pure
@@ -444,7 +457,7 @@ jobs:
         # succeeds (`post-if: success()` on the action's post step), so an entry
         # under this key is evidence that validate AND coverage passed for this
         # exact input set — which is what licenses skipping them on a hit.
-        # Key expression must stay identical to `cardgen-cache`'s above.
+        # Both key suffixes reuse the captured input hash above.
         #
         # Deliberately a SEPARATE key from `cardgen-cache`, not a reuse of it.
         # A cardgen entry proves only that generation succeeded; it is not
@@ -460,7 +473,7 @@ jobs:
           path: |
             data/coverage-data.json
             data/coverage-summary.json
-          key: cardgen-gates-v1-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-gates-v1-${{ steps.card-data-inputs.outputs.hash }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)
