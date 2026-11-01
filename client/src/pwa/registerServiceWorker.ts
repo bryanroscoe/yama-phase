@@ -483,7 +483,7 @@ export type BuildUpdateOutcome = "reloading" | "manual";
  */
 export async function checkDeployedBuild(): Promise<DeployedBuildStatus> {
   try {
-    const response = await fetch("/build.json", {
+    const response = await fetch(`${import.meta.env.BASE_URL}build.json`, {
       cache: "no-store",
       signal: AbortSignal.timeout(BUILD_CHECK_TIMEOUT_MS),
     });
@@ -581,7 +581,7 @@ export async function checkAppShellReadiness(): Promise<AppShellReadiness> {
 
   const { candidate, registration, active } = initial;
   const stale = () => currentReadinessGate(candidate, registration, active);
-  const markerUrl = `/offline-shell-${__BUILD_HASH__}.json?phase-precache-probe=${encodeURIComponent(markerProbeNonce())}`;
+  const markerUrl = `${import.meta.env.BASE_URL}offline-shell-${__BUILD_HASH__}.json?phase-precache-probe=${encodeURIComponent(markerProbeNonce())}`;
 
   try {
     const response = await fetch(markerUrl, {

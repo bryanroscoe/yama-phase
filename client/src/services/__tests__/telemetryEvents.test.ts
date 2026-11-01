@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../stores/gameStore";
 import { buildFormatConfig, buildGameState } from "../../test/factories/gameStateFactory";
@@ -15,7 +15,40 @@ vi.mock("../telemetry", () => ({
   trackEvent,
 }));
 
-import { installTelemetry, reportBoundaryError } from "../telemetryEvents";
+import { coarseRoute, installTelemetry, reportBoundaryError } from "../telemetryEvents";
+
+describe("hosted telemetry routes", () => {
+  let originalUrl: string;
+
+  beforeEach(() => {
+    originalUrl = window.location.href;
+    trackEvent.mockClear();
+  });
+
+  afterEach(() => {
+    window.history.replaceState(null, "", originalUrl);
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ["/board/", "/board/game/private-id?token=private#choice", "/game/private-id", "/game"],
+    ["/board/", "/board/draft/private-pod", "/draft/private-pod", "/draft"],
+    ["/board/", "/board/", "/", "/"],
+    ["/board/", "/board", "/", "/"],
+    ["/games/phase/", "/games/phase/replay?save=private", "/replay", "/replay"],
+    ["/", "/game/private-id", "/game/private-id", "/game"],
+    ["/board/", "/boardwalk/private-id", "/boardwalk/private-id", "/boardwalk"],
+    ["/game/", "/game/game/private-id", "/game/private-id", "/game"],
+    ["/board/", "/board/board/private-id", "/board/private-id", "/board"],
+  ])("uses the same route vocabulary for global and router paths at %s%s", (base, url, routerPath, route) => {
+    vi.stubEnv("BASE_URL", base);
+    window.history.replaceState(null, "", url);
+    expect(coarseRoute()).toBe(route);
+    expect(coarseRoute(routerPath)).toBe(route);
+    reportBoundaryError(new Error("test error"));
+    expect(trackEvent).toHaveBeenCalledWith("js_error", expect.objectContaining({ route }));
+  });
+});
 
 describe("telemetry game event tracking", () => {
   beforeEach(() => {

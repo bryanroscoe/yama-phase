@@ -1,8 +1,10 @@
 // @vitest-environment node
 import path from "node:path";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
-import { loadConfigFromFile, type Plugin, type PluginOption } from "vite";
-import { describe, expect, it, vi } from "vitest";
+import { build, loadConfigFromFile, type Plugin, type PluginOption } from "vite";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const CLIENT = path.resolve(__dirname, "../../..");
 
@@ -20,7 +22,24 @@ async function buildConfig() {
   const named = plugins.filter(
     (plugin): plugin is Plugin => typeof plugin === "object" && plugin !== null && "name" in plugin,
   );
-  return { define: loaded.config.define ?? {}, plugins: named };
+  return { base: loaded.config.base, define: loaded.config.define ?? {}, plugins: named };
+}
+
+afterEach(() => vi.unstubAllEnvs());
+
+function dataDefaults(hostBase: string) {
+  vi.stubEnv("PHASE_BASE_PATH", hostBase);
+  for (const name of ["DATA_BASE_URL", "CARD_DATA_URL", "CARD_DATA_LOCALE_URL_TEMPLATE", "SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE"]) {
+    vi.stubEnv(name, "");
+  }
+}
+
+function expectManifestUrls(define: Record<string, unknown>, prefix: string) {
+  const files = JSON.parse(readFileSync(path.resolve(CLIENT, "../data-files.json"), "utf8")) as string[];
+  for (const filename of files) {
+    const token = `__${filename.replace(/\.json$/, "").replace(/[.-]/g, "_").toUpperCase()}_URL__`;
+    expect(JSON.parse(define[token] as string), token).toBe(`${prefix}${filename}`);
+  }
 }
 
 function emittedAssets(plugin: Plugin): Array<{ type: string; fileName: string; source: string }> {
@@ -31,6 +50,77 @@ function emittedAssets(plugin: Plugin): Array<{ type: string; fileName: string; 
 }
 
 describe("build manifest", () => {
+  it.each([
+    { file: "1", cli: undefined, emitsFont: false },
+    { file: "1", cli: "0", emitsFont: true },
+    { file: "0", cli: "1", emitsFont: false },
+  ])("honors env-file text icons and CLI precedence: %j", async ({ file, cli, emitsFont }) => {
+    vi.stubEnv("VITE_TEXT_ICONS", cli);
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "phase-font-build-")));
+    try {
+      writeFileSync(path.join(root, ".env.production"), `VITE_TEXT_ICONS=${file}\n`);
+      writeFileSync(path.join(root, "index.html"), '<script type="module" src="./main.js"></script>');
+      const css = path.join(CLIENT, "node_modules/mana-font/css/mana.css");
+      writeFileSync(path.join(root, "main.js"), `import ${JSON.stringify(css)};`);
+      const { plugins } = await buildConfig();
+      const fontPlugin = plugins.find((p) => p.name === "trim-mana-font");
+      expect(fontPlugin).toBeDefined();
+      // Exercise the production plugin through Vite's real env-loading and
+      // asset-emission lifecycle, without compiling the unrelated engine WASM.
+      const result = await build({
+        configFile: false,
+        root,
+        envDir: root,
+        mode: "production",
+        logLevel: "silent",
+        plugins: [fontPlugin!],
+        build: { write: false, assetsInlineLimit: 0 },
+      });
+      if (Array.isArray(result) || !("output" in result)) throw new Error("expected one build output");
+      const fonts = result.output.filter((asset) => asset.type === "asset" && asset.fileName.endsWith(".woff2"));
+      expect(fonts.length > 0).toBe(emitsFont);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["/", "/board/", "/games/phase/"])("keeps local data and emitted manifests within %s", async (hostBase) => {
+    dataDefaults(hostBase);
+    const { base, define, plugins } = await buildConfig();
+    expect(base).toBe(hostBase);
+    expectManifestUrls(define, hostBase);
+    expect(JSON.parse(define.__CARD_DATA_URL__ as string)).toBe(`${hostBase}card-data.json`);
+    expect(JSON.parse(define.__STATUS_URL__ as string)).toBe(`${hostBase}status.json`);
+    expect(JSON.parse(define.__CARD_DATA_LOCALE_URL_TEMPLATE__ as string)).toBe(`${hostBase}card-data.{lng}.json`);
+    expect(JSON.parse(define.__SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__ as string)).toBe(`${hostBase}scryfall-images.v2.{lng}.json`);
+    // Emitted filenames stay relative: Vite serves them under its base, alongside data.
+    expect(emittedAssets(plugins.find((p) => p.name === "build-manifest")!)[0].fileName).toBe("build.json");
+    expect(emittedAssets(plugins.find((p) => p.name === "offline-shell-marker")!)[0].fileName).toMatch(/^offline-shell-[^/]+\.json$/);
+  });
+
+  it("keeps a separate data CDN without moving the local card database", async () => {
+    dataDefaults("/board/");
+    vi.stubEnv("DATA_BASE_URL", "https://cdn.example/phase/");
+    const { define } = await buildConfig();
+    expectManifestUrls(define, "https://cdn.example/phase/");
+    expect(JSON.parse(define.__CARD_DATA_URL__ as string)).toBe("/board/card-data.json");
+    expect(JSON.parse(define.__STATUS_URL__ as string)).toBe("https://cdn.example/phase/status.json");
+    expect(JSON.parse(define.__CARD_DATA_LOCALE_URL_TEMPLATE__ as string)).toBe("https://cdn.example/phase/card-data.{lng}.json");
+  });
+
+  it("preserves explicit Yama data routes and locale templates", async () => {
+    dataDefaults("/board/");
+    vi.stubEnv("DATA_BASE_URL", "/api/play/board-data");
+    vi.stubEnv("CARD_DATA_URL", "/api/play/board-data/card-data.json");
+    vi.stubEnv("CARD_DATA_LOCALE_URL_TEMPLATE", "https://cdn.example/content/{lng}.json");
+    vi.stubEnv("SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE", "/local-images/{lng}.json");
+    const { define } = await buildConfig();
+    expectManifestUrls(define, "/api/play/board-data/");
+    expect(JSON.parse(define.__CARD_DATA_URL__ as string)).toBe("/api/play/board-data/card-data.json");
+    expect(JSON.parse(define.__CARD_DATA_LOCALE_URL_TEMPLATE__ as string)).toBe("https://cdn.example/content/{lng}.json");
+    expect(JSON.parse(define.__SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__ as string)).toBe("/local-images/{lng}.json");
+  });
+
   it("emits /build.json carrying the bundle's __BUILD_HASH__", async () => {
     const { define, plugins } = await buildConfig();
     // Positive control for the traversal: the sibling marker plugin is found

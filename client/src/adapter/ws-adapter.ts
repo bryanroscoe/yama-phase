@@ -12,6 +12,7 @@ import type {
   GameFormat,
   GameLogEntry,
   GameState,
+  GameplayPreferences,
   LegalActionsResult,
   MatchConfig,
   ManaCost,
@@ -1511,6 +1512,7 @@ const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
  * for multiplayer games.
  */
 export class WebSocketAdapter implements EngineAdapter {
+  initialGameplayPreferences?: GameplayPreferences | null;
   readonly supportsMatchConcede = true;
   readonly supportsServerRewind = true;
   private ws: PhaseSocketTransport | null = null;
@@ -2657,7 +2659,7 @@ export class WebSocketAdapter implements EngineAdapter {
     return this._serverInfo;
   }
 
-  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown }): void {
+  private handleMessage(msg: { type: string; data?: unknown; command_id?: unknown; gameplay_preferences?: GameplayPreferences | null }): void {
     if (this.sessionIdentityRejected) return;
 
     switch (msg.type) {
@@ -2798,9 +2800,16 @@ export class WebSocketAdapter implements EngineAdapter {
           playerToken: data.player_token,
           fullKey: data.full_key,
         })) break;
+        // Establish the join identity before validating its Full key. The
+        // accepted preference envelope must precede reconnect notifications,
+        // which can themselves wake subscriptions and retry queued work.
+        if (!this._gameCode && this.joinGameCode) this._gameCode = this.joinGameCode;
         if (nativeReconnect) {
           if (!this.acceptFullSessionKey(data.full_key)) break;
+        } else if (data.full_key && !this.acceptFullSessionKey(data.full_key)) {
+          break;
         }
+        this.initialGameplayPreferences = msg.gameplay_preferences;
         if (this.reconnectInFlight) {
           this.completeReconnect(true);
         } else if (this.hostWaitingForOpponent) {
@@ -2840,11 +2849,6 @@ export class WebSocketAdapter implements EngineAdapter {
         }
         this.receivedGameStarted = true;
         // Joiners receive their player_token here (hosts get it via GameCreated).
-        // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
-        if (!this._gameCode && this.joinGameCode) {
-          this._gameCode = this.joinGameCode;
-        }
-        if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         if (!nativeReconnect && data.player_token) {
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });

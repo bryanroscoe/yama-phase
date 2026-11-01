@@ -667,7 +667,8 @@ mod tests {
         use crate::game::game_object::{PhaseOutCause, PhaseStatus};
         use crate::types::ability::StaticDefinition;
 
-        let mutations: &[(&str, fn(&mut ObjectMap))] = &[
+        type Mutation = fn(&mut ObjectMap);
+        let mutations: &[(&str, Mutation)] = &[
             ("get_mut zone", |map| {
                 map.get_mut(&ObjectId(1)).unwrap().zone = Zone::Battlefield;
             }),

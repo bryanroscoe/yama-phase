@@ -12,7 +12,7 @@ function sectionIcon(file: string, label: string) {
   function SectionIcon({ className }: NavIconProps) {
     return (
       <img
-        src={`/icons/sections/${file}.png`}
+        src={`${import.meta.env.BASE_URL}icons/sections/${file}.png`}
         alt=""
         aria-hidden="true"
         draggable={false}
