@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cardBackCandidate, manaSymbolCandidate } from "../../candidateKeys.ts";
 import { assetKey, catalogRoot, operationId, packId } from "../../types.ts";
 import { ScryfallBrowserVisualPackBackend } from "../scryfallBackend.ts";
+import { installedImageSource } from "../../imageAttribution.ts";
 
 const DATABASE = "phase-visual-packs-scryfall-v1";
 const ROOT = catalogRoot("a".repeat(64));
@@ -136,6 +137,21 @@ describe("Scryfall browser resolution index", () => {
 
     expect(response.entries[0].matches.map((match) => match.url)).toEqual([path]);
     expect(cache.matchPaths).toEqual([path]);
+  });
+
+  it("retains the source URL of a resolved installed image for attribution", async () => {
+    const key = cardBackCandidate();
+    const path = "/board/__visual-packs/sha256/credited-source.jpg";
+    const sourceUrl = "https://cards.scryfall.io/art_crop/back/1/1/11111111-1111-4111-8111-111111111111.jpg";
+    const legacy = await openLegacyDatabase();
+    await legacy.put("packs", installReceipt());
+    await legacy.put("objects", { ...objectRow("asset:v1:card_back:default", [key], path), sourceUrl });
+    legacy.close();
+    cache.entries.set(path, new TextEncoder().encode("art"));
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const response = await backend.resolve([{ kind: "candidate", key }]);
+    expect(response.entries[0].matches.map((match) => match.url)).toEqual([path]);
+    expect(installedImageSource(path)).toBe(sourceUrl);
   });
 
   it("queries only indexed candidate matches before checking the cache", async () => {

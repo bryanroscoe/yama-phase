@@ -213,6 +213,7 @@ function DeckArtTile({ visual }: { visual: DeckVisualIdentity | null }) {
     <CreditedArt
       src={src}
       alt=""
+            fallbackName={visual?.name ?? ""}
       className="absolute inset-0 h-full w-full object-cover"
       onError={() => advanceFailedSource?.(src)}
     />

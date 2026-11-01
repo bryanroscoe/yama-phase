@@ -1,6 +1,7 @@
 import type { GameFormat, TokenImageRef } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
+import { installedImageSource } from "./visualPacks/imageAttribution.ts";
 
 /** How a face is printed, as emitted per face by `scripts/gen-scryfall-images.sh`. */
 type FaceOrientation = "landscape" | "portrait";
@@ -753,7 +754,7 @@ const creditRequests = new Map<string, Promise<unknown>>();
 
 /** Resolve attribution by the displayed image's printing and face. Never use a card name. */
 export async function fetchImageArtist(src: string): Promise<string | null> {
-  const identity = imageCreditIdentity(src);
+  const identity = imageCreditIdentity(installedImageSource(src) ?? src);
   if (!identity) return null;
   await loadScryfallData();
   if (creditedData !== scryfallDataResolved || creditedPrintings !== printingsDataResolved) {

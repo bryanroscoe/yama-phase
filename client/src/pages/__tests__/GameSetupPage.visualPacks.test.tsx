@@ -1,3 +1,4 @@
+import * as scryfall from "../../services/scryfall.ts";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -67,9 +68,11 @@ describe("GameSetupPage visual packs", () => {
     useCardImage.mockReturnValue({ src: null, isLoading: false });
   });
 
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
-  it("passes saved printing identity and advances the installed setup cover", async () => {
+  it.each(["0", "1"])("passes saved printing identity and advances the setup cover (hosted=%s)", async (hosted) => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", hosted);
+    vi.spyOn(scryfall, "fetchImageArtist").mockResolvedValue("Setup Artist");
     const advanceFailedSource = vi.fn();
     useCardImage.mockReturnValue({
       src: "visual-pack://installed/setup-cover",
@@ -87,6 +90,7 @@ describe("GameSetupPage visual packs", () => {
     }));
 
     renderSetup();
+    if (hosted === "1") expect(await screen.findByText("Setup Artist")).toBeInTheDocument();
 
     expect(await screen.findByText("Printed Deck")).toBeInTheDocument();
     expect(useCardImage).toHaveBeenCalledWith("Opt", {
