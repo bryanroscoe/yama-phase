@@ -1510,6 +1510,7 @@ describe("PackDisplay local workspace controller", () => {
     const olderSource = source;
     act(() => olderSource.onAdmission({ kind: "dispatch", requestToken: "older", interactionGeneration: 4 }));
     expect(currentCard()).toHaveAttribute("data-visual-state", "submitting");
+    expect(currentCard()).toHaveAttribute("aria-busy", "true");
 
     fireEvent.pointerDown(currentCard(), { button: 0, isPrimary: true, pointerId: 91, pointerType: "mouse" });
     const newerSource = source;
@@ -1520,11 +1521,13 @@ describe("PackDisplay local workspace controller", () => {
     const pendingIntent = { kind: "pick" as const, instanceIds: ["unknown"] as const, destination: "sideboard" as const, placementHint: { column: 0 } };
     rendered.rerender(<PackDisplay controller={{ ...initial, selectedCard: "unknown", pendingIntent, interactionLocked: true }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
     expect(currentCard()).toHaveAttribute("data-visual-state", "waiting");
+    expect(currentCard()).toHaveAttribute("aria-busy", "true");
     act(() => newerSource.onSettled({ kind: "outcome", outcome: { status: "rejected", reason: "invalid-request" } }));
     expect(currentCard()).toHaveAttribute("data-visual-state", "waiting");
 
     rendered.rerender(<PackDisplay controller={{ ...initial, selectedCard: "unknown" }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
     expect(currentCard()).toHaveAttribute("data-visual-state", "failure-restored");
+    expect(currentCard()).toHaveAttribute("aria-busy", "false");
 
     fireEvent.pointerDown(currentCard(), { button: 0, isPrimary: true, pointerId: 92, pointerType: "mouse" });
     const acknowledgedSource = source;
