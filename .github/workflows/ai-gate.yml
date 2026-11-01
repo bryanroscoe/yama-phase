@@ -209,6 +209,30 @@ jobs:
           } > target/perf-evidence/provenance.txt
           scripts/validate-ai-perf-reproducibility.sh 2>&1 | tee target/perf-evidence/validation.log
 
+      - name: Stage only a baseline produced by this execution
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import shutil
+          import subprocess
+
+          root = pathlib.Path('target/perf-evidence')
+          log = root / 'validation.log'
+          baseline = pathlib.Path('crates/phase-ai/baselines/perf-baseline.json')
+          marker = f'baseline refreshed at {baseline}'
+          if not log.is_file() or marker not in log.read_text().splitlines():
+              print('No completed baseline refresh; preserving diagnostic logs only')
+          else:
+              report = json.loads(baseline.read_text())
+              head = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], text=True).strip()
+              if report.get('git_sha') != head:
+                  raise SystemExit('Refusing baseline evidence from another source revision')
+              shutil.copyfile(baseline, root / 'candidate-baseline.json')
+          PY
+
       - name: Enforce the existing 25-minute cold-build budget
         shell: bash
         run: |
@@ -243,7 +267,6 @@ jobs:
           path: |
             target/perf-evidence/
             target/ai-perf-repro-*.json
-            crates/phase-ai/baselines/perf-baseline.json
           if-no-files-found: warn
           retention-days: 7
 
