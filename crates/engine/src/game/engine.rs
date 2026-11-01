@@ -5833,12 +5833,16 @@ pub(crate) fn shortcut_count_is_drivable(
 /// resolution's carrier settles (including the restore-boundary recoveries), and when an
 /// answered resolution prompt hands the resolution back. Priority passes to the next player in turn order still in
 /// the game — the
-/// active player if it is still in the game, otherwise the next living seat in turn order
+/// active player (or a living active-team representative), otherwise the next living seat in turn order
 /// (elimination does not advance `active_player` when a non-acting seat concedes during the
 /// APNAP window, so `active_player` may be a departed player).
 pub(super) fn living_priority_seat(state: &GameState) -> PlayerId {
-    if crate::game::players::is_alive(state, state.active_player) {
-        state.active_player
+    // CR 117.6 + CR 805.5b: the active team receives priority after resolution,
+    // even when its previous representative has left. Choose its living
+    // representative before considering another team in turn order.
+    let active = super::topology::priority_pass_representative(state, state.active_player);
+    if crate::game::players::is_alive(state, active) {
+        active
     } else {
         crate::game::players::next_player_in_turn_order(state, state.active_player)
     }
