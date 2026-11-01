@@ -77,6 +77,7 @@ describe("hosted illustration credits", () => {
   it("keeps account avatars separate from card illustration attribution", () => {
     const view = render(<CreditedArt attribution="external" src="https://avatar.test/person.jpg" alt="Player" />);
     expect(view.container.querySelector("img")?.getAttribute("src")).toBe("https://avatar.test/person.jpg");
+    expect(view.container.querySelector("img")).not.toHaveAttribute("data-card-art");
     expect(fetchArtist).not.toHaveBeenCalled();
   });
 });
