@@ -78,5 +78,25 @@ Comprehensive Rules.
 
 ## Automation
 
-GitHub Actions is disabled here; the inherited workflows target upstream's infrastructure. Do
-not enable upstream's release or deployment workflows.
+The fork was republished as public on 31 October 2026. Its CI runs on GitHub-hosted
+runners; never route Phase CI to saget. Keep upstream release and deployment workflows
+disabled unless Bryan explicitly requests them.
+
+## Hosted card illustrations
+
+Yama builds with `VITE_HOSTED_CARD_ART=1`. Cropped card art is shown with the artist
+for the actual image's printing and face. Generated Scryfall image metadata carries
+an optional `artist` per face; Yama's runtime feed supplies the same field. Missing
+metadata is resolved through the shared, rate-limited Scryfall printing-ID lookup,
+never by choosing the Oracle card's default printing. A missing credit leaves an
+identifiable text tile. External account avatars keep their separate identity.
+
+The hosted stylesheet preserves card pixels through their ancestor containers:
+no opacity, filters, masks or blending are applied to the illustration or its
+ancestors. Separate readability washes remain. Classic position/scale motion
+remains; deaths use the existing text effect, and image-altering WebGL flights
+and meld texture morphs are disabled in this build mode. Compact designation
+badges keep their glyphs, and report thumbnails show whole cards. Ordinary Phase builds
+do not enable this hosted policy. Missing back-face crops fall back to that face's
+full image, keeping the illustration and its credit together. Illustrations and mana symbols load from
+Scryfall at runtime; no card images are added to the bundle.

@@ -34,6 +34,7 @@ function PullCard({ card, index, delay }: { card: DraftCardInstance; index: numb
         </div>
       ) : (
         <img
+          data-card-art
           src={src}
           {...getCardImageSrcSetProps(src, rungs)}
           alt={card.name}

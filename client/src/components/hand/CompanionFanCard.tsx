@@ -101,6 +101,7 @@ const CompanionFanCard = memo(function CompanionFanCard({
       >
         {src ? (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
             alt={cardName}

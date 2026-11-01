@@ -219,7 +219,7 @@ function RetainedPackCard({ entry, fallbackWidth }: { entry: RetainedCard; fallb
       {entry.imageSrc === null ? (
         <span aria-hidden="true" className="block h-full w-full bg-neutral-900" />
       ) : (
-        <img src={entry.imageSrc} alt={entry.card.name} draggable={false} className="h-full w-full object-contain" />
+        <img data-card-art src={entry.imageSrc} alt={entry.card.name} draggable={false} className="h-full w-full object-contain" />
       )}
     </motion.div>
   );
@@ -285,6 +285,7 @@ function PackCard({
     <motion.div
       data-instance-id={card.instance_id}
       data-visual-state={state}
+      aria-busy={state === "submitting" || state === "waiting"}
       className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 ${state === "selected" ? "transition-transform" : "transition-all"} duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.05]" : ""}`} ${state === "selected" ? "z-10 ring-2 ring-arcane shadow-[0_0_7px_3px_#38bdf8]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
       style={{ width, flexBasis: width, aspectRatio: "488 / 680" }}
       onMouseEnter={() => onHover(cardInfo(card))}
@@ -427,6 +428,7 @@ function PackCard({
           <span className="flex h-full items-center justify-center bg-white/5 px-2 text-center text-xs text-white/50">{card.name}</span>
         ) : (
           <img
+          data-card-art
             src={src}
             alt={displayName}
             draggable={false}

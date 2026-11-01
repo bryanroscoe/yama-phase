@@ -50,6 +50,24 @@ function emittedAssets(plugin: Plugin): Array<{ type: string; fileName: string; 
 }
 
 describe("build manifest", () => {
+  it("uses distinct verified source pins for Git-less exported builds", async () => {
+    vi.stubEnv("GIT_DIR", path.join(tmpdir(), "phase-build-without-git"));
+    for (const revision of ["a".repeat(40), "b".repeat(40)]) {
+      vi.stubEnv("PHASE_BUILD_REVISION", revision);
+      const { define, plugins } = await buildConfig();
+      expect(JSON.parse(define.__BUILD_HASH__ as string)).toBe(revision);
+      expect(JSON.parse(emittedAssets(plugins.find((p) => p.name === "build-manifest")!)[0].source))
+        .toEqual({ build: revision });
+      expect(emittedAssets(plugins.find((p) => p.name === "offline-shell-marker")!)[0].fileName)
+        .toBe(`offline-shell-${revision}.json`);
+    }
+  });
+
+  it("rejects malformed exported build revisions instead of falling back to dev", async () => {
+    vi.stubEnv("PHASE_BUILD_REVISION", "dev");
+    await expect(buildConfig()).rejects.toThrow("PHASE_BUILD_REVISION must be a full lowercase Git SHA");
+  });
+
   it.each([
     { file: "1", cli: undefined, emitsFont: false },
     { file: "1", cli: "0", emitsFont: true },

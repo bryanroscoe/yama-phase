@@ -1,3 +1,4 @@
+import { CreditedArt } from "../../card/CreditedArt.tsx";
 import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -242,9 +243,10 @@ function ActiveDeckCard() {
           dark backing chip so they stay legible over any artwork. */}
       <div className="relative h-24 overflow-hidden">
         {artSrc ? (
-          <img
+          <CreditedArt
             src={artSrc}
             alt=""
+            fallbackName={representativeVisual?.name ?? ""}
             className="absolute inset-0 h-full w-full object-cover"
             onError={() => advanceFailedSource?.(artSrc)}
           />

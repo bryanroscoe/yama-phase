@@ -145,6 +145,7 @@ function HiddenOpponentCardThumbnail() {
 
   return (
     <img
+          data-card-art
       src={src ?? CARD_BACK_URL}
       alt={t("hand.cardBack")}
       className="rounded-lg border border-gray-600 shadow-md object-cover"
@@ -168,6 +169,7 @@ function VisibleOpponentCardThumbnail({ cardId, card }: { cardId: ObjectId; card
   if (src) {
     return (
       <img
+          data-card-art
         src={src}
         {...getCardImageSrcSetProps(src, rungs)}
         alt={card.name}

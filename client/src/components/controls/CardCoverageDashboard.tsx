@@ -1363,6 +1363,7 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
             </div>
           ) : (
             <img
+          data-card-art
               src={cardImageSrc}
               {...getCardImageSrcSetProps(cardImageSrc, cardImageRungs)}
               alt={card.card_name}

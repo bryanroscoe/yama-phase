@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import { useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -117,6 +118,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           // re-enable pointer events to receive hover — except while this seat is
           // a legal target, where the header's full-area target button must win.
           <AvatarHoverPreview
+            attribution={avatarIdentity?.kind ?? "card"}
             avatarUrl={activeAvatarSrc}
             label={label}
             seatColor={seatColor}
@@ -127,7 +129,8 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
             onAvatarError={avatar.advanceFailedSource}
           >
-            <img
+            <CreditedArt
+              attribution={avatarIdentity?.kind ?? "card"}
               src={activeAvatarSrc}
               alt={label}
               className="h-full w-full object-cover"

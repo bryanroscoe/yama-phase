@@ -1,3 +1,4 @@
+import * as scryfall from "../../../../services/scryfall.ts";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
@@ -56,6 +57,8 @@ describe("HomeDashboard visual packs", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   it("passes a saved representative printing and advances its installed source", async () => {
@@ -86,6 +89,19 @@ describe("HomeDashboard visual packs", () => {
     expect(cover).not.toBeNull();
     fireEvent.error(cover!);
     expect(advanceFailedSource).toHaveBeenCalledWith("visual-pack://installed/home-cover");
+  });
+
+  it("names hosted representative art when its credit cannot be resolved", async () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
+    vi.spyOn(scryfall, "fetchImageArtist").mockResolvedValue(null);
+    useCardImage.mockReturnValue({ src: "unknown-printing.jpg", isLoading: false });
+    localStorage.setItem(ACTIVE_DECK_KEY, "Printed Deck");
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}Printed Deck`, JSON.stringify({
+      main: [{ name: "Opt", count: 4 }], sideboard: [],
+    }));
+    renderDashboard();
+    expect(await screen.findByLabelText("Opt")).toBeInTheDocument();
+    expect(document.querySelector('img[src="unknown-printing.jpg"]')).toBeNull();
   });
 
   it("does not fabricate printing identity for random selection", async () => {

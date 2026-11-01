@@ -4,11 +4,13 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { SealedPackOpening } from "../SealedPackOpening";
 import type { DraftPlayerView } from "../../../adapter/draft-adapter";
 
+const image = vi.hoisted(() => ({ src: null as string | null }));
+
 vi.mock("../../../hooks/useCardImage", () => ({
-  useCardImage: () => ({ src: null, isLoading: false }),
+  useCardImage: () => ({ src: image.src, isLoading: false }),
 }));
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); image.src = null; vi.unstubAllEnvs(); });
 
 const VIEW: DraftPlayerView = {
   status: "Deckbuilding",
@@ -133,6 +135,14 @@ const VIEW: DraftPlayerView = {
 };
 
 describe("SealedPackOpening", () => {
+  it("marks the hosted opened-pack image for unmodified presentation", async () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
+    image.src = "/sealed-card.jpg";
+    render(<SealedPackOpening view={{ ...VIEW, sealed_packs: [[VIEW.pool[0]]] }} onComplete={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open pack" }));
+    expect(await screen.findByAltText("Silvercoat Lion")).toHaveAttribute("data-card-art");
+  });
+
   it("reveals each engine-provided pack before showing the type-grouped pool", async () => {
     const onComplete = vi.fn();
     render(

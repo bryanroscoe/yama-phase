@@ -96,6 +96,14 @@ function trimManaFont(): Plugin {
 }
 
 function gitHash(): string {
+  // Committed-source exports have no .git; hosts supply the verified full pin.
+  const revision = process.env.PHASE_BUILD_REVISION;
+  if (revision !== undefined) {
+    if (!/^[0-9a-f]{40}$/.test(revision)) {
+      throw new Error("PHASE_BUILD_REVISION must be a full lowercase Git SHA");
+    }
+    return revision;
+  }
   try {
     return execSync("git rev-parse --short HEAD").toString().trim();
   } catch {

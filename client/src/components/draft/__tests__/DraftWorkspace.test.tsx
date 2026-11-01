@@ -125,6 +125,7 @@ vi.mock("../../card/HoverCardPreview", () => ({
 let restoreBrowserHarness: (() => void) | null = null;
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   cleanup();
   restoreBrowserHarness?.();
   restoreBrowserHarness = null;
@@ -1166,6 +1167,7 @@ describe("draft workspace shell", () => {
   });
 
   it("projects_a_desktop_draft_workspace_drag_into_its_resolved_row_without_changing_headers", () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
     const cards = [card("deck-card"), card("deck-sibling"), card("side-card")];
     const origin = { left: 18, top: 32, width: 90, height: 126 };
     const destination = { left: 270, top: 145, width: 112, height: 157 };
@@ -1229,6 +1231,10 @@ describe("draft workspace shell", () => {
     const targetColumn = deck.querySelector<HTMLElement>('[data-board-column="1"]')!;
     expect(screen.queryByTestId("draft-drag-preview")).not.toBeInTheDocument();
     expect(sourceColumn.querySelector('[data-instance-id="deck-card"]')).toHaveClass("absolute", "opacity-0", "w-full");
+    const hiddenSource = sourceColumn.querySelector('[data-instance-id="deck-card"]');
+    expect(hiddenSource).toHaveStyle({ visibility: "hidden" });
+    expect(hiddenSource?.querySelector("img")).toHaveAttribute("data-card-art");
+    expect(container.querySelector('img[src="/alternate-face.png"]')).toHaveAttribute("data-card-art");
     expect(sourceColumn.querySelector<HTMLElement>('[data-instance-id="deck-sibling"]')).toHaveStyle({ marginTop: "" });
     const slot = targetColumn.querySelector<HTMLElement>('[data-drag-projection-slot="deck-card"]')!;
     expect(slot).toBeInTheDocument();

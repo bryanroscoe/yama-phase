@@ -134,6 +134,7 @@ export function CardImage({
         />
       ) : (
         <img
+          data-card-art
           src={src!}
           {...getCardImageSrcSetProps(src, rungs)}
           alt={renderedAlt}

@@ -786,7 +786,13 @@ function CardPreviewInner({
     <motion.div
       ref={previewRef}
       className="fixed z-[100] pointer-events-none drop-shadow-[0_22px_28px_rgba(0,0,0,0.62)]"
-      style={{ ...style, transformOrigin }}
+      style={{
+        ...style,
+        transformOrigin,
+        ...(import.meta.env.VITE_HOSTED_CARD_ART === "1" && activeMobileHandDragObjectId != null
+          ? { visibility: "hidden" as const }
+          : {}),
+      }}
       initial={
         animatePreview
           ? handPreview && movePreview
@@ -952,6 +958,7 @@ function MobilePreviewOverlay({
           null
         ) : (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
@@ -995,6 +1002,7 @@ function MobilePreviewOverlay({
           <div className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full animate-pulse rounded-lg bg-gray-700" />
         ) : (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
@@ -1167,6 +1175,7 @@ function CardImagePreview({
           </div>
         ) : (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}

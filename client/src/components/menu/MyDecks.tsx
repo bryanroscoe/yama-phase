@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -209,9 +210,10 @@ function DeckArtTile({ visual }: { visual: DeckVisualIdentity | null }) {
   }
 
   return (
-    <img
+    <CreditedArt
       src={src}
       alt=""
+            fallbackName={visual?.name ?? ""}
       className="absolute inset-0 h-full w-full object-cover"
       onError={() => advanceFailedSource?.(src)}
     />

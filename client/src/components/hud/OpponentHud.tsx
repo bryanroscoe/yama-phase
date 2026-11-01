@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -982,7 +983,8 @@ function OpponentAvatar({
   // seat-color tile with the player's initial otherwise.
   const inner = activeSrc ? (
     <>
-      <img
+      <CreditedArt
+        attribution={avatarIdentity?.kind ?? "card"}
         src={activeSrc}
         alt={label}
         className="h-full w-full object-cover"
@@ -1021,6 +1023,7 @@ function OpponentAvatar({
 
   return (
     <AvatarHoverPreview
+      attribution={avatarIdentity?.kind ?? "card"}
       avatarUrl={activeSrc}
       label={label}
       seatColor={seatColor}

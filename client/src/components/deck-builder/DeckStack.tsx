@@ -302,6 +302,7 @@ function DeckStackCard({
           />
         ) : (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
             alt={item.name}

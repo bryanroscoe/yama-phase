@@ -17,6 +17,7 @@ export function CardBackFallback({ className = "", style }: CardBackFallbackProp
   if (src) {
     return (
       <img
+          data-card-art
         src={src}
         alt={label}
         draggable={false}
