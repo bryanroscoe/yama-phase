@@ -39668,17 +39668,14 @@ fn didnt_attack_with_a_creature_intervening_if_hoists_as_zero_attack_tally() {
 /// `turned_face_up_if_its_a_creature_is_event_object_intervening_if`.)
 #[test]
 fn unhoistable_leading_guard_lowered_to_a_back_reference_fails_closed() {
-    for text in [
-        "At the beginning of your end step, if you didn't play a card from exile this turn, create a tapped Powerstone token.",
-    ] {
-        let def = parse_trigger_line(text, "Test Card");
-        assert_eq!(def.condition, None, "nothing was hoisted for {text:?}");
-        let exec = def.execute.as_deref().expect("trigger execute body");
-        assert!(
-            matches!(&*exec.effect, Effect::Unimplemented { .. }),
-            "the back-reference guard must fail the trigger closed for {text:?}"
-        );
-    }
+    let text = "At the beginning of your end step, if you didn't play a card from exile this turn, create a tapped Powerstone token.";
+    let def = parse_trigger_line(text, "Test Card");
+    assert_eq!(def.condition, None, "nothing was hoisted for {text:?}");
+    let exec = def.execute.as_deref().expect("trigger execute body");
+    assert!(
+        matches!(&*exec.effect, Effect::Unimplemented { .. }),
+        "the back-reference guard must fail the trigger closed for {text:?}"
+    );
 }
 
 /// CR 603.4: "a player cast two or more spells last turn" (verbatim Gatstaf
