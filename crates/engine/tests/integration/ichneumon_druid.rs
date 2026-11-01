@@ -123,6 +123,15 @@ fn ichneumon_druid_excludes_teammates_in_two_headed_giant() {
         .cast(teammate_first)
         .target_object(target_a)
         .resolve();
+    assert_eq!(
+        runner.state().priority_player,
+        P1,
+        "resolution preserves the living active seat as the action submitter"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
     runner
         .cast(teammate_second)
         .target_object(target_b)
