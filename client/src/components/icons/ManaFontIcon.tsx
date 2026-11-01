@@ -18,6 +18,16 @@ const SIZE_CLASS: Record<NonNullable<ManaFontIconProps["size"]>, string> = {
   lg: "text-lg",
 };
 
+// Unlabelled decorative callers use these silhouettes around their own text.
+// Keep them visible when a host deliberately omits the icon font.
+const TEXT_ICON_SYMBOLS: Readonly<Record<string, string>> = {
+  "ms-tap": "↷",
+  "ms-loyalty-start": "◇",
+  "ms-loyalty-up": "△",
+  "ms-loyalty-down": "▽",
+  "ms-loyalty-zero": "◇",
+};
+
 // ── Shared font-readiness gate (the ONLY place FOUC is handled) ──────────────
 // A single module-level load of the "Mana" family, shared across every icon
 // instance via a useSyncExternalStore-compatible store. Until the font resolves
@@ -32,6 +42,7 @@ function markReady(): void {
 }
 
 function startManaFontLoad(): void {
+  if (import.meta.env.VITE_TEXT_ICONS === "1") return;
   if (loadStarted) return;
   loadStarted = true;
   // Non-browser env (SSR/tests without a DOM) or a browser lacking the Font
@@ -72,7 +83,8 @@ interface ManaFontIconProps {
   /** When set, the glyph is exposed as an image with this accessible name;
    * otherwise it is decorative (`aria-hidden`). */
   label?: string;
-  /** Plain-text shown until the webfont is ready (and in non-browser envs). */
+  /** Plain text while loading. Text-only builds replace empty values with the
+   * label or a standard text symbol so an omitted font cannot hide the icon. */
   fallbackText: string;
   className?: string;
   /** Inline style, e.g. a card-relative `fontSize` clamp or a counter-rotation
@@ -96,13 +108,17 @@ export function ManaFontIcon({
     : ({ "aria-hidden": true } as const);
 
   if (!ready) {
+    const text = import.meta.env.VITE_TEXT_ICONS === "1"
+      ? fallbackText.trim() || label?.trim() || iconClass.split(/\s+/)
+        .map((name) => TEXT_ICON_SYMBOLS[name]).find(Boolean) || "◇"
+      : fallbackText;
     return (
       <span
         className={[sizeClass, className].filter(Boolean).join(" ")}
         style={style}
         {...a11y}
       >
-        {fallbackText}
+        {text}
       </span>
     );
   }

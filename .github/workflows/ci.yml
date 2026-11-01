@@ -1058,7 +1058,8 @@ jobs:
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Lint/typecheck plus the 10k-test coverage suite exceeded the old 15m cap.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1152,7 +1153,11 @@ jobs:
         run: cd client && pnpm install --frozen-lockfile
 
       - name: Build both WASM engines
-        run: ./scripts/build-wasm.sh wasm-dev
+        # Exercise the orchestration with mock tools before spending compiler time.
+        # The actual modules and isolated match proofs below remain mandatory.
+        run: |
+          python3 scripts/tests/test_build_wasm.py
+          ./scripts/build-wasm.sh wasm-dev
 
       - name: Require generated bindings
         run: |

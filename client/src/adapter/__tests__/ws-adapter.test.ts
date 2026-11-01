@@ -308,6 +308,65 @@ describe("WebSocketAdapter", () => {
     await initPromise;
   });
 
+  it("installs host gameplay preferences before publishing an attachment snapshot", () => {
+    expect(adapter.initialGameplayPreferences).toBeUndefined();
+    const preferences = {
+      phase_stops: [{ phase: "Upkeep", scope: "OwnTurn" }],
+      priority_passing_mode: "Standard",
+      full_control: true,
+    };
+    const observed: unknown[] = [];
+    adapter.onEvent((event) => {
+      if (event.type === "stateChanged") observed.push(adapter.initialGameplayPreferences);
+    });
+    ws.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted",
+      gameplay_preferences: preferences,
+      data: { state: createMockState(), your_player: 0 },
+    }));
+    expect(observed).toEqual([preferences]);
+    expect(adapter.initialGameplayPreferences).toEqual(preferences);
+
+    ws.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted", gameplay_preferences: null,
+      data: { state: createMockState(), your_player: 255 },
+    }));
+    expect(adapter.initialGameplayPreferences).toBeNull();
+  });
+
+  it("installs host preferences before reconnect notifications can wake subscribers", async () => {
+    expect(adapter.tryReconnect({
+      gameCode: "GAME01", playerToken: "token", fullKey: REPLY_OWNERSHIP_FULL_KEY,
+      serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+    })).toBe(true);
+    ws = await completeHandshake(adapter);
+    const preferences = { phase_stops: [], priority_passing_mode: "Standard", full_control: true };
+    const observed: unknown[] = [];
+    adapter.onEvent((event) => { if (event.type === "reconnected") observed.push(adapter.initialGameplayPreferences); });
+    ws.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted", gameplay_preferences: preferences,
+      data: { state: createMockState(), your_player: 0, full_key: REPLY_OWNERSHIP_FULL_KEY },
+    }));
+    expect(observed).toEqual([preferences]);
+  });
+
+  it("replaces host preferences only for an accepted reconnect identity", () => {
+    const preferences = { phase_stops: [], priority_passing_mode: "Standard", full_control: true };
+    const deliver = (generation: number, fullControl: boolean) => ws.dispatchSynthetic("message", JSON.stringify({
+      type: "GameStarted",
+      gameplay_preferences: { ...preferences, full_control: fullControl },
+      data: { state: createMockState(), your_player: 0, full_key: { ...REPLY_OWNERSHIP_FULL_KEY, generation } },
+    }));
+    deliver(7, true);
+    const first = adapter.initialGameplayPreferences;
+    deliver(7, false);
+    const second = adapter.initialGameplayPreferences;
+    expect(second).not.toBe(first);
+    expect(second?.full_control).toBe(false);
+    deliver(8, true);
+    expect(adapter.initialGameplayPreferences).toBe(second);
+  });
+
   it("sends the payload-free authenticated whole-match concession intent", () => {
     expect(supportsMatchConcede(adapter)).toBe(true);
 

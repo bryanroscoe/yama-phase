@@ -7,7 +7,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     description: "Beginner-friendly mono and two-color decks",
     icon: "S",
     type: "bundled",
-    url: "/feeds/starter-decks.json",
+    url: `${import.meta.env.BASE_URL}feeds/starter-decks.json`,
   },
   {
     id: "mtggoldfish-standard",
@@ -16,7 +16,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "standard",
     type: "bundled",
-    url: "/feeds/mtggoldfish-standard.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-standard.json`,
   },
   {
     id: "mtggoldfish-modern",
@@ -25,7 +25,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "modern",
     type: "bundled",
-    url: "/feeds/mtggoldfish-modern.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-modern.json`,
   },
   {
     id: "mtggoldfish-pioneer",
@@ -34,7 +34,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "pioneer",
     type: "bundled",
-    url: "/feeds/mtggoldfish-pioneer.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-pioneer.json`,
   },
   {
     id: "mtggoldfish-commander",
@@ -43,7 +43,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "commander",
     type: "bundled",
-    url: "/feeds/mtggoldfish-commander.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-commander.json`,
   },
   {
     id: "mtggoldfish-legacy",
@@ -52,7 +52,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "legacy",
     type: "bundled",
-    url: "/feeds/mtggoldfish-legacy.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-legacy.json`,
   },
   {
     id: "mtggoldfish-vintage",
@@ -61,7 +61,7 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "vintage",
     type: "bundled",
-    url: "/feeds/mtggoldfish-vintage.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-vintage.json`,
   },
   {
     id: "mtggoldfish-pauper",
@@ -70,6 +70,6 @@ export const FEED_REGISTRY: FeedSource[] = [
     icon: "M",
     format: "pauper",
     type: "bundled",
-    url: "/feeds/mtggoldfish-pauper.json",
+    url: `${import.meta.env.BASE_URL}feeds/mtggoldfish-pauper.json`,
   },
 ];

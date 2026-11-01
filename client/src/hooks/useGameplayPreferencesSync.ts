@@ -29,6 +29,7 @@ function effectivePriorityPassingMode(): PriorityPassingMode {
 type LastSent = {
   adapter: EngineAdapter;
   generation: number;
+  hostPreferences?: EngineAdapter["initialGameplayPreferences"];
   stops?: readonly PhaseStop[];
   mode?: PriorityPassingMode;
 };
@@ -48,12 +49,13 @@ function phaseStopsEqual(a: readonly PhaseStop[], b: readonly PhaseStop[]): bool
     );
 }
 
-function isCurrentSession(adapter: EngineAdapter, generation: number): boolean {
+function isCurrentSession(adapter: EngineAdapter, generation: number, hostPreferences: EngineAdapter["initialGameplayPreferences"]): boolean {
   const game = useGameStore.getState();
   return (
     game.adapter === adapter
     && game.gameSessionGeneration === generation
     && game.gameState !== null
+    && adapter.initialGameplayPreferences === hostPreferences
   );
 }
 
@@ -62,6 +64,28 @@ function successfulSendFor(adapter: EngineAdapter, generation: number): LastSent
     return lastSent;
   }
   return { adapter, generation };
+}
+
+function initializeServerPreferences(adapter: EngineAdapter, generation: number): void {
+  const initial = adapter.initialGameplayPreferences;
+  if (lastSent?.adapter === adapter && lastSent.generation === generation && lastSent.hostPreferences === initial) return;
+  if (initial == null) return;
+
+  // Cache before hydrating: store subscriptions may request another drain.
+  // Neither attachment nor StrictMode remounts are player preference changes.
+  // Each accepted reconnect replaces the host object and must hydrate again.
+  lastSent = {
+    adapter,
+    generation,
+    hostPreferences: initial,
+    stops: initial.phase_stops.slice(),
+    mode: initial.full_control ? "FullControl" : initial.priority_passing_mode,
+  };
+  usePreferencesStore.setState({
+    phaseStops: initial.phase_stops.slice(),
+    priorityPassingMode: initial.priority_passing_mode,
+  });
+  useUiStore.setState({ fullControl: initial.full_control });
 }
 
 async function drainGameplayPreferenceSync(): Promise<void> {
@@ -78,7 +102,10 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         gameState,
       } = useGameStore.getState();
       if (!adapter || !gameState) continue;
+      if (adapter.initialGameplayPreferences === null) continue;
 
+      initializeServerPreferences(adapter, generation);
+      const hostPreferences = adapter.initialGameplayPreferences;
       const stops = usePreferencesStore.getState().phaseStops;
       const mode = effectivePriorityPassingMode();
       const sent = successfulSendFor(adapter, generation);
@@ -93,11 +120,12 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         } catch {
           // dispatchAction reports engine failures. Leave this value unsent so
           // the next store notification can retry it.
+          if (!isCurrentSession(adapter, generation, hostPreferences)) syncRequested = true;
           continue;
         }
 
         const currentStops = usePreferencesStore.getState().phaseStops;
-        if (isCurrentSession(adapter, generation) && phaseStopsEqual(currentStops, stops)) {
+        if (isCurrentSession(adapter, generation, hostPreferences) && phaseStopsEqual(currentStops, stops)) {
           lastSent = {
             ...successfulSendFor(adapter, generation),
             stops: stops.slice(),
@@ -108,7 +136,7 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         }
       }
 
-      if (!isCurrentSession(adapter, generation)) {
+      if (!isCurrentSession(adapter, generation, hostPreferences)) {
         syncRequested = true;
         continue;
       }
@@ -129,11 +157,12 @@ async function drainGameplayPreferenceSync(): Promise<void> {
           );
         } catch {
           // As above, a rejected dispatch must remain retryable.
+          if (!isCurrentSession(adapter, generation, hostPreferences)) syncRequested = true;
           continue;
         }
 
         if (
-          isCurrentSession(adapter, generation)
+          isCurrentSession(adapter, generation, hostPreferences)
           && effectivePriorityPassingMode() === mode
         ) {
           lastSent = { ...successfulSendFor(adapter, generation), mode };
@@ -155,8 +184,8 @@ function sendGameplayPreferences(): void {
   void drainGameplayPreferenceSync();
 }
 
-/** Push engine-owned gameplay preferences once per game lifecycle and whenever
- * either preference changes. Mount exactly once in `GameProvider`. */
+/** Initialize local engines from device preferences; adopt host preferences on
+ * attachments. Then push changes. Mount exactly once in `GameProvider`. */
 export function useGameplayPreferencesSync(): void {
   useEffect(() => {
     const unsubGame = useGameStore.subscribe(
