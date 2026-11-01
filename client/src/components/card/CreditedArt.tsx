@@ -32,7 +32,7 @@ export function CreditedArt({ src, alt = "", style, attribution = "card", fallba
     );
     return () => { current = false; };
   }, [hosted, attributionSrc]);
-  if (!hosted) return <img {...props} data-card-art src={src} alt={alt} style={style} />;
+  if (!hosted) return <img {...props} data-card-art={attribution === "card" ? "" : undefined} src={src} alt={alt} style={style} />;
   const artist = credit && credit.src === attributionSrc ? credit.artist : null;
   if (!artist) return <CardArtFallback name={fallbackName} variant="artCrop" className={props.className ?? ""} style={style} />;
   return <>
