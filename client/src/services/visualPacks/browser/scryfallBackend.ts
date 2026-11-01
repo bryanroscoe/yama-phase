@@ -1,4 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+import { rememberInstalledImageSource } from "../imageAttribution.ts";
 
 import {
   VisualPackBackendError,
@@ -2367,6 +2368,7 @@ export class ScryfallBrowserVisualPackBackend implements VisualPackBackend, Deck
             ?? await this.database.getAllFromIndex("objects", "by-pack", selectedPack.packId);
           for (const object of objects) {
             if (object.root !== selectedPack.root || !sameResolutionKey(object, key) || !await cache.match(object.path)) continue;
+            rememberInstalledImageSource(object.path, object.sourceUrl);
             matches.push({ packId: object.packId, assetKey: object.assetKey, catalogRoot: object.root, url: object.path, media: object.media });
           }
         }

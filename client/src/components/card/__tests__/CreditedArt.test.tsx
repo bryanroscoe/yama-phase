@@ -1,3 +1,4 @@
+import { rememberInstalledImageSource } from "../../../services/visualPacks/imageAttribution.ts";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreditedArt } from "../CreditedArt.tsx";
@@ -42,6 +43,28 @@ describe("hosted illustration credits", () => {
     expect(view.container.querySelector("img")).toBeNull();
     expect(screen.getByLabelText("Unknown illustration")).toBeTruthy();
     expect(unavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops an installed image credit immediately when its source becomes ambiguous", async () => {
+    const src = "/board/__visual-packs/sha256/ambiguous.jpg";
+    rememberInstalledImageSource(src, "https://cards.test/front.jpg");
+    fetchArtist.mockResolvedValueOnce("Original artist").mockResolvedValueOnce(null);
+    const view = render(<CreditedArt src={src} alt="Card" />);
+    await screen.findByText("Original artist");
+    act(() => rememberInstalledImageSource(src, "https://cards.test/other-printing.jpg"));
+    expect(screen.queryByText("Original artist")).toBeNull();
+    expect(view.container.querySelector("img")).toBeNull();
+    await act(async () => {});
+    expect(fetchArtist).toHaveBeenCalledWith("https://cards.test/front.jpg");
+    expect(fetchArtist).toHaveBeenLastCalledWith(src);
+  });
+
+  it("names a decorative image's fallback without changing its image alt", async () => {
+    fetchArtist.mockResolvedValue(null);
+    const view = render(<CreditedArt src="unknown.jpg" alt="" fallbackName="Representative card" />);
+    await act(async () => {});
+    expect(view.container.querySelector("img")).toBeNull();
+    expect(screen.getByLabelText("Representative card")).toBeTruthy();
   });
 
   it("retains the ordinary Phase image path outside hosted builds", () => {

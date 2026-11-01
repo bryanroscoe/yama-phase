@@ -27,6 +27,7 @@ import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
+import { CreditedArt } from "../components/card/CreditedArt.tsx";
 import { IntegerField } from "../components/ui/IntegerField";
 import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
@@ -480,11 +481,12 @@ export function GameSetupPage() {
                 </div>
               ) : activeDeckName ? (
                 <div>
-                  <div className="aspect-[5/3] overflow-hidden rounded-xl bg-gray-800">
+                  <div className="relative aspect-[5/3] overflow-hidden rounded-xl bg-gray-800">
                     {deckArtSrc ? (
-                      <img
+                      <CreditedArt
                         src={deckArtSrc}
                         alt=""
+                        fallbackName={representativeVisual?.name ?? activeDeckName}
                         className="h-full w-full object-cover"
                         onError={() => advanceFailedDeckArtSource?.(deckArtSrc)}
                       />

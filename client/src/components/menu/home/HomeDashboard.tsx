@@ -246,6 +246,7 @@ function ActiveDeckCard() {
           <CreditedArt
             src={artSrc}
             alt=""
+            fallbackName={representativeVisual?.name ?? ""}
             className="absolute inset-0 h-full w-full object-cover"
             onError={() => advanceFailedSource?.(artSrc)}
           />

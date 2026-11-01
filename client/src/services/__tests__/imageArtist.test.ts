@@ -8,6 +8,23 @@ const entry = (faces: unknown[]) => ({ oracle_id: "oracle", name: "Fixture", fac
 afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 
 describe("exact-image artist lookup", () => {
+  it("credits installed browser art using its original printing and face", async () => {
+    const local = "/board/__visual-packs/sha256/installed-back.jpg";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("api.scryfall.com") ? {
+      card_faces: [
+        { artist: "Front artist", image_uris: { normal: image(id, "front", "normal") } },
+        { artist: "Back artist", image_uris: { normal: image(id, "back", "normal") } },
+      ],
+    } : {}))));
+    const { rememberInstalledImageSource } = await import("../visualPacks/imageAttribution.ts");
+    rememberInstalledImageSource(local, image(id, "back"));
+    const { fetchImageArtist } = await import("../scryfall.ts");
+    expect(await fetchImageArtist(local)).toBe("Back artist");
+    // Identical local bytes attributed to conflicting source printings fail closed.
+    rememberInstalledImageSource(local, image(other));
+    expect(await fetchImageArtist(local)).toBeNull();
+  });
+
   it("uses matching image metadata without requesting an Oracle default printing", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ fixture: entry([{ normal: image(id, "front", "normal"), art_crop: image(id), artist: "Exact artist" }]) })));
     vi.stubGlobal("fetch", fetch);
