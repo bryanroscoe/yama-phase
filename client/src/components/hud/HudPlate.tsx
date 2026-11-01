@@ -1,3 +1,4 @@
+import { CreditedArt, type ArtAttribution } from "../card/CreditedArt.tsx";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -112,6 +113,7 @@ export function HudPlate({
       <div className="absolute inset-[1px] rounded-[9px] border-t border-white/8" />
       {avatar.src ? (
         <HudAvatar
+          attribution={avatarIdentity?.kind ?? "card"}
           label={label}
           avatarUrl={avatar.src}
           seatColor={seatColor}
@@ -158,12 +160,14 @@ export function HudPlate({
 }
 
 function HudAvatar({
+  attribution,
   label,
   avatarUrl,
   seatColor,
   compact,
   onAvatarError,
 }: {
+  attribution: ArtAttribution;
   label: string;
   avatarUrl: string;
   seatColor?: string;
@@ -172,6 +176,7 @@ function HudAvatar({
 }) {
   return (
     <AvatarHoverPreview
+      attribution={attribution}
       avatarUrl={avatarUrl}
       label={label}
       seatColor={seatColor}
@@ -183,7 +188,8 @@ function HudAvatar({
       } : undefined}
       onAvatarError={onAvatarError}
     >
-      <img
+      <CreditedArt
+        attribution={attribution}
         src={avatarUrl}
         alt={label}
         className="h-full w-full object-cover"

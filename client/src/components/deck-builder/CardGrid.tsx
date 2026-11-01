@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall";
@@ -110,7 +111,7 @@ function CardGridTile({
       }`}
     >
       {src ? (
-        <img
+        <CreditedArt
           src={src}
           alt={card.name}
           className="aspect-[4/3] w-full rounded-lg object-cover"

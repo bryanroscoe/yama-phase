@@ -5,6 +5,7 @@ import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { ArtCropCard } from "../ArtCropCard.tsx";
+import * as scryfall from "../../../services/scryfall.ts";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
@@ -84,6 +85,19 @@ describe("ArtCropCard", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("credits the actual transformed image on the production battlefield tile", async () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
+    const src = "https://cards.test/exact-back.jpg";
+    const artist = vi.spyOn(scryfall, "fetchImageArtist").mockResolvedValue("Exact back artist");
+    mockUseCardImage.mockReturnValue({ src, isLoading: false, isRotated: false, isFlip: false });
+    const view = render(<ArtCropCard objectId={101} />);
+    await screen.findByText("Exact back artist");
+    expect(view.container.querySelector("img")?.getAttribute("src")).toBe(src);
+    expect(artist).toHaveBeenCalledWith(src);
   });
 
   it("uses the front-face lookup key and back face index for transformed permanents", () => {

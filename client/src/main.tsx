@@ -11,6 +11,7 @@ import "@fontsource-variable/jetbrains-mono";
 // 187 KB font is bundled here and in the Tauri app.
 import "mana-font/css/mana.css";
 import "./index.css";
+import "./config/hostedCardArt.css";
 import "./i18n"; // initialize i18next before any component renders
 import { App } from "./App";
 import { installHiddenDocumentMotion } from "./animation/hiddenDocumentMotion";
@@ -24,6 +25,9 @@ import { initializeHostPlatform } from "./services/platform";
 import { initializeConnectivity } from "./stores/connectivityStore";
 
 export async function bootstrap(): Promise<void> {
+  if (import.meta.env.VITE_HOSTED_CARD_ART === "1") {
+    document.documentElement.setAttribute("data-hosted-card-art", "");
+  }
   // Before anything renders: a tab opened in the background must not start
   // CSS animations it can never finish (see animation/hiddenDocumentMotion).
   installHiddenDocumentMotion();

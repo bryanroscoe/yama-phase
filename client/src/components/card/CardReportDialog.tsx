@@ -359,7 +359,7 @@ function CardReportRow({
       className="relative block h-9 w-9 shrink-0 overflow-hidden rounded-[6px] border border-white/10 bg-black/30"
     >
       {artSrc && (
-        <img
+        <img data-card-art
           src={artSrc}
           {...getCardImageSrcSetProps(artSrc, artRungs)}
           alt=""

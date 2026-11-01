@@ -1,3 +1,4 @@
+import { CreditedArt } from "../card/CreditedArt.tsx";
 import type { ImgHTMLAttributes, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
@@ -87,7 +88,12 @@ export function ResolvedAnimationImage({
 
   const capturedSrc = src;
   return (
-    <img
+    <CreditedArt
+      onAttributionUnavailable={() => {
+        if (settledRef.current) return;
+        settledRef.current = true;
+        onExhausted?.();
+      }}
       {...imageAttributes}
       src={capturedSrc}
       alt={alt}
