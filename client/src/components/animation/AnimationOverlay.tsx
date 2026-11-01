@@ -634,6 +634,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             const position = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
             if (
               vfxQuality !== "minimal" &&
+              import.meta.env.VITE_HOSTED_CARD_ART !== "1" &&
               event.type === "CreatureDestroyed" &&
               imageSnapshot
             ) {
@@ -784,6 +785,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         }
 
         case "Melded": {
+          // Hosted illustrations stay intact; publish the engine's melded board
+          // without veiling it for the texture-morph forge sequence.
+          if (import.meta.env.VITE_HOSTED_CARD_ART === "1") break;
           // CR 701.42a: forge the pair on the board, then turn the fused blank
           // over to the melded permanent's combined face.
           if (owningStepMs <= 0) break;

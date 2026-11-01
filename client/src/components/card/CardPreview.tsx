@@ -793,7 +793,13 @@ function CardPreviewInner({
     <motion.div
       ref={previewRef}
       className="fixed z-[100] pointer-events-none drop-shadow-[0_22px_28px_rgba(0,0,0,0.62)]"
-      style={{ ...style, transformOrigin }}
+      style={{
+        ...style,
+        transformOrigin,
+        ...(import.meta.env.VITE_HOSTED_CARD_ART === "1" && activeMobileHandDragObjectId != null
+          ? { visibility: "hidden" as const }
+          : {}),
+      }}
       initial={
         animatePreview
           ? handPreview && movePreview
@@ -958,7 +964,8 @@ function MobilePreviewOverlay({
           // stays empty rather than flashing a skeleton over the board.
           null
         ) : (
-          <img data-card-art
+          <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
@@ -1001,7 +1008,8 @@ function MobilePreviewOverlay({
           // Still resolving — skeleton, not the artless tile.
           <div className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full animate-pulse rounded-lg bg-gray-700" />
         ) : (
-          <img data-card-art
+          <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}
@@ -1173,7 +1181,8 @@ function CardImagePreview({
             <span className="text-sm font-medium text-gray-300">{cardName}</span>
           </div>
         ) : (
-          <img data-card-art
+          <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, art.rungs)}
             alt={cardName}

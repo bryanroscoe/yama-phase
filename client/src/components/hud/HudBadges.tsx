@@ -71,6 +71,15 @@ export function DesignationArt({
   fallback: ReactNode;
   className?: string;
 }) {
+  if (import.meta.env.VITE_HOSTED_CARD_ART === "1") return <>{fallback}</>;
+  return <DesignationImage art={art} fallback={fallback} className={className} />;
+}
+
+function DesignationImage({ art, fallback, className }: {
+  art: DesignationArtKind;
+  fallback: ReactNode;
+  className: string;
+}) {
   const src = useDesignationTokenArt(art);
   // The hook resolves when the URL is known, not when the bytes arrive — and
   // a failed download never recovers. Keep the glyph until `onLoad` confirms

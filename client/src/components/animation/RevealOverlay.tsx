@@ -25,6 +25,7 @@ function RevealCard({ card }: { card: { name: string; oracleId?: string; faceNam
     >
       {src ? (
         <img
+          data-card-art
           src={src}
           alt={card.name}
           className="h-full w-full object-cover"

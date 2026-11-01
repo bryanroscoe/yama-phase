@@ -264,6 +264,7 @@ function CompactCommandDock({
         ) : firstCard && src ? (
           <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg bg-black/70">
             <img
+          data-card-art
               src={src}
               {...getCardImageSrcSetProps(src, rungs)}
               alt={displayName}

@@ -327,7 +327,7 @@ function CardReportRow({
     rungs: artRungs,
     advanceFailedSource,
   } = useCardImage(imageLookup.name, {
-    size: isToken ? "normal" : "art_crop",
+    size: isToken || import.meta.env.VITE_HOSTED_CARD_ART === "1" ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken,
     tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
@@ -359,13 +359,14 @@ function CardReportRow({
       className="relative block h-9 w-9 shrink-0 overflow-hidden rounded-[6px] border border-white/10 bg-black/30"
     >
       {artSrc && (
-        <img data-card-art
+        <img
+          data-card-art
           src={artSrc}
           {...getCardImageSrcSetProps(artSrc, artRungs)}
           alt=""
           draggable={false}
           onError={() => advanceFailedSource?.(artSrc)}
-          className="h-full w-full object-cover"
+          className={`h-full w-full ${import.meta.env.VITE_HOSTED_CARD_ART === "1" ? "object-contain" : "object-cover"}`}
         />
       )}
     </span>

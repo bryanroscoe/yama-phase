@@ -49,6 +49,7 @@ afterEach(() => {
   cleanup();
   document.querySelectorAll("[data-hand-card]").forEach((node) => node.remove());
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
   Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
   Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
   useGameStore.setState({ gameState: null, spellCosts: {}, legalActionsByObject: {} });
@@ -154,7 +155,8 @@ describe("CardPreview chosen attributes", () => {
     source.remove();
   });
 
-  it("hands off a stationary blue preview before despawning for direct card drag", async () => {
+  it("hides the hosted inspection preview immediately when handing off to direct card drag", async () => {
+    vi.stubEnv("VITE_HOSTED_CARD_ART", "1");
     const object = battlefieldObject({ zone: "Hand" });
     useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
     const source = document.createElement("div");
@@ -228,7 +230,7 @@ describe("CardPreview chosen attributes", () => {
       });
     });
 
-    expect(container.querySelector("[data-card-preview]")).not.toBeNull();
+    expect(container.querySelector("[data-card-preview]")).toHaveStyle({ visibility: "hidden" });
     expect(
       container.querySelector("[data-mobile-hand-preview-wobble]"),
     ).toBeNull();

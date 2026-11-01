@@ -273,6 +273,7 @@ function CommanderCard({
           <div className="h-full w-full animate-pulse bg-gray-700" />
         ) : src ? (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
             alt={displayName}

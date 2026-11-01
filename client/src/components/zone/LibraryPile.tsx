@@ -62,6 +62,7 @@ function VisibleTopCard({ object }: { object: GameObject }) {
 
   return (
     <img
+          data-card-art
       src={src}
       {...getCardImageSrcSetProps(src, rungs)}
       alt={object.name}

@@ -63,6 +63,7 @@ function PrintingTile({
     >
       {src ? (
         <img
+          data-card-art
           src={src}
           {...getCardImageSrcSetProps(src, rungs)}
           alt={`${cardName} — ${printing.set_name} #${printing.collector_number}`}

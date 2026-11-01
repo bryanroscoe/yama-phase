@@ -295,6 +295,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
           />
         ) : (
           <img
+          data-card-art
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
             alt={displaySourceName}
