@@ -148,6 +148,7 @@ function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
         </div>
       ) : (
         <img
+          data-card-art
           src={src}
           {...getCardImageSrcSetProps(src, rungs)}
           alt={cardName}
