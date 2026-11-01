@@ -152,11 +152,15 @@ jobs:
       # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
       # the first run after the dev -> server-release move.
       # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      - name: Remove any cached decision-cost report
+        run: rm -f -- target/ai-perf-gate-current.json
+
       - name: Run decision-cost perf gate
+        id: perf
         run: cargo ai-perf-gate
 
       - name: Preserve decision-cost report
-        if: always()
+        if: always() && (steps.perf.outcome == 'success' || steps.perf.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
           name: decision-cost-${{ github.sha }}
