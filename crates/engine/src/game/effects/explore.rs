@@ -429,7 +429,7 @@ pub fn handle_choice(
     // resolving ability grants the active player priority only after it finishes.
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
-        player: state.active_player,
+        player: state.priority_player,
     };
 
     let remaining: Vec<ObjectId> = remaining

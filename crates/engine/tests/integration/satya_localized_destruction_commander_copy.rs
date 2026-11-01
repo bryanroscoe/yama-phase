@@ -261,3 +261,51 @@ fn restored_genuine_commander_choice_remains_actionable() {
     ));
     assert_eq!(restored.objects[&commander].zone, Zone::Graveyard);
 }
+
+/// CR 800.4j: stale-prompt recovery must not resurrect the departed active
+/// player's priority. This uses the same historical malformed-token shape as
+/// the restore tests above, after a real multiplayer concession.
+#[test]
+fn restored_token_commander_choice_after_active_departure_grants_survivor_priority() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let copied_commander = scenario
+        .add_creature(P1, "Copied Commander", 3, 4)
+        .commander()
+        .id();
+    let mut runner = scenario.build();
+    runner.act(GameAction::Concede { player_id: P0 }).unwrap();
+    assert!(runner.state().players[0].is_eliminated);
+    assert_eq!(runner.state().active_player, P0);
+
+    move_to_zone(
+        runner.state_mut(),
+        copied_commander,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&copied_commander).unwrap().is_token = true;
+        state.waiting_for = WaitingFor::CommanderZoneChoice {
+            player: P1,
+            commander_id: copied_commander,
+            current_zone: Zone::Graveyard,
+        };
+    }
+    let serialized = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the stale prompt with a departed active player serializes");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&serialized)
+        .unwrap()
+        .into_game_state()
+        .expect("the stale prompt restores through the production boundary");
+    assert!(matches!(
+        restored.waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(restored.priority_player, P1);
+    assert_eq!(restored.active_player, P0);
+    assert!(!restored.objects.contains_key(&copied_commander));
+    engine::game::engine::apply(&mut restored, P1, GameAction::PassPriority)
+        .expect("the survivor can act after stale-prompt recovery");
+}

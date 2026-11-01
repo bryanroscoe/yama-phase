@@ -5578,12 +5578,19 @@ fn shortcut_count_is_drivable(
 /// resolution's carrier settles (including the restore-boundary recoveries), and when an
 /// answered resolution prompt hands the resolution back. Priority passes to the next player in turn order still in
 /// the game — the
-/// active player if it is still in the game, otherwise the next living seat in turn order
+/// active player (or a living active-team representative), otherwise the next living seat in turn order
 /// (elimination does not advance `active_player` when a non-acting seat concedes during the
 /// APNAP window, so `active_player` may be a departed player).
 pub(super) fn living_priority_seat(state: &GameState) -> PlayerId {
     if crate::game::players::is_alive(state, state.active_player) {
-        state.active_player
+        return state.active_player;
+    }
+    // CR 117.6 + CR 805.5b: the active team receives priority after resolution,
+    // even when its previous representative has left. Choose its living
+    // representative before considering another team in turn order.
+    let active = super::topology::priority_pass_representative(state, state.active_player);
+    if crate::game::players::is_alive(state, active) {
+        active
     } else {
         crate::game::players::next_player_in_turn_order(state, state.active_player)
     }
@@ -5801,7 +5808,7 @@ fn apply_until_lethal_shortcut(
         let mut seed = committed.clone();
         priority::reset_priority(&mut seed);
         seed.waiting_for = WaitingFor::Priority {
-            player: seed.active_player,
+            player: seed.priority_player,
         };
         seed.normalize_for_loop()
     };
@@ -6238,7 +6245,7 @@ fn drive_one_shortcut_cycle(
     let mut work = committed.clone();
     priority::reset_priority(&mut work);
     work.waiting_for = WaitingFor::Priority {
-        player: work.active_player,
+        player: work.priority_player,
     };
     let mut ev: Vec<GameEvent> = Vec::new();
     let mut beat = 0usize;
@@ -6974,7 +6981,7 @@ fn materialize_fixed_shortcut(
         let mut seed = committed.clone();
         priority::reset_priority(&mut seed);
         seed.waiting_for = WaitingFor::Priority {
-            player: seed.active_player,
+            player: seed.priority_player,
         };
         seed.normalize_for_loop()
     };
@@ -11193,7 +11200,7 @@ fn emit_resolution_halt(state: &mut GameState, result: &mut ActionResult) {
 
     priority::reset_priority(state);
     let wf = WaitingFor::Priority {
-        player: state.active_player,
+        player: state.priority_player,
     };
     state.waiting_for = wf.clone();
     result.waiting_for = wf;
@@ -22597,7 +22604,7 @@ mod stage2_injector_tests {
             let mut seed = committed.clone();
             priority::reset_priority(&mut seed);
             seed.waiting_for = WaitingFor::Priority {
-                player: seed.active_player,
+                player: seed.priority_player,
             };
             seed.normalize_for_loop()
         };

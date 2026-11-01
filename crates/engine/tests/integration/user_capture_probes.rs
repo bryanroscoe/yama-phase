@@ -267,7 +267,7 @@ fn dina_drive_and_report(
                     play_seats(state).len(),
                     state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
                     verdicts.unwrap_or_else(|| "-".to_string()),
-                    &act.chars().take(40).collect::<String>()
+                    act.chars().take(40).collect::<String>()
                 );
             }
             Err(e) => {
