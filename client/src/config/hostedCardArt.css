@@ -11,6 +11,17 @@ html[data-hosted-card-art] *:has([data-card-art]) {
   mix-blend-mode: normal !important;
 }
 
+/* Keep interaction states visible without dimming the illustration. Disabled
+   choices use a dashed outline; picks awaiting acknowledgement use a double one. */
+html[data-hosted-card-art] :is(button, [role="button"]):is(:disabled, [aria-disabled="true"]):has([data-card-art]) {
+  outline: 2px dashed white;
+  outline-offset: 2px;
+}
+html[data-hosted-card-art] :is([data-visual-state="submitting"], [data-visual-state="waiting"]):has([data-card-art]) {
+  outline: 3px double white;
+  outline-offset: 2px;
+}
+
 /* Small portraits cannot hold a readable artist name over the illustration. */
 html[data-hosted-card-art] [data-card-avatar] {
   overflow: visible !important;
