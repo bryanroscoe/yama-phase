@@ -5808,7 +5808,7 @@ fn apply_until_lethal_shortcut(
         let mut seed = committed.clone();
         priority::reset_priority(&mut seed);
         seed.waiting_for = WaitingFor::Priority {
-            player: seed.active_player,
+            player: seed.priority_player,
         };
         seed.normalize_for_loop()
     };
@@ -6245,7 +6245,7 @@ fn drive_one_shortcut_cycle(
     let mut work = committed.clone();
     priority::reset_priority(&mut work);
     work.waiting_for = WaitingFor::Priority {
-        player: work.active_player,
+        player: work.priority_player,
     };
     let mut ev: Vec<GameEvent> = Vec::new();
     let mut beat = 0usize;
@@ -6981,7 +6981,7 @@ fn materialize_fixed_shortcut(
         let mut seed = committed.clone();
         priority::reset_priority(&mut seed);
         seed.waiting_for = WaitingFor::Priority {
-            player: seed.active_player,
+            player: seed.priority_player,
         };
         seed.normalize_for_loop()
     };
@@ -11200,7 +11200,7 @@ fn emit_resolution_halt(state: &mut GameState, result: &mut ActionResult) {
 
     priority::reset_priority(state);
     let wf = WaitingFor::Priority {
-        player: state.active_player,
+        player: state.priority_player,
     };
     state.waiting_for = wf.clone();
     result.waiting_for = wf;
@@ -22604,7 +22604,7 @@ mod stage2_injector_tests {
             let mut seed = committed.clone();
             priority::reset_priority(&mut seed);
             seed.waiting_for = WaitingFor::Priority {
-                player: seed.active_player,
+                player: seed.priority_player,
             };
             seed.normalize_for_loop()
         };

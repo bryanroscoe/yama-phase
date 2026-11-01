@@ -149,3 +149,84 @@ fn departed_free_for_all_player_uses_next_seat_in_turn_direction() {
         );
     }
 }
+
+// CR 800.4a + 800.4j: removing the last attacker while a defender's choice
+// is open makes that choice empty. The public action boundary finishes the
+// empty declaration and must publish the surviving priority recipient.
+fn blocker_completion_after_concession(departing: Option<PlayerId>, expected: PlayerId) {
+    use engine::game::combat::AttackTarget;
+    use engine::game::scenario::P1;
+
+    let mut s = GameScenario::new_n_player(3, 51);
+    s.at_phase(Phase::BeginCombat);
+    let attacker = s.add_creature(P0, "Attacker", 2, 2).id();
+    s.add_creature(P1, "Potential blocker", 1, 3);
+    let mut r = s.build();
+    r.declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .unwrap();
+    for _ in 0..3 {
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+        apply_as_current(r.state_mut(), GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(
+            r.state().waiting_for,
+            WaitingFor::DeclareBlockers { player: P1, .. }
+        ),
+        "expected the blocker choice, got {:?}",
+        r.state().waiting_for
+    );
+    let turn = r.state().turn_number;
+    if let Some(player_id) = departing {
+        r.act(GameAction::Concede { player_id }).unwrap();
+        assert!(r.state().players[player_id.0 as usize].is_eliminated);
+    }
+    if departing == Some(P0) {
+        assert_ne!(r.state().objects[&attacker].zone, Zone::Battlefield);
+        assert!(!engine::game::combat::has_attackers_in_play(r.state()));
+        // The real concession action already completed the now-empty blocker
+        // declaration; no test-side prompt repair or extra action is needed.
+    } else {
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::DeclareBlockers { player: P1, .. }
+        ));
+        r.declare_blockers(&[]).unwrap();
+    }
+    assert_eq!(r.state().active_player, P0);
+    assert_eq!(r.state().turn_number, turn);
+    assert_eq!(r.state().phase, Phase::DeclareBlockers);
+    assert!(
+        matches!(
+            r.state().waiting_for,
+            WaitingFor::Priority { player } if player == expected
+        ),
+        "expected priority for {expected:?}, got {:?}",
+        r.state().waiting_for
+    );
+    assert_eq!(r.state().priority_player, expected);
+    apply_as_current(r.state_mut(), GameAction::PassPriority).unwrap();
+    let WaitingFor::Priority { player } = r.state().waiting_for else {
+        panic!(
+            "expected the next survivor's window: {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_ne!(player, expected);
+    assert!(!r.state().players[player.0 as usize].is_eliminated);
+}
+
+#[test]
+fn blocker_completion_after_active_concession_grants_survivor_priority() {
+    blocker_completion_after_concession(Some(P0), PlayerId(1));
+}
+
+#[test]
+fn blocker_completion_after_nonactive_concession_keeps_active_priority() {
+    blocker_completion_after_concession(Some(PlayerId(2)), P0);
+}
+
+#[test]
+fn blocker_completion_without_concession_keeps_active_priority() {
+    blocker_completion_after_concession(None, P0);
+}

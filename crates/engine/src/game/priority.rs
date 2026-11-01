@@ -666,6 +666,8 @@ pub(crate) fn clear_priority_passes(state: &mut GameState) {
 /// Reset priority bookkeeping and grant priority to the active player, or the
 /// next surviving player when that player has left the game (CR 800.4j).
 /// Callers own the concrete rule that grants priority for their flow.
+/// Publish `priority_player` for this grant, rather than re-reading the possibly
+/// departed `active_player`. This helper does not replace an interactive prompt.
 pub fn reset_priority(state: &mut GameState) {
     state.priority_player = super::engine::living_priority_seat(state);
     clear_priority_passes(state);
