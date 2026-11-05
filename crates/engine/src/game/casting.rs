@@ -9901,23 +9901,18 @@ fn prepare_spell_cast_announced(
     };
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
     //
-    // CR 118.9a: this scan reads every attached permission, not the elected
-    // one (an energy permission is never electable — see
-    // `exile_alt_cost_permission_supports_cast`), so it must not answer for a
-    // cast that brings its own independent alternative cost. Such a cast is
-    // authorized by a normal-cost grant (`has_exile_cast_permission` rejects
-    // the energy permission as rider authority) and owes the rider's cost, not
-    // a free one borrowed from a route it never took.
-    let energy_cost_from_exile = if obj.zone == Zone::Exile && !alt_rider_variant {
-        obj.casting_permissions.iter().any(|p| {
-            matches!(
-                p,
-                crate::types::ability::CastingPermission::ExileWithEnergyCost
-            )
-        })
-    } else {
-        false
-    };
+    // CR 118.9a: an energy permission is never electable (see
+    // `exile_alt_cost_permission_supports_cast`), so a cast that brings its own
+    // independent alternative cost is authorized by a normal-cost grant and owes
+    // the rider's cost, not a free one borrowed from a route it never took.
+    // `exile_energy_cast_cost` decides that for this step, the castability check
+    // and the payment alike.
+    let energy_cost_from_exile = casting_costs::exile_energy_cast_cost(
+        state,
+        object_id,
+        variant_override.unwrap_or(CastingVariant::Normal),
+    )
+    .is_some();
 
     // Warp: when casting from hand with Keyword::Warp, use the warp mana cost.
     let warp_cost = if obj.zone == Zone::Hand {
@@ -22271,6 +22266,23 @@ fn can_cast_prepared_now_with_probe(
         // Waterbend is a mana leg settled by the spell's own payment step.
         if !matches!(cost, AbilityCost::Waterbend { .. })
             && !cost.is_payable_for_spell(state, player, prepared.object_id)
+        {
+            return false;
+        }
+    }
+
+    // CR 107.14 + CR 118.3 + CR 118.9: a card cast from exile "by paying an
+    // amount of {E} equal to its mana value rather than paying its mana cost"
+    // costs that much energy, and a player can't pay more {E} than they have,
+    // so the cast is offered only while the energy is there.
+    if let Some(energy) =
+        casting_costs::exile_energy_cast_cost(state, prepared.object_id, prepared.casting_variant)
+    {
+        if state
+            .players
+            .iter()
+            .find(|candidate| candidate.id == player)
+            .is_none_or(|candidate| candidate.energy < energy)
         {
             return false;
         }

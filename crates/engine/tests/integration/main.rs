@@ -367,3 +367,5 @@ mod required_object_additional_cost_offer_gate;
 mod x_minimum_offer_gate;
 
 mod energy_paid_or_lost_activation;
+
+mod exile_energy_cast_offer_gate;
