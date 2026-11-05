@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::mana_sources;
+use engine::game::players;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
@@ -101,6 +102,14 @@ fn push_header(out: &mut String, state: &GameState, viewer: PlayerId) {
 fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- PLAYERS ---\n");
     for player in &state.players {
+        // CR 104.3a + CR 800.4a: a player who has lost has left the game. Their
+        // life total and empty zones are not a position to reason about, and
+        // reading them as one ("-49 life") is how a seat mistakes a departed
+        // player for a live one.
+        if !players::is_alive(state, player.id) {
+            out.push_str(&format!("{}: eliminated\n", seat_label(player.id, viewer)));
+            continue;
+        }
         let mut facts = vec![
             format!("{} life", player.life),
             format!("{} cards in hand", player.hand.len()),
@@ -392,7 +401,11 @@ fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
 /// revealed card, or a teammate's hand where the format shares it.
 fn push_known_other_hands(out: &mut String, state: &GameState, viewer: PlayerId) {
     let mut lines: Vec<String> = Vec::new();
-    for player in state.players.iter().filter(|player| player.id != viewer) {
+    for player in state
+        .players
+        .iter()
+        .filter(|player| player.id != viewer && players::is_alive(state, player.id))
+    {
         let known: Vec<String> = player
             .hand
             .iter()
@@ -421,7 +434,12 @@ fn push_known_other_hands(out: &mut String, state: &GameState, viewer: PlayerId)
 
 fn push_graveyards(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- GRAVEYARDS ---\n");
-    for player in &state.players {
+    // CR 800.4a: an eliminated player's cards left the game with them.
+    for player in state
+        .players
+        .iter()
+        .filter(|player| players::is_alive(state, player.id))
+    {
         let names = grouped_lines(
             state
                 .graveyard_of(player.id)
@@ -444,11 +462,18 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
     // CR 406.1: exile is a public zone, but face-down exiled cards are not
     // public. The filtered state has already replaced any name this seat may not
     // read, so rendering names here cannot leak.
+    //
+    // CR 800.4a: when a player leaves the game, every object they own leaves
+    // with them. The engine parks those objects in exile; they are not exiled
+    // cards anyone can interact with, so they are not listed as such.
     let names: Vec<String> = state
         .exile
         .iter()
         .filter_map(|id| {
             let object = state.objects.get(id)?;
+            if !players::is_alive(state, object.owner) {
+                return None;
+            }
             Some(format!(
                 "{} (owned by {})",
                 one_line(&object.name),
@@ -797,6 +822,51 @@ mod tests {
         assert!(
             !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(1))
                 .contains("PENDING DELAYED TRIGGERS")
+        );
+    }
+
+    /// CR 104.3a + CR 800.4a: a seat that has lost reads as eliminated, with
+    /// no life total, zones or left-the-game cards presented as live state.
+    #[test]
+    fn an_eliminated_seat_reads_as_eliminated_and_nothing_else() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 3);
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(2),
+                format!("Departed {zone:?}"),
+                zone,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Swords to Plowshares".to_string(),
+            Zone::Exile,
+        );
+        let live = rendered(&state, PlayerId(0));
+        // Reach guard: while seat 2 is alive, its zones are on the board.
+        assert!(live.contains("Departed Graveyard"), "{live}");
+        assert!(
+            live.contains("Departed Exile (owned by Player 2)"),
+            "{live}"
+        );
+
+        state.players[2].life = -49;
+        state.players[2].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(2));
+        let board = rendered(&state, PlayerId(0));
+        assert!(board.contains("Player 2: eliminated\n"), "{board}");
+        assert!(!board.contains("-49"), "{board}");
+        assert_eq!(board.matches("Player 2").count(), 1, "{board}");
+        assert!(!board.contains("Departed"), "{board}");
+        // The living seats are rendered as before.
+        assert!(board.contains("Player 1: 20 life"), "{board}");
+        assert!(
+            board.contains("Swords to Plowshares (owned by Player 1)"),
+            "{board}"
         );
     }
 
