@@ -20979,6 +20979,418 @@ fn can_feasibly_pay_mana_cost_with_assist(
     })
 }
 
+/// The most boards [`required_cost_leaves_mana_payable`] probes before it
+/// gives up and refuses the cast.
+const REQUIRED_COST_RESERVATION_BUDGET: usize = 16;
+
+/// CR 601.2g-h + CR 118.10 + CR 119.4: whether a spell whose REQUIRED
+/// additional cost consumes objects or life can also pay its mana with what
+/// is left. One payment pays one cost (CR 118.10), so what the cost consumes
+/// can't also feed a mana ability:
+///
+/// * a permanent kept for a sacrifice may tap for mana first (a mana rock:
+///   mana abilities are activated in CR 601.2g, the sacrifice is paid in
+///   CR 601.2h), but it can't be sacrificed for mana itself (a Treasure) or fed
+///   to another source (Ashnod's Altar). The probe board records it as the
+///   cast's kept sacrifice, the reservation the mana abilities' own payment
+///   honours;
+/// * a card kept for a discard or for an exile from hand or graveyard stays
+///   in its zone, so mana that counts that zone still counts it (Crypt of
+///   Agadeem: mana abilities are activated before the cost is paid), but it
+///   is reserved against every other cost (`PendingCast::reserved_cost_cards`),
+///   so no mana ability's discard or exile (Skirge Familiar) can use it. A
+///   card that makes mana itself by leaving its zone (a Spirit Guide) is set
+///   aside instead;
+/// * life is one total (CR 119.4): the probe board has already paid the
+///   cost's life, so every way of paying mana with life (a mana ability's
+///   "Pay N life", a Phyrexian symbol, K'rrik's permission) sees only what
+///   remains.
+///
+/// The spell is payable when SOME choice of kept objects leaves `mana_payable`
+/// true. Objects that are interchangeable for this question (same name,
+/// characteristics, abilities, counters and status, e.g. identical Treasures)
+/// form one class, so a choice is a number taken from each class, and the
+/// classes are tried best first, as a caster would keep them: no mana ability,
+/// then mana abilities that leave the object in place, then those that
+/// consume it. A choice no mana ability could touch needs no probe. When
+/// [`REQUIRED_COST_RESERVATION_BUDGET`] probes all fail the cast is refused: a
+/// cast whose payment isn't proven would be offered only to be reversed
+/// (CR 733.1), and with interchangeable objects merged and the best keeps
+/// first, exhausting the budget takes more distinct kinds of fodder than a
+/// board offers in practice.
+fn required_cost_leaves_mana_payable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    cost: &AbilityCost,
+    mana_payable: impl Fn(&GameState) -> bool,
+) -> bool {
+    use crate::types::ability::{SacrificeCost, SacrificeRequirement};
+    use crate::types::game_state::DeferredSacrificeSelection;
+
+    /// Where a kept object of a leg sits while the mana is probed.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kept {
+        /// A permanent the cast keeps for its sacrifice (paid after mana).
+        Sacrificed,
+        /// A card set aside from this zone (hand or graveyard).
+        SetAside(Zone),
+    }
+    struct Leg<'a> {
+        kept: Kept,
+        filter: Option<&'a TargetFilter>,
+        count: usize,
+        candidates: Vec<ObjectId>,
+    }
+
+    fn cost_any(cost: &AbilityCost, pred: &dyn Fn(&AbilityCost) -> bool) -> bool {
+        match cost {
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                costs.iter().any(|cost| cost_any(cost, pred))
+            }
+            leaf => pred(leaf),
+        }
+    }
+    // Whether a mana ability's cost consumes objects of `kept`'s kind other
+    // than its own source.
+    fn consumes_others(cost: &AbilityCost, kept: Kept) -> bool {
+        cost_any(cost, &|leaf| match (leaf, kept) {
+            (AbilityCost::Sacrifice(sacrifice), Kept::Sacrificed) => {
+                sacrifice.target != TargetFilter::SelfRef
+            }
+            (AbilityCost::Discard { self_scope, .. }, Kept::SetAside(Zone::Hand)) => {
+                !self_scope.is_source_card()
+            }
+            (AbilityCost::Exile { zone, filter, .. }, Kept::SetAside(kept_zone)) => {
+                *zone == Some(kept_zone) && !matches!(filter, Some(TargetFilter::SelfRef))
+            }
+            _ => false,
+        })
+    }
+
+    let source = prepared.object_id;
+    let mut legs: Vec<Leg> = Vec::new();
+    let mut life: i32 = 0;
+    fn collect<'a>(
+        state: &GameState,
+        player: PlayerId,
+        source: ObjectId,
+        cost: &'a AbilityCost,
+        legs: &mut Vec<Leg<'a>>,
+        life: &mut i32,
+    ) {
+        match cost {
+            AbilityCost::Sacrifice(SacrificeCost {
+                target,
+                requirement: SacrificeRequirement::Count { count },
+            }) if *target != TargetFilter::SelfRef && *count != u32::MAX => legs.push(Leg {
+                kept: Kept::Sacrificed,
+                filter: Some(target),
+                count: *count as usize,
+                candidates: find_eligible_sacrifice_targets(state, player, source, None, target),
+            }),
+            AbilityCost::Discard {
+                count,
+                filter,
+                self_scope,
+                ..
+            } if !self_scope.is_source_card() && !count.contains_x() => legs.push(Leg {
+                kept: Kept::SetAside(Zone::Hand),
+                filter: filter.as_ref(),
+                count: resolve_quantity(state, count, player, source).max(0) as usize,
+                candidates: find_eligible_discard_targets(
+                    state,
+                    player,
+                    source,
+                    None,
+                    filter.as_ref(),
+                ),
+            }),
+            AbilityCost::Exile {
+                count,
+                zone: Some(zone @ (Zone::Hand | Zone::Graveyard)),
+                filter,
+            } if *count != crate::types::ability::EXILE_COST_X
+                && !matches!(filter, Some(TargetFilter::SelfRef)) =>
+            {
+                let from = if *zone == Zone::Hand {
+                    ExileCostSourceZone::Hand
+                } else {
+                    ExileCostSourceZone::Graveyard
+                };
+                legs.push(Leg {
+                    kept: Kept::SetAside(*zone),
+                    filter: filter.as_ref(),
+                    count: *count as usize,
+                    candidates: find_eligible_exile_for_cost_targets(
+                        state,
+                        player,
+                        source,
+                        None,
+                        from,
+                        filter.as_ref(),
+                    ),
+                });
+            }
+            AbilityCost::PayLife { amount } => {
+                *life += resolve_quantity(state, amount, player, source).max(0);
+            }
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .for_each(|cost| collect(state, player, source, cost, legs, life)),
+            _ => {}
+        }
+    }
+    collect(state, player, source, cost, &mut legs, &mut life);
+    if legs.is_empty() && life == 0 {
+        return true;
+    }
+
+    let player_mana_costs: Vec<&AbilityCost> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .flat_map(|obj| obj.abilities.iter())
+        .filter(|def| super::mana_abilities::is_mana_ability(def))
+        .filter_map(|def| def.cost.as_ref())
+        .collect();
+    // CR 119.4 + CR 107.4f: life can pay mana by more routes than a mana
+    // ability's "Pay N life" (a Phyrexian symbol, K'rrik's "pay 2 life rather
+    // than pay that mana"), so a cost that pays life is always probed with that
+    // life already paid. Paying down to exactly 0 stays payable.
+    let pays_life = life > 0;
+    // 0: no mana ability; 1: mana abilities that leave it in place; 2: one that
+    // consumes it (sacrifices itself, or any mana ability of a card, which
+    // works only by leaving its zone).
+    let keep_rank = |id: &ObjectId, kept: Kept| {
+        let Some(obj) = state.objects.get(id) else {
+            return 0;
+        };
+        let mut mana = obj
+            .abilities
+            .iter()
+            .filter(|def| super::mana_abilities::is_mana_ability(def))
+            .peekable();
+        if mana.peek().is_none() {
+            0
+        } else if kept != Kept::Sacrificed
+            || mana.any(|def| {
+                def.cost.as_ref().is_some_and(|cost| {
+                    cost_any(cost, &|leaf| {
+                        matches!(leaf, AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef)
+                    })
+                })
+            })
+        {
+            2
+        } else {
+            1
+        }
+    };
+    // Interchangeable objects, for whether keeping one rather than another
+    // changes what mana is left.
+    let same_class = |a: &ObjectId, b: &ObjectId| match (state.objects.get(a), state.objects.get(b))
+    {
+        (Some(a), Some(b)) => {
+            a.name == b.name
+                && a.controller == b.controller
+                && a.tapped == b.tapped
+                && a.summoning_sick == b.summoning_sick
+                && a.is_token == b.is_token
+                && a.card_types == b.card_types
+                && a.color == b.color
+                && a.power == b.power
+                && a.toughness == b.toughness
+                && a.counters == b.counters
+                && a.attachments.is_empty()
+                && b.attachments.is_empty()
+                && a.abilities == b.abilities
+        }
+        _ => false,
+    };
+
+    let sacrifice_consumers = player_mana_costs
+        .iter()
+        .any(|cost| consumes_others(cost, Kept::Sacrificed));
+    let self_sacrificing = |def: &crate::types::ability::AbilityDefinition| {
+        def.cost.as_ref().is_some_and(|cost| {
+            cost_any(cost, &|leaf| {
+                matches!(leaf, AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef)
+            })
+        })
+    };
+    // Every mana ability of this permanent sacrifices it, and nothing is
+    // attached to it or by it, so setting it aside changes nothing else.
+    let only_consumed_for_mana = |id: ObjectId| {
+        state.objects.get(&id).is_some_and(|obj| {
+            let mut mana = obj
+                .abilities
+                .iter()
+                .filter(|def| super::mana_abilities::is_mana_ability(def))
+                .peekable();
+            mana.peek().is_some()
+                && mana.all(self_sacrificing)
+                && obj.attachments.is_empty()
+                && obj.attached_to.is_none()
+        })
+    };
+    // Sets a kept object aside on the probe board: it no longer exists there,
+    // so no mana ability can use or consume it.
+    fn set_aside(board: &mut GameState, id: ObjectId, zone: Zone) {
+        let Some(owner) = board.objects.get(&id).map(|obj| obj.owner) else {
+            return;
+        };
+        // allow-raw-zone: scratch probe board for the affordability check, never the live game; the kept object is set aside, not moved.
+        super::zones::remove_from_zone(board, id, zone, owner);
+        board.objects.remove(&id);
+    }
+
+    // Each leg's choices: how many to keep from each class, best classes
+    // first, as concrete objects (the first of each class).
+    let choices: Vec<Vec<Vec<ObjectId>>> = legs
+        .iter()
+        .map(|leg| {
+            let mut classes: Vec<Vec<ObjectId>> = Vec::new();
+            for id in &leg.candidates {
+                match classes.iter_mut().find(|class| same_class(&class[0], id)) {
+                    Some(class) => class.push(*id),
+                    None => classes.push(vec![*id]),
+                }
+            }
+            classes.sort_by_key(|class| keep_rank(&class[0], leg.kept));
+            fn compose(
+                classes: &[Vec<ObjectId>],
+                remaining: usize,
+                current: &mut Vec<ObjectId>,
+                out: &mut Vec<Vec<ObjectId>>,
+            ) {
+                if out.len() >= REQUIRED_COST_RESERVATION_BUDGET {
+                    return;
+                }
+                if remaining == 0 {
+                    out.push(current.clone());
+                    return;
+                }
+                let Some((class, rest)) = classes.split_first() else {
+                    return;
+                };
+                for take in (0..=remaining.min(class.len())).rev() {
+                    current.extend_from_slice(&class[..take]);
+                    compose(rest, remaining - take, current, out);
+                    current.truncate(current.len() - take);
+                }
+            }
+            let mut out = Vec::new();
+            compose(&classes, leg.count, &mut Vec::new(), &mut out);
+            out
+        })
+        .collect();
+    if choices.iter().any(Vec::is_empty) {
+        // Not enough to pay a leg: the payability gate already refused it.
+        return true;
+    }
+
+    // Walk the product of the legs' choices, best first.
+    let mut index = vec![0usize; legs.len()];
+    let mut probes = 0;
+    loop {
+        let picked: Vec<&Vec<ObjectId>> = index
+            .iter()
+            .zip(&choices)
+            .map(|(&i, leg_choices)| &leg_choices[i])
+            .collect();
+        let mut all: Vec<ObjectId> = picked.iter().flat_map(|ids| ids.iter().copied()).collect();
+        all.sort_unstable();
+        let distinct = all.windows(2).all(|pair| pair[0] != pair[1]);
+        if distinct {
+            let touched = pays_life
+                || legs.iter().zip(&picked).any(|(leg, ids)| {
+                    player_mana_costs
+                        .iter()
+                        .any(|cost| consumes_others(cost, leg.kept))
+                        || ids.iter().any(|id| keep_rank(id, leg.kept) == 2)
+                });
+            if !touched {
+                return true;
+            }
+            if probes == REQUIRED_COST_RESERVATION_BUDGET {
+                return false;
+            }
+            probes += 1;
+            let mut pending = prepared_preview_pending_cast(prepared, player);
+            let mut board = state.clone();
+            // CR 601.2a: by the time mana abilities are activated the spell is
+            // on the stack, so no cost can use the card being cast. It leaves
+            // its zone's list but keeps its object, whose zone the spell's
+            // mana restrictions read.
+            if let Some((zone, owner)) = board
+                .objects
+                .get(&source)
+                .map(|obj| (obj.zone, obj.owner))
+                .filter(|(zone, _)| !matches!(zone, Zone::Battlefield | Zone::Stack))
+            {
+                // allow-raw-zone: scratch probe board for the affordability check, never the live game (CR 601.2a: the spell is on the stack while mana is paid).
+                super::zones::remove_from_zone(&mut board, source, zone, owner);
+            }
+            for (leg, ids) in legs.iter().zip(&picked) {
+                for &id in ids.iter() {
+                    match leg.kept {
+                        // A permanent whose every mana ability sacrifices it
+                        // gives no mana once kept: it leaves the probe board.
+                        Kept::Sacrificed if only_consumed_for_mana(id) => {
+                            set_aside(&mut board, id, Zone::Battlefield);
+                        }
+                        // Otherwise it may still tap for mana (Crystal Vein's
+                        // {T}: Add {C}) but neither sacrifices itself for mana
+                        // (its {T}, Sacrifice: Add {C}{C}) nor feeds another
+                        // source: the cast keeps it, as the payment does.
+                        Kept::Sacrificed => {
+                            if sacrifice_consumers || keep_rank(&id, leg.kept) == 2 {
+                                pending.deferred_sacrificed_permanents.push(
+                                    DeferredSacrificeSelection {
+                                        object_id: id,
+                                        filter: leg.filter.cloned().unwrap_or(TargetFilter::Any),
+                                    },
+                                );
+                            }
+                        }
+                        // A card that makes mana itself (a Spirit Guide) would
+                        // pay by leaving its zone: it leaves the probe board.
+                        Kept::SetAside(zone) if keep_rank(&id, leg.kept) == 2 => {
+                            set_aside(&mut board, id, zone);
+                        }
+                        // Otherwise it stays in its zone, still counted by what
+                        // reads that zone (Crypt of Agadeem), but no mana
+                        // ability's discard or exile may use it.
+                        Kept::SetAside(_) => pending.reserved_cost_cards.push(id),
+                    }
+                }
+            }
+            if let Some(payer) = board.players.iter_mut().find(|p| p.id == player) {
+                payer.life -= life;
+            }
+            if !pending.deferred_sacrificed_permanents.is_empty()
+                || !pending.reserved_cost_cards.is_empty()
+            {
+                board.pending_cast = Some(Box::new(pending));
+            }
+            if mana_payable(&board) {
+                return true;
+            }
+        }
+        // Next index, last leg fastest; done when every combination is tried.
+        let Some(leg) = (0..index.len())
+            .rev()
+            .find(|&leg| index[leg] + 1 < choices[leg].len())
+        else {
+            return false;
+        };
+        index[leg] += 1;
+        index[leg + 1..].iter_mut().for_each(|i| *i = 0);
+    }
+}
+
 /// CR 107.3: the smallest X a prepared spell may announce — its stated
 /// minimum ("X can't be 0"), or 0.
 fn prepared_spell_min_x(prepared: &PreparedSpellCast) -> u32 {
@@ -21268,21 +21680,21 @@ fn can_cast_prepared_now_with_probe(
         }
     }
 
-    // CR 601.2b + CR 118.3 + CR 119.8: Additional-cost affordability — any
-    // `AbilityCost::PayLife` attached as an additional cost (Required or
-    // Optional-but-required-to-cast) must be payable for the spell to be cast.
-    // For Optional additional costs this is a false-negative in the locked case
-    // only if the optional cost is the ONLY affordability gate, which is never
-    // the case; the mana cost already has to be payable on its own.
+    // CR 601.2b + CR 601.2f-h + CR 118.3: a REQUIRED additional cost is part of
+    // the total cost, which must be paid in full, so the spell can be cast
+    // only when its caster has what the cost consumes: the life it pays
+    // (CR 119.4 + CR 119.8), a permanent of theirs to sacrifice (CR 701.21a:
+    // only a permanent the player controls), a card to discard or exile, and
+    // so on. `is_payable` is the single choice-of-object and resource
+    // authority the declaration step itself consults; its mana legs are left
+    // to the mana check below.
     if let Some(AdditionalCost::Required(cost)) = state
         .objects
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        if let Some(amount) = find_pay_life_cost(cost, state, player, prepared.object_id) {
-            if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
-                return false;
-            }
+        if !cost.is_payable(state, player, prepared.object_id) {
+            return false;
         }
         // CR 601.2f + CR 601.2h: a REQUIRED additional cost the parser could not
         // read is part of the total cost and has no payment procedure, so it
@@ -21377,31 +21789,49 @@ fn can_cast_prepared_now_with_probe(
     // requires — for a modal spell, a legal mode selection (see
     // `spell_has_legal_targets_in_flushed_state`).
     let targets_ok = spell_has_legal_targets_with_probe(state, obj.id, player, probe);
-    let mana_payable = can_feasibly_pay_harmonize_mana_cost_with_probe(
-        state,
-        player,
-        prepared.object_id,
-        prepared.casting_variant,
-        &prepared.mana_cost,
-        probe,
-    ) || target_dependent_reduction_makes_payable(
-        state, player, prepared, probe,
-    ) || casting_costs::defiler_reduced_cost(
-        state,
-        player,
-        prepared.object_id,
-        &prepared.mana_cost,
-    )
-    .is_some_and(|reduced| {
+    let mana_payable_on = |state: &GameState, probe: Option<&PriorityCastProbe>| {
         can_feasibly_pay_harmonize_mana_cost_with_probe(
             state,
             player,
             prepared.object_id,
             prepared.casting_variant,
-            &reduced,
+            &prepared.mana_cost,
             probe,
-        )
-    });
+        ) || target_dependent_reduction_makes_payable(state, player, prepared, probe)
+            || casting_costs::defiler_reduced_cost(
+                state,
+                player,
+                prepared.object_id,
+                &prepared.mana_cost,
+            )
+            .is_some_and(|reduced| {
+                can_feasibly_pay_harmonize_mana_cost_with_probe(
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.casting_variant,
+                    &reduced,
+                    probe,
+                )
+            })
+    };
+    // CR 601.2g-h + CR 118.10: with a required cost that consumes objects or
+    // life, the mana is also judged without consuming what is kept for it
+    // (the probe cache describes the live board, so this pass runs without
+    // it).
+    let mana_payable = mana_payable_on(state, probe)
+        && match state
+            .objects
+            .get(&prepared.object_id)
+            .and_then(|o| o.additional_cost.as_ref())
+        {
+            Some(AdditionalCost::Required(cost)) => {
+                required_cost_leaves_mana_payable(state, player, prepared, cost, |board| {
+                    mana_payable_on(board, None)
+                })
+            }
+            _ => true,
+        };
     let creature_face_ok = targets_ok && mana_payable;
 
     if creature_face_ok {
@@ -25806,6 +26236,18 @@ pub(super) fn find_targeted_remove_counter_cost(
 /// incarnation as a spell) and the stack entry that announcement pushed.
 ///
 /// The single authority every hand/graveyard cost-fodder enumeration consults.
+/// CR 601.2a + CR 118.10: whether `object_id` is already committed to the
+/// cast in progress, so no other cost may use it: the spell being cast
+/// ([`is_spell_being_cast`]), or a card the pending cast keeps for its own
+/// additional cost (`PendingCast::reserved_cost_cards`).
+pub(crate) fn committed_to_cast_in_progress(state: &GameState, object_id: ObjectId) -> bool {
+    is_spell_being_cast(state, object_id)
+        || state
+            .pending_cast
+            .as_ref()
+            .is_some_and(|pending| pending.reserved_cost_cards.contains(&object_id))
+}
+
 pub(crate) fn is_spell_being_cast(state: &GameState, object_id: ObjectId) -> bool {
     state
         .objects
@@ -25845,7 +26287,7 @@ fn find_eligible_hand_cost_targets(
                 .copied()
                 .filter(|&id| {
                     id != source
-                        && !is_spell_being_cast(state, id)
+                        && !committed_to_cast_in_progress(state, id)
                         && filter_ref.is_none_or(|f| {
                             super::filter::matches_target_filter(state, id, f, &ctx)
                         })
@@ -25886,7 +26328,7 @@ pub(crate) fn find_eligible_discard_targets_for_ability(
                 .copied()
                 .filter(|&id| {
                     id != source
-                        && !is_spell_being_cast(state, id)
+                        && !committed_to_cast_in_progress(state, id)
                         && filter.is_none_or(|filter| {
                             super::filter::matches_target_filter(state, id, filter, &ctx)
                         })
