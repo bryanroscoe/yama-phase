@@ -362,3 +362,4 @@ mod sepulchral_primordial_one_per_graveyard;
 mod mana_probe_announcement;
 
 mod priority_after_active_departure;
+mod x_minimum_offer_gate;

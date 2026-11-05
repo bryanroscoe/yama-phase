@@ -8453,6 +8453,55 @@ pub(super) fn push_activated_ability_to_stack(
     )
 }
 
+/// CR 107.3 + CR 601.2b + CR 601.2f: the activation cost an announcement of
+/// `x` locks in, for pricing an ability before X is announced at its smallest
+/// legal X ("X can't be 0"). Every `{X}` mana symbol, a waterbend cost's
+/// included (CR 701.67a), becomes `x` generic mana, and the legs
+/// [`concretize_chosen_x_cost`] fixes after the announcement (remove X
+/// counters, exile X cards from a graveyard, pay X {E}, pay X life) are fixed
+/// at `x`. The object-counting X legs (sacrifice X permanents, discard or
+/// reveal X cards) are bounded by [`activation_x_legs_admit`] instead. Larger
+/// announcements only cost more.
+pub(super) fn activation_cost_at_announced_x(cost: &AbilityCost, x: u32) -> AbilityCost {
+    let announced_mana = |mana: &ManaCost| {
+        let mut mana = mana.clone();
+        mana.concretize_x(x);
+        mana
+    };
+    match cost {
+        AbilityCost::Mana { cost: mana } if cost_has_x(mana) => AbilityCost::Mana {
+            cost: announced_mana(mana),
+        },
+        AbilityCost::Waterbend { cost: mana } if cost_has_x(mana) => AbilityCost::Waterbend {
+            cost: announced_mana(mana),
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| activation_cost_at_announced_x(cost, x))
+                .collect(),
+        },
+        other => concretize_chosen_x_cost(other, x),
+    }
+}
+
+/// CR 107.3 + CR 601.2b + CR 118.3: whether every X-sized non-mana leg of an
+/// activation cost can be paid with X = `x`. This is the bound the X
+/// announcement itself applies (`additional_cost_x_max`): the permanents that
+/// can be sacrificed, the cards that can be discarded, revealed or exiled, the
+/// counters that can be removed, the life and energy that can be paid.
+pub(super) fn activation_x_legs_admit(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    cost: &AbilityCost,
+    x: u32,
+) -> bool {
+    additional_cost_x_max(state, player, source_id, granting_object, cost)
+        .is_none_or(|max| max >= x)
+}
+
 fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
     match cost {
         AbilityCost::RemoveCounter {
