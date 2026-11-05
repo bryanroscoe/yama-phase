@@ -22,7 +22,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use serde_json::Value;
 
-use super::text::{clamp_text, one_line, seat_label};
+use super::text::{clamp_text, mana_cost_text, one_line, seat_label};
 
 /// Payload fields whose numeric values name a player rather than an object.
 /// An explicit list, not a heuristic: guessing wrong here would print
@@ -194,7 +194,147 @@ fn describe_by_meaning(scope: Scope<'_>, action: &GameAction) -> Option<String> 
                 scope.object(object_id.0)
             ))
         }
+        // CR 601.2b: an optional additional cost is announced pay-or-not. The
+        // flag alone ("Pay: true") says neither which cost nor, for a cost
+        // that may be paid any number of times (squad, multikicker), that
+        // paying again is a further payment on top of those already made.
+        GameAction::DecideOptionalCost { pay } => describe_optional_cost_choice(scope, *pay),
         _ => None,
+    }
+}
+
+/// `Pay squad {3} again` / `Stop paying squad {3}` for the optional-cost
+/// prompt the state is waiting on.
+fn describe_optional_cost_choice(scope: Scope<'_>, pay: bool) -> Option<String> {
+    use engine::types::ability::{AbilityCost, AdditionalCost};
+    use engine::types::game_state::WaitingFor;
+
+    let WaitingFor::OptionalCostChoice {
+        cost,
+        times_kicked,
+        origin,
+        ..
+    } = &scope.state.waiting_for
+    else {
+        return None;
+    };
+    // CR 702.33c + CR 702.157a: only a cost that may be paid any number of
+    // times (multikicker, squad) is offered again after a payment. A
+    // once-only cost offered after another one was paid ("kicker {B}
+    // and/or {R}" after {B}) is a first offer of ITS cost.
+    let again = repeatable(cost) && *times_kicked > 0;
+    let keyword = cost_keyword(cost, *origin);
+    let offered = |costs: &[&AbilityCost]| optional_cost_label(scope, keyword, costs);
+    let paid_or_skipped = |costs: &[&AbilityCost]| match (pay, again) {
+        (true, true) => format!("Pay {} again", offered(costs)),
+        (true, false) => format!("Pay {}", offered(costs)),
+        (false, true) => format!("Stop paying {}", offered(costs)),
+        (false, false) => format!("Don't pay {}", offered(costs)),
+    };
+    let described = match (cost, pay) {
+        // "[cost A] or [cost B]": paying the first is `pay`, the second is not.
+        (AdditionalCost::Choice(first, _), true) => {
+            format!("Pay {}", ability_cost_text(scope, first))
+        }
+        (AdditionalCost::Choice(_, second), false) => {
+            format!("Pay {}", ability_cost_text(scope, second))
+        }
+        (AdditionalCost::Required(_), false) => return None,
+        (AdditionalCost::Required(required), true) => {
+            format!("Pay {}", offered(&[required]))
+        }
+        (AdditionalCost::Optional { cost, .. }, _) => paid_or_skipped(&[cost]),
+        (AdditionalCost::Kicker { costs, .. }, _) => {
+            paid_or_skipped(&costs.iter().collect::<Vec<_>>())
+        }
+    };
+    Some(described)
+}
+
+/// Whether an offered additional cost may be paid any number of times.
+fn repeatable(cost: &engine::types::ability::AdditionalCost) -> bool {
+    use engine::types::ability::{AdditionalCost, AdditionalCostRepeatability};
+
+    match cost {
+        AdditionalCost::Optional { repeatability, .. }
+        | AdditionalCost::Kicker { repeatability, .. } => {
+            matches!(repeatability, AdditionalCostRepeatability::Repeatable)
+        }
+        AdditionalCost::Choice(..) | AdditionalCost::Required(_) => false,
+    }
+}
+
+/// `squad {3}`: an additional cost under the keyword that offers it.
+fn optional_cost_label(
+    scope: Scope<'_>,
+    keyword: Option<&str>,
+    costs: &[&engine::types::ability::AbilityCost],
+) -> String {
+    let cost = costs
+        .iter()
+        .map(|cost| ability_cost_text(scope, cost))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    match keyword {
+        Some(keyword) => format!("{keyword} {cost}"),
+        None => cost,
+    }
+}
+
+/// The keyword an offered additional cost belongs to.
+///
+/// The `AdditionalCost` variant is itself an identity: CR 702.33a/c, a
+/// `Kicker` cost is a kicker (or, when repeatable, multikicker) cost
+/// whatever `origin` says. The engine stamps `origin` only from the cast's
+/// announcement queue and leaves it `Other` for a printed kicker offered
+/// from the kicker flow, so the variant is read first; `origin` names every
+/// other keyword.
+fn cost_keyword(
+    cost: &engine::types::ability::AdditionalCost,
+    origin: engine::types::ability::AdditionalCostOrigin,
+) -> Option<&'static str> {
+    use engine::types::ability::{
+        AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability,
+    };
+
+    if let AdditionalCost::Kicker { repeatability, .. } = cost {
+        return Some(match repeatability {
+            AdditionalCostRepeatability::Repeatable => "multikicker",
+            AdditionalCostRepeatability::Once => "kicker",
+        });
+    }
+    match origin {
+        AdditionalCostOrigin::Kicker => Some("kicker"),
+        AdditionalCostOrigin::Casualty => Some("casualty"),
+        AdditionalCostOrigin::Offspring => Some("offspring"),
+        AdditionalCostOrigin::Squad => Some("squad"),
+        AdditionalCostOrigin::Replicate => Some("replicate"),
+        AdditionalCostOrigin::Bargain => Some("bargain"),
+        AdditionalCostOrigin::Teamwork => Some("teamwork"),
+        AdditionalCostOrigin::Gift => Some("gift"),
+        AdditionalCostOrigin::Other => None,
+    }
+}
+
+/// A cost as printed where it has a printed form (`{3}`, `{T}`), otherwise
+/// described from its fields like any other engine value.
+fn ability_cost_text(scope: Scope<'_>, cost: &engine::types::ability::AbilityCost) -> String {
+    use engine::types::ability::AbilityCost;
+
+    match cost {
+        AbilityCost::Mana { cost } => {
+            let printed = mana_cost_text(cost);
+            if printed.is_empty() {
+                "its mana cost".to_string()
+            } else {
+                printed
+            }
+        }
+        AbilityCost::Tap => "{T}".to_string(),
+        AbilityCost::Untap => "{Q}".to_string(),
+        other => serde_json::to_value(other)
+            .map(|value| describe_tagged_in(scope, &value))
+            .unwrap_or_else(|_| "a cost".to_string()),
     }
 }
 
@@ -435,12 +575,63 @@ pub fn describe_waiting_for(waiting_for: &engine::types::game_state::WaitingFor)
 /// answer — the cast or activation in progress (`WaitingFor::pending_cast_ref`,
 /// or `GameState::pending_cast` while mana is being paid) and the triggering
 /// source and its text — so it is named here.
-pub fn describe_decision(state: &GameState) -> String {
+pub fn describe_decision(state: &GameState, viewer: PlayerId) -> String {
     let base = describe_waiting_for(&state.waiting_for);
-    match decision_subject(state) {
-        Some(subject) => one_line(&format!("{base} for {subject}")),
+    let described = match decision_subject(state) {
+        Some(subject) => format!("{base} for {subject}"),
         None => base,
+    };
+    match optional_cost_progress(state, viewer) {
+        Some(progress) => one_line(&format!("{described} — {progress}")),
+        None => one_line(&described),
     }
+}
+
+/// `offered: squad {3}, paid 2 times so far` for an optional-cost prompt.
+///
+/// CR 601.2b + CR 702.157a: a cost that may be paid any number of times is
+/// offered again after each payment, and the offer looks the same every
+/// time; without the count a seat cannot tell its first payment from its
+/// fifth.
+fn optional_cost_progress(state: &GameState, viewer: PlayerId) -> Option<String> {
+    use engine::types::ability::AdditionalCost;
+    use engine::types::game_state::WaitingFor;
+
+    let WaitingFor::OptionalCostChoice {
+        cost,
+        times_kicked,
+        origin,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let scope = Scope {
+        state,
+        viewer: Some(viewer),
+    };
+    let keyword = cost_keyword(cost, *origin);
+    let offered = match cost {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
+            optional_cost_label(scope, keyword, &[cost])
+        }
+        AdditionalCost::Kicker { costs, .. } => {
+            optional_cost_label(scope, keyword, &costs.iter().collect::<Vec<_>>())
+        }
+        AdditionalCost::Choice(first, second) => format!(
+            "{} or {}",
+            ability_cost_text(scope, first),
+            ability_cost_text(scope, second)
+        ),
+    };
+    if !repeatable(cost) {
+        return Some(format!("offered: {offered}"));
+    }
+    Some(match times_kicked {
+        0 => format!("offered: {offered}, not paid yet"),
+        1 => format!("offered: {offered}, paid 1 time so far"),
+        count => format!("offered: {offered}, paid {count} times so far"),
+    })
 }
 
 /// `Volatile Fault's activated ability: Destroy target ...` for the spell,
@@ -896,7 +1087,7 @@ mod tests {
 
         let mut state = empty_state();
         assert_eq!(
-            describe_decision(&state),
+            describe_decision(&state, PlayerId(0)),
             describe_waiting_for(&state.waiting_for)
         );
 
@@ -937,7 +1128,7 @@ mod tests {
             selection: Default::default(),
         };
         assert_eq!(
-            describe_decision(&state),
+            describe_decision(&state, PlayerId(0)),
             format!("Target Selection for Volatile Fault's activated ability: {text}")
         );
 
@@ -964,7 +1155,7 @@ mod tests {
             ),
         };
         assert_eq!(
-            describe_decision(&state),
+            describe_decision(&state, PlayerId(0)),
             "Trigger Target Selection for Aetherstorm Roc's triggered ability: Whenever this \
              creature attacks, tap up to one target creature defending player controls."
         );
@@ -1004,6 +1195,163 @@ mod tests {
         assert_eq!(
             decision_subject(&state).as_deref(),
             Some("a triggered ability: When this token dies, it deals 1 damage to any target.")
+        );
+    }
+
+    /// CR 601.2b + CR 702.157a: a repeatable optional cost says which cost,
+    /// how many times it has been paid, and what each answer does.
+    #[test]
+    fn an_optional_cost_prompt_names_the_cost_and_the_payments_so_far() {
+        use engine::game::create_object;
+        use engine::types::ability::{
+            AbilityCost, AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability, Effect,
+            ResolvedAbility,
+        };
+        use engine::types::game_state::{PendingCast, WaitingFor};
+        use engine::types::mana::ManaCost;
+        use engine::types::player::PlayerId;
+
+        let mut state = empty_state();
+        let squadron = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Securitron Squadron".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            squadron,
+            PlayerId(0),
+        );
+        let squad = AbilityCost::Mana {
+            cost: ManaCost::generic(3),
+        };
+        let prompt = |times_kicked| WaitingFor::OptionalCostChoice {
+            player: PlayerId(0),
+            cost: AdditionalCost::Optional {
+                cost: squad.clone(),
+                repeatability: AdditionalCostRepeatability::Repeatable,
+            },
+            times_kicked,
+            origin: AdditionalCostOrigin::Squad,
+            gift_kind: None,
+            pending_cast: Box::new(PendingCast::new(
+                squadron,
+                CardId(1),
+                ability.clone(),
+                ManaCost::generic(5),
+            )),
+        };
+        let pay = GameAction::DecideOptionalCost { pay: true };
+        let skip = GameAction::DecideOptionalCost { pay: false };
+
+        state.waiting_for = prompt(0);
+        assert_eq!(
+            describe_decision(&state, PlayerId(0)),
+            "Optional Cost Choice for Securitron Squadron — offered: squad {3}, not paid yet"
+        );
+        assert_eq!(
+            describe_action_for(&state, &pay, PlayerId(0)),
+            "Pay squad {3}"
+        );
+        assert_eq!(
+            describe_action_for(&state, &skip, PlayerId(0)),
+            "Don't pay squad {3}"
+        );
+
+        state.waiting_for = prompt(2);
+        assert_eq!(
+            describe_decision(&state, PlayerId(0)),
+            "Optional Cost Choice for Securitron Squadron — offered: squad {3}, paid 2 times so far"
+        );
+        assert_eq!(
+            describe_action_for(&state, &pay, PlayerId(0)),
+            "Pay squad {3} again"
+        );
+        assert_eq!(
+            describe_action_for(&state, &skip, PlayerId(0)),
+            "Stop paying squad {3}"
+        );
+    }
+
+    /// CR 702.33b: "kicker {B} and/or {R}" offers each cost once. After {B}
+    /// is paid, the offer of {R} is a first offer of a once-only cost, not a
+    /// repeat payment.
+    #[test]
+    fn a_once_only_kicker_after_another_kicker_reads_as_a_first_offer() {
+        use engine::game::create_object;
+        use engine::types::ability::{
+            AbilityCost, AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability, Effect,
+            ResolvedAbility,
+        };
+        use engine::types::game_state::{PendingCast, WaitingFor};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+        use engine::types::player::PlayerId;
+
+        let mut state = empty_state();
+        let archangel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Archangel of Wrath".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            archangel,
+            PlayerId(0),
+        );
+        let pip = |shard| AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![shard],
+                generic: 0,
+            },
+        };
+        let pay = GameAction::DecideOptionalCost { pay: true };
+        let skip = GameAction::DecideOptionalCost { pay: false };
+        for costs in [
+            vec![pip(ManaCostShard::Red)],
+            vec![pip(ManaCostShard::Black), pip(ManaCostShard::Red)],
+        ] {
+            state.waiting_for = WaitingFor::OptionalCostChoice {
+                player: PlayerId(0),
+                cost: AdditionalCost::Kicker {
+                    costs: costs.clone(),
+                    repeatability: AdditionalCostRepeatability::Once,
+                },
+                times_kicked: 1,
+                origin: AdditionalCostOrigin::Kicker,
+                gift_kind: None,
+                pending_cast: Box::new(PendingCast::new(
+                    archangel,
+                    CardId(1),
+                    ability.clone(),
+                    ManaCost::generic(4),
+                )),
+            };
+            let decision = describe_decision(&state, PlayerId(0));
+            let paid = describe_action_for(&state, &pay, PlayerId(0));
+            let declined = describe_action_for(&state, &skip, PlayerId(0));
+            for text in [&decision, &paid, &declined] {
+                assert!(!text.contains("again"), "{text}");
+                assert!(!text.contains("so far"), "{text}");
+                assert!(!text.contains("Stop paying"), "{text}");
+            }
+            assert!(paid.starts_with("Pay kicker {"), "{paid}");
+            assert!(declined.starts_with("Don't pay kicker {"), "{declined}");
+        }
+        assert_eq!(
+            describe_decision(&state, PlayerId(0)),
+            "Optional Cost Choice for Archangel of Wrath — offered: kicker {B} and {R}"
         );
     }
 
