@@ -23,7 +23,7 @@ use crate::prompt::{
     option_value, untrusted_block, DecisionFrame, LlmPrompt, RESPONSE_CONTRACT,
     UNTRUSTED_DATA_DECLARATION,
 };
-use crate::render::action::{describe_action_for, describe_waiting_for, primary_object_name};
+use crate::render::action::{describe_action_for, describe_waiting_for, primary_object_label};
 use crate::render::game::{render_board, GameRenderOptions};
 use crate::wire::{completion_from_response, LlmReply};
 
@@ -76,13 +76,19 @@ const MANA_GUIDANCE: &str = "MANA: every untapped mana source you control counts
 /// Labels carry card names and payload strings, so they are sanitized HERE
 /// rather than at the format site: doing it here is what keeps the fingerprint
 /// taken over exactly the text the model was shown.
+///
+/// Options are described from the seat's VIEWER-FILTERED state, as the board
+/// is: an option that names an object (a target, a card to choose) names it
+/// only as far as this seat may see it.
 fn option_lines(state: &GameState, contract: &AiDecisionContract) -> Vec<String> {
+    let viewer = contract.semantic_owner;
+    let visible = filter_state_for_viewer(state, viewer);
     contract
         .candidates
         .iter()
         .map(|candidate| {
-            let described = describe_action_for(state, &candidate.action, contract.semantic_owner);
-            let line = match primary_object_name(state, &candidate.action) {
+            let described = describe_action_for(&visible, &candidate.action, viewer);
+            let line = match primary_object_label(&visible, &candidate.action) {
                 Some(name) => format!("{name} — {described}"),
                 None => described,
             };
@@ -1378,7 +1384,10 @@ mod tests {
         let user = &request.prompt.user;
         assert!(user.contains("Sol Ring (Artifact): 2 mana, {C}"), "{user}");
         assert!(user.contains("up to 3 more mana available now"), "{user}");
-        assert!(user.contains("Three Drop — Cast Spell"), "{user}");
+        assert!(
+            user.contains(&format!("Three Drop (Object {}) — Cast Spell", spell.0)),
+            "{user}"
+        );
     }
 
     /// When a seat pays mana by hand, the engine offers each mana source's
@@ -1415,13 +1424,63 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("Sol Ring — Activate Mana Source")),
+                .any(|line| line.starts_with("Sol Ring (Object ")
+                    && line.contains(") — Activate Mana Source")),
             "{lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("Mountain — Activate Mana Source")),
+                .any(|line| line.starts_with("Mountain (Object ")
+                    && line.contains(") — Activate Mana Source")),
+            "{lines:?}"
+        );
+    }
+
+    /// An option that names an object names it only as far as the seat may
+    /// see it: a card in another player's hand stays hidden in the option
+    /// text exactly as it does on the board.
+    #[test]
+    fn options_never_name_a_card_the_seat_cannot_see() {
+        use engine::types::ability::TargetRef;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let secret = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        let lines = option_lines(
+            &state,
+            &contract(vec![
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(secret)),
+                },
+                GameAction::PassPriority,
+            ]),
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("Counterspell")),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains(&format!("(Object {})", secret.0)),
+            "{lines:?}"
+        );
+        // Reach guard: the card's owner is shown its own card.
+        let mut own = contract(vec![
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(secret)),
+            },
+            GameAction::PassPriority,
+        ]);
+        own.semantic_owner = PlayerId(0);
+        own.authorized_actor = PlayerId(0);
+        let lines = option_lines(&state, &own);
+        assert!(
+            lines.iter().any(|line| line.contains("Counterspell")),
             "{lines:?}"
         );
     }
