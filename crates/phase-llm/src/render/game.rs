@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
-use engine::game::combat::AttackTarget;
+use engine::game::combat::{self, AttackTarget};
 use engine::game::derived_views::{derive_views, StackEntryDisplay};
 use engine::game::mana_sources;
 use engine::game::players;
@@ -580,9 +580,13 @@ fn permanent_line(
         parts.push(format!("loyalty {loyalty}"));
     }
     parts.push(if object.tapped { "tapped" } else { "untapped" }.to_string());
-    if object.summoning_sick {
-        // CR 302.6: only matters for attacking and {T} abilities, but it is the
-        // single most common reason a plausible play is illegal.
+    // CR 302.6: summoning sickness restricts creatures only — a land or a
+    // Treasure that entered this turn can tap at once — and haste lifts it
+    // (CR 702.10). The engine's combat authority answers exactly that
+    // question; `summoning_sick` alone is set on every newly arrived
+    // permanent. It only matters for attacking and {T} abilities, but it is
+    // the single most common reason a plausible play is illegal.
+    if combat::has_summoning_sickness(object) {
         parts.push("summoning sick".to_string());
     }
     if object.face_down {
@@ -1029,6 +1033,55 @@ mod tests {
             "{board}"
         );
         assert!(!board.contains(". Filigree Racer (controlled"), "{board}");
+    }
+
+    /// CR 302.6: only a creature can be summoning sick. A land that entered
+    /// this turn is not; a creature that did is, unless it has haste.
+    #[test]
+    fn summoning_sickness_is_shown_only_on_creatures_it_restricts() {
+        use engine::types::card_type::CoreType;
+        use engine::types::keywords::Keyword;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut arrive = |name: &str, core: CoreType| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&id).expect("created");
+            object.card_types.core_types = vec![core];
+            object.summoning_sick = true;
+            id
+        };
+        arrive("Adarkar Wastes", CoreType::Land);
+        arrive("Treasure", CoreType::Artifact);
+        arrive("Grizzly Bears", CoreType::Creature);
+        let hasty = arrive("Goblin Guide", CoreType::Creature);
+        state
+            .objects
+            .get_mut(&hasty)
+            .expect("created")
+            .keywords
+            .push(Keyword::Haste);
+
+        let board = rendered(&state, PlayerId(0));
+        let line = |name: &str| {
+            board
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("no {name} in {board}"))
+                .to_string()
+        };
+        assert!(line("Grizzly Bears").contains("summoning sick"), "{board}");
+        assert!(
+            !line("Adarkar Wastes").contains("summoning sick"),
+            "{board}"
+        );
+        assert!(!line("Treasure").contains("summoning sick"), "{board}");
+        assert!(!line("Goblin Guide").contains("summoning sick"), "{board}");
     }
 
     #[test]
