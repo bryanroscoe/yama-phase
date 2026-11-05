@@ -369,3 +369,5 @@ mod x_minimum_offer_gate;
 mod energy_paid_or_lost_activation;
 
 mod exile_energy_cast_offer_gate;
+
+mod another_target_player_trigger;

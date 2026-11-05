@@ -5160,6 +5160,16 @@ pub(super) fn parse_choose_ast(
             // actor/target context for scoped filters, but do not turn its
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
+            //
+            // CR 115.1d + CR 603.3d: a triggered ability's bare "choose another
+            // target player", where the trigger's event names a player ("Whenever
+            // a player casts their first spell each turn, …" — The Lord of
+            // Pain), targets a player other than the one the event names: per the
+            // card's ruling, the caster can't be chosen. It targets a player,
+            // never an object (CR 115.2).
+            if let Some(ast) = try_parse_choose_another_target_player(rest_lower, ctx) {
+                return Some(ast);
+            }
             let diagnostic_count = ctx.diagnostics.len();
             let (target, _) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
@@ -19553,6 +19563,45 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
     let count = parse_count_expr(rest).map(|(q, _)| q)?;
 
     Some(Effect::Bolster { count })
+}
+
+/// CR 115.1d + CR 603.3d: "another target player" as the whole of a "choose"
+/// clause in a triggered ability whose event names a player. "Another" refers
+/// to that player, so the target is any other player
+/// (`AllExcept { TriggeringPlayer }`). Declines outside a trigger, when the
+/// trigger names no player, and for any longer description.
+fn try_parse_choose_another_target_player(
+    rest_lower: &str,
+    ctx: &ParseContext,
+) -> Option<ChooseImperativeAst> {
+    if !ctx.in_trigger || !trigger_subject_names_a_player(ctx.subject.as_ref()) {
+        return None;
+    }
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("another target player"),
+        opt(tag(".")),
+    ))
+    .parse(rest_lower.trim_end())
+    .ok()?;
+    Some(ChooseImperativeAst::TargetOnly {
+        target: TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            }),
+        },
+    })
+}
+
+/// CR 603.2: whether a trigger's subject is a player ("a player", "you",
+/// "an opponent"), so its event names the player "another" contrasts with.
+fn trigger_subject_names_a_player(subject: Option<&TargetFilter>) -> bool {
+    match subject {
+        Some(TargetFilter::Player | TargetFilter::Controller | TargetFilter::Opponent) => true,
+        Some(TargetFilter::Typed(typed)) => {
+            typed.type_filters.is_empty() && typed.controller.is_some()
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
