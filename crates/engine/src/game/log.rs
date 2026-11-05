@@ -1436,7 +1436,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             let new_speed = i32::from(new_speed.unwrap_or(0));
             vec![
                 player_seg(state, *player),
-                text(" speed changes from "),
+                text("'s speed changes from "),
                 num(old_speed),
                 text(" to "),
                 num(new_speed),
@@ -2971,6 +2971,29 @@ mod tests {
                 && for_text == " for "
                 && name == "Gollum, Scheming Guide"
         ));
+    }
+
+    /// CR 702.179b: speed is a value a player has; the line names it as theirs.
+    #[test]
+    fn a_speed_change_names_the_players_speed() {
+        let state = GameState::new_two_player(42);
+        let event = GameEvent::SpeedChanged {
+            player: PlayerId(0),
+            old_speed: Some(1),
+            new_speed: Some(2),
+        };
+        let entries = resolve_log_entries(&[event], &state, &state);
+        let line: String = entries[0]
+            .segments
+            .iter()
+            .map(|segment| match segment {
+                LogSegment::Text(text) => text.clone(),
+                LogSegment::PlayerName { name, .. } => name.clone(),
+                LogSegment::Number(value) => value.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(line, "Player 1's speed changes from 1 to 2");
     }
 
     #[test]
