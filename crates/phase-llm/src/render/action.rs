@@ -379,6 +379,18 @@ fn ability_cost_text(scope: Scope<'_>, cost: &engine::types::ability::AbilityCos
     }
 }
 
+/// [`ability_cost_text`] for a board line: a cost as printed where it has a
+/// printed form, otherwise described from its fields.
+pub(crate) fn cost_text(state: &GameState, cost: &engine::types::ability::AbilityCost) -> String {
+    ability_cost_text(
+        Scope {
+            state,
+            viewer: None,
+        },
+        cost,
+    )
+}
+
 /// Characters of ability text kept in one option.
 const ABILITY_TEXT_BUDGET: usize = 320;
 
