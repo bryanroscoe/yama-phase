@@ -174,7 +174,7 @@ pub fn build_game_decision_prompt(
         // The VIEWER-PROJECTED prompt, not the authoritative one. A raw
         // `WaitingFor` can name objects and choices this seat may not read —
         // the same reason the board above is rendered from the filtered state.
-        describe_decision(&visible),
+        describe_decision(&visible, viewer),
     );
     let data = format!(
         "{position}\n\n{}",
@@ -1305,6 +1305,78 @@ mod tests {
             lines.iter().any(|line| line.contains("Counterspell")),
             "{lines:?}"
         );
+    }
+
+    /// A printed multikicker reaches the seat through the engine's real kicker
+    /// flow (whose prompt carries no `origin`), and the prompt still names it.
+    #[test]
+    fn a_real_multikicker_prompt_names_the_keyword_and_the_payments() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Everflowing Chalice",
+            false,
+            "Multikicker {2} (You may pay an additional {2} any number of times as you cast \
+             this spell.)\nThis artifact enters with a charge counter on it for each time it \
+             was kicked.\n{T}: Add {C} for each charge counter on this artifact.",
+        );
+        builder.as_artifact();
+        builder.with_mana_cost(ManaCost::zero());
+        let chalice = builder.id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&chalice].card_id;
+        for _ in 0..4 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        }
+        runner
+            .act(GameAction::CastSpell {
+                object_id: chalice,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .expect("casting the multikicker artifact is accepted");
+        let prompt = |runner: &engine::game::scenario::GameRunner| {
+            let state = runner.state();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::OptionalCostChoice { .. }),
+                "{:?}",
+                state.waiting_for
+            );
+            let contract = AiDecisionContract::issue(state, PlayerId(0));
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[])
+                .expect("a pay-or-not decision is a decision")
+                .prompt
+                .user
+        };
+        let first = prompt(&runner);
+        assert!(
+            first.contains("offered: multikicker {2}, not paid yet"),
+            "{first}"
+        );
+        assert!(first.contains("Pay multikicker {2}"), "{first}");
+        assert!(first.contains("Don't pay multikicker {2}"), "{first}");
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("the first kick is accepted");
+        let second = prompt(&runner);
+        assert!(
+            second.contains("offered: multikicker {2}, paid 1 time so far"),
+            "{second}"
+        );
+        assert!(second.contains("Pay multikicker {2} again"), "{second}");
+        assert!(second.contains("Stop paying multikicker {2}"), "{second}");
     }
 
     #[test]
