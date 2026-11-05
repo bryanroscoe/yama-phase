@@ -881,9 +881,12 @@ const UNCHANGED: &[Row] = &[
     ("x/Rafi, Retro Racer", "Rafi, Retro Racer", "{R}, Sacrifice ~: Each player adds {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Satyr Hedonist", "Satyr Hedonist", "{R}, Sacrifice ~: Add {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Vessel of Volatility", "Vessel of Volatility", "{1}{R}, Sacrifice ~: Add {R}{R}{R}{R}.", &[("Mountain", B, 'p'), ("Wastes", B, 'p')], &[], "Barbarian Horde", true, "tt/BF"),
-    // CR 601.2h: Electric Revelation's "discard a card" can't be paid from an
-    // empty hand, so neither the legality predicate nor the offer admits it.
-    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", false, "ff/GY"),
+    // CR 702.34a + CR 118.9d: a flashback cast still pays Electric Revelation's
+    // required "discard a card". With a card in hand to discard, the Spade's
+    // mana pays the cast from the graveyard and flashback exiles the spell; the
+    // empty-hand board below can't be cast at all.
+    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f'), ("Wastes", H, 'f')], &[], "Electric Revelation", true, "tt/X"),
+    ("e/Archaeomancer's Spade, empty hand#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", false, "ff/GY"),
     ("e/Cloudpost", "Cloudpost", "{T}: Add {C} for each Locus on the battlefield.", &[("Glimmerpost", B, 'p'), ("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("e/Codsworth, Handy Helper", "Codsworth, Handy Helper", "{T}: Add {W}{W}. Spend this mana only to cast Aura and/or Equipment spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Suppression Bonds", false, "ff/H"),
     ("e/Elfhame Druid", "Elfhame Druid", "{T}: Add {G}{G}. Spend this mana only to cast kicked spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Axebane Beast", false, "ff/H"),

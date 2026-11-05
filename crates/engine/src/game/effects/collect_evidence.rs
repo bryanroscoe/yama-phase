@@ -37,7 +37,7 @@ pub(crate) fn evidence_candidates(
                 .copied()
                 .filter(|&id| {
                     Some(id) != spell_being_priced
-                        && !super::super::casting::is_spell_being_cast(state, id)
+                        && !super::super::casting::committed_to_cast_in_progress(state, id)
                 })
                 .collect()
         })
