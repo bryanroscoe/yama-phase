@@ -199,8 +199,49 @@ fn describe_by_meaning(scope: Scope<'_>, action: &GameAction) -> Option<String> 
         // that may be paid any number of times (squad, multikicker), that
         // paying again is a further payment on top of those already made.
         GameAction::DecideOptionalCost { pay } => describe_optional_cost_choice(scope, *pay),
+        GameAction::OrderTriggers { order } => describe_trigger_order(scope, order),
         _ => None,
     }
+}
+
+/// Characters kept of each trigger's text in a trigger-order option, so an
+/// ordering of many triggers stays one readable line.
+const TRIGGER_ORDER_TEXT_BUDGET: usize = 120;
+
+/// `Resolve in this order: Coalition Relic (At the beginning ...), then ...`.
+///
+/// CR 603.3b: `order` lists the triggers in the order they are put on the
+/// stack — index 0 first, so it resolves last (CR 405.5). The option says
+/// what the seat cares about, the order they will RESOLVE in, and which
+/// trigger each one is, from the summaries the `OrderTriggers` prompt
+/// carries.
+fn describe_trigger_order(scope: Scope<'_>, order: &[usize]) -> Option<String> {
+    use engine::types::game_state::WaitingFor;
+
+    let WaitingFor::OrderTriggers { triggers, .. } = &scope.state.waiting_for else {
+        return None;
+    };
+    let resolving: Vec<String> = order
+        .iter()
+        .rev()
+        .map(|index| {
+            let trigger = triggers.get(*index)?;
+            let text = one_line(&trigger.description);
+            let source = one_line(&trigger.source_name);
+            Some(if text.is_empty() {
+                source
+            } else {
+                format!(
+                    "{source} ({})",
+                    clamp_text(&text, TRIGGER_ORDER_TEXT_BUDGET)
+                )
+            })
+        })
+        .collect::<Option<_>>()?;
+    Some(format!(
+        "Resolve in this order: {}",
+        resolving.join(", then ")
+    ))
 }
 
 /// `Pay squad {3} again` / `Stop paying squad {3}` for the optional-cost
@@ -1353,6 +1394,48 @@ mod tests {
             describe_decision(&state, PlayerId(0)),
             "Optional Cost Choice for Archangel of Wrath — offered: kicker {B} and {R}"
         );
+    }
+
+    /// CR 603.3b: a trigger-order option lists the triggers it orders, in
+    /// the order they will resolve, not as bare indices.
+    #[test]
+    fn a_trigger_order_option_lists_the_triggers_in_resolution_order() {
+        use engine::types::game_state::{PendingTriggerSummary, WaitingFor};
+        use engine::types::player::PlayerId;
+
+        let mut state = empty_state();
+        let summary = |id, source: &str, text: &str| PendingTriggerSummary {
+            source_id: ObjectId(id),
+            source_name: source.to_string(),
+            description: text.to_string(),
+        };
+        state.waiting_for = WaitingFor::OrderTriggers {
+            player: PlayerId(0),
+            triggers: vec![
+                summary(
+                    1,
+                    "Coalition Relic",
+                    "At the beginning of your precombat main phase, remove all charge counters.",
+                ),
+                summary(
+                    2,
+                    "Satya, Aetherflux Genius",
+                    "Whenever Satya attacks, create a tapped and attacking token.",
+                ),
+                summary(3, "Scute Swarm", ""),
+            ],
+        };
+        let order = GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        };
+        let described = describe_action_for(&state, &order, PlayerId(0));
+        assert_eq!(
+            described,
+            "Resolve in this order: Scute Swarm, then Satya, Aetherflux Genius (Whenever \
+             Satya attacks, create a tapped and attacking token.), then Coalition Relic (At \
+             the beginning of your precombat main phase, remove all charge counters.)"
+        );
+        assert!(!described.contains("Order:"), "{described}");
     }
 
     #[test]
