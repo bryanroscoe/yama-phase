@@ -63,8 +63,10 @@ const OBJECT_FIELDS: &[&str] = &["targets", "attackers", "blockers", "cards", "p
 #[derive(Clone, Copy)]
 struct Scope<'a> {
     state: &'a GameState,
-    /// `Some` names that seat "You" and every other seat by its id, as the
-    /// board does ([`seat_label`]); `None` is a seat-neutral `Player N`.
+    /// `Some` is a prompt for that seat: it reads as "You", every other seat
+    /// by its id as the board names it ([`seat_label`]), and every object by
+    /// name AND number ([`object_label`]). `None` is a seat-neutral
+    /// description: `Player N`, and objects by name alone.
     viewer: Option<PlayerId>,
 }
 
@@ -74,6 +76,27 @@ impl Scope<'_> {
             (Some(viewer), Ok(seat)) => seat_label(PlayerId(seat), viewer),
             _ => format!("Player {id}"),
         }
+    }
+
+    fn object(&self, id: u64) -> String {
+        if self.viewer.is_some() {
+            return object_label(self.state, ObjectId(id));
+        }
+        object_name(self.state, ObjectId(id)).unwrap_or_else(|| format!("object #{id}"))
+    }
+}
+
+/// `Aethersphere Harvester (Object 192)`: an object as a prompt names it.
+///
+/// Two options on two permanents that share a name — three Aethersphere
+/// Harvesters, a token and the card it copies — must not read the same, and
+/// the name alone cannot tell them apart. The object number is the engine's
+/// identity for the object, so it is the one handle that both separates such
+/// options and ties each one to whatever else names that object.
+pub fn object_label(state: &GameState, id: ObjectId) -> String {
+    match object_name(state, id) {
+        Some(name) => format!("{name} (Object {})", id.0),
+        None => format!("Object {}", id.0),
     }
 }
 
@@ -206,6 +229,16 @@ pub fn primary_object_name(state: &GameState, action: &GameAction) -> Option<Str
     object_name(state, action.source_object()?)
 }
 
+/// [`primary_object_name`] with the object's number, as a prompt names it
+/// ([`object_label`]).
+pub fn primary_object_label(state: &GameState, action: &GameAction) -> Option<String> {
+    let id = action.source_object()?;
+    state
+        .objects
+        .contains_key(&id)
+        .then(|| object_label(state, id))
+}
+
 fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
     state.objects.get(&id).map(|object| one_line(&object.name))
 }
@@ -259,10 +292,7 @@ fn render_value(scope: Scope<'_>, field: &str, value: &Value) -> String {
         return map_scalars(value, |number| scope.player(number));
     }
     if names_objects(field) {
-        return map_scalars(value, |number| {
-            object_name(scope.state, ObjectId(number))
-                .unwrap_or_else(|| format!("object #{number}"))
-        });
+        return map_scalars(value, |number| scope.object(number));
     }
     match value {
         Value::String(text) => humanize_identifier(text),
@@ -280,6 +310,8 @@ fn render_value(scope: Scope<'_>, field: &str, value: &Value) -> String {
                 // `TargetRef::Player` / `AttackTarget::Player`: an externally
                 // tagged player reference names a seat like a player field.
                 ("Player", Some(number)) => scope.player(number),
+                // `TargetRef::Object`: likewise an object reference.
+                ("Object", Some(number)) if scope.viewer.is_some() => scope.object(number),
                 _ => format!(
                     "{} {}",
                     humanize_identifier(key),
@@ -540,6 +572,65 @@ mod tests {
         assert_eq!(
             describe_action(&state, &opponent),
             "Choose Entry Controller (Opponent: Player 3)"
+        );
+    }
+
+    /// Options on different objects that share a name read differently, by
+    /// object number, wherever they name the object.
+    #[test]
+    fn same_named_objects_are_told_apart_by_number() {
+        use engine::game::create_object;
+        use engine::types::ability::TargetRef;
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+
+        let mut state = empty_state();
+        let harvesters: Vec<ObjectId> = (0..2)
+            .map(|index| {
+                create_object(
+                    &mut state,
+                    CardId(index),
+                    PlayerId(0),
+                    "Aethersphere Harvester".to_string(),
+                    Zone::Battlefield,
+                )
+            })
+            .collect();
+        let crew = |vehicle_id| GameAction::CrewVehicle {
+            vehicle_id,
+            creature_ids: Vec::new(),
+        };
+        let first = describe_action_for(&state, &crew(harvesters[0]), PlayerId(0));
+        let second = describe_action_for(&state, &crew(harvesters[1]), PlayerId(0));
+        assert_ne!(first, second);
+        assert!(
+            first.contains(&format!(
+                "Aethersphere Harvester (Object {})",
+                harvesters[0].0
+            )),
+            "{first}"
+        );
+        assert_eq!(
+            primary_object_label(&state, &crew(harvesters[1])),
+            Some(format!(
+                "Aethersphere Harvester (Object {})",
+                harvesters[1].0
+            ))
+        );
+        let target = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(harvesters[1])),
+        };
+        assert_eq!(
+            describe_action_for(&state, &target, PlayerId(0)),
+            format!(
+                "Choose Target (Target: Aethersphere Harvester (Object {}))",
+                harvesters[1].0
+            )
+        );
+        // The seat-neutral form is unchanged.
+        assert_eq!(
+            describe_action(&state, &crew(harvesters[0])),
+            "Crew Vehicle (Vehicle ID: Aethersphere Harvester)"
         );
     }
 
