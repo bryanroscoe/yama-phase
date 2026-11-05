@@ -11,9 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
+use engine::game::derived_views::{derive_views, StackEntryDisplay};
 use engine::game::mana_sources;
 use engine::game::players;
-use engine::types::game_state::GameState;
+use engine::types::ability::StackAbilityKind;
+use engine::types::game_state::{GameState, StackEntry, StackObjectClass};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaType;
@@ -149,18 +151,84 @@ fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
         return;
     }
     out.push_str("\n--- STACK (top resolves first) ---\n");
+    // The engine's display projection of each stack entry: what kind of
+    // object it is, its source, its ability text and its live controller.
+    let views = derive_views(state, Some(viewer));
     // CR 405.1: the stack is last-in, first-out; render it that way rather than
     // in storage order, so "top" in the prompt means what it means in the rules.
     for (index, entry) in state.stack.iter().rev().enumerate() {
-        let name = object_name(state, entry.id)
-            .or_else(|| object_name(state, entry.source_id))
-            .unwrap_or_else(|| "unknown".to_string());
         out.push_str(&format!(
-            "{}. {} (controlled by {})\n",
+            "{}. {}\n",
             index + 1,
-            name,
-            seat_label(entry.controller, viewer)
+            stack_entry_line(
+                state,
+                entry,
+                views.stack_entry_details.get(&entry.id),
+                viewer
+            )
         ));
+    }
+}
+
+/// Characters of ability text kept for one stack entry.
+const STACK_TEXT_BUDGET: usize = 320;
+
+/// One stack entry. A spell reads as its name. An ability says it is one and
+/// whose it is — CR 113.3b/c, an activated or triggered ability is not the
+/// permanent it came from, which is usually still on the battlefield — and
+/// quotes the ability's text, so a seat can tell an enters trigger or a ward
+/// trigger from the spell or permanent it shares a name with.
+fn stack_entry_line(
+    state: &GameState,
+    entry: &StackEntry,
+    detail: Option<&StackEntryDisplay>,
+    viewer: PlayerId,
+) -> String {
+    let controller = seat_label(
+        detail.map_or(entry.controller, |detail| detail.controller),
+        viewer,
+    );
+    let source = || {
+        detail
+            .map(|detail| one_line(&detail.source_name))
+            .filter(|name| !name.is_empty())
+            .or_else(|| object_name(state, entry.source_id))
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let kind = match entry.kind.class() {
+        StackObjectClass::Spell => {
+            let name = object_name(state, entry.id)
+                .or_else(|| object_name(state, entry.source_id))
+                .unwrap_or_else(|| "unknown".to_string());
+            return format!("{name} (controlled by {controller})");
+        }
+        StackObjectClass::Ability(StackAbilityKind::Activated) => "Activated ability",
+        StackObjectClass::Ability(StackAbilityKind::Triggered) => "Triggered ability",
+        StackObjectClass::CombatDamage => {
+            let label = detail.map_or_else(
+                || "Combat damage".to_string(),
+                |detail| one_line(&detail.kind_label),
+            );
+            return format!("{label} (controlled by {controller})");
+        }
+    };
+    // Keyword actions (Equip, Crew, ...) carry no ability text; their keyword
+    // is what the ability is.
+    let text = detail.and_then(|detail| {
+        detail.ability_description.clone().or_else(|| {
+            detail
+                .ability_kind
+                .is_none()
+                .then(|| detail.kind_label.clone())
+        })
+    });
+    let head = format!("{kind} of {} (controlled by {controller})", source());
+    match text
+        .map(|text| one_line(&text))
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) => format!("{head}: {}", clamp_text(&text, STACK_TEXT_BUDGET)),
+        None => head,
     }
 }
 
@@ -868,6 +936,99 @@ mod tests {
             board.contains("Swords to Plowshares (owned by Player 1)"),
             "{board}"
         );
+    }
+
+    /// CR 113.3b/c: an ability on the stack reads as an ability of its
+    /// source, with its text, and never as the bare name of the permanent it
+    /// came from (which is still on the battlefield). A spell reads as before.
+    #[test]
+    fn stack_abilities_say_what_they_are_and_quote_their_text() {
+        use engine::types::ability::{Effect, ResolvedAbility};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let racer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Filigree Racer".to_string(),
+            Zone::Battlefield,
+        );
+        let bolt = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        let inert = |source| {
+            Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(1),
+            ))
+        };
+        state.stack.push_back(StackEntry {
+            id: bolt,
+            source_id: bolt,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(9000),
+            source_id: racer,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: racer,
+                ability: inert(racer),
+                condition: None,
+                trigger_event: None,
+                description: Some("When this Vehicle enters, you get {E}{E}{E}{E}.".to_string()),
+                source_name: "Filigree Racer".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let mut activated = inert(racer);
+        activated.description = Some("{2}: This Vehicle gets +1/+0.".to_string());
+        state.stack.push_back(StackEntry {
+            id: ObjectId(9001),
+            source_id: racer,
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: racer,
+                ability: activated,
+            },
+        });
+
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains(
+                "1. Activated ability of Filigree Racer (controlled by You): {2}: This Vehicle gets +1/+0.\n"
+            ),
+            "{board}"
+        );
+        assert!(
+            board.contains(
+                "2. Triggered ability of Filigree Racer (controlled by You): When this Vehicle enters, you get {E}{E}{E}{E}.\n"
+            ),
+            "{board}"
+        );
+        assert!(
+            board.contains("3. Lightning Bolt (controlled by Player 0)\n"),
+            "{board}"
+        );
+        assert!(!board.contains(". Filigree Racer (controlled"), "{board}");
     }
 
     #[test]
