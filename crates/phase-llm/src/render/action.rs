@@ -13,16 +13,22 @@ use std::collections::BTreeMap;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
+use engine::types::player::PlayerId;
 use serde_json::Value;
 
-use super::text::one_line;
+use super::text::{one_line, seat_label};
 
 /// Payload fields whose numeric values name a player rather than an object.
 /// An explicit list, not a heuristic: guessing wrong here would print
 /// "Player 7" for an object id.
+///
+/// Kept complete against the engine's own types: a test reads every
+/// `PlayerId`-typed field of `GameAction` and `WaitingFor` from the engine
+/// source and fails when one is missing here.
 const PLAYER_FIELDS: &[&str] = &[
     "player",
     "players",
+    "player_id",
     "controller",
     "owner",
     "opponent",
@@ -32,21 +38,78 @@ const PLAYER_FIELDS: &[&str] = &[
     "defender",
     "attacking_player",
     "target_player",
+    // CR 310.8a: the player chosen to protect a battle.
+    "protector",
+    "caster",
+    "defending_player",
+    "enters_under_player",
+    "library_owner",
+    "persist_player",
+    "predicted_winner",
+    "proposer",
+    "pw_controller",
+    "remaining_players",
+    "scoped_players",
+    "source_controller",
+    "trigger_controller",
+    "winner",
 ];
 
 /// Fields carrying object ids that do not follow the `_id` suffix convention.
 const OBJECT_FIELDS: &[&str] = &["targets", "attackers", "blockers", "cards", "permanents"];
 
+/// What a description is rendered against: the state object ids resolve in,
+/// and the seat it is written for.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    state: &'a GameState,
+    /// `Some` names that seat "You" and every other seat by its id, as the
+    /// board does ([`seat_label`]); `None` is a seat-neutral `Player N`.
+    viewer: Option<PlayerId>,
+}
+
+impl Scope<'_> {
+    fn player(&self, id: u64) -> String {
+        match (self.viewer, u8::try_from(id)) {
+            (Some(viewer), Ok(seat)) => seat_label(PlayerId(seat), viewer),
+            _ => format!("Player {id}"),
+        }
+    }
+}
+
 /// A one-line description of what `action` does, with object ids resolved to
-/// card names against the live state.
+/// card names against the live state. Seat-neutral: every player is
+/// `Player N`. A prompt uses [`describe_action_for`].
 pub fn describe_action(state: &GameState, action: &GameAction) -> String {
+    describe_action_in(
+        Scope {
+            state,
+            viewer: None,
+        },
+        action,
+    )
+}
+
+/// [`describe_action`] as `viewer` reads it: that seat is "You" and every
+/// other seat is named as the board names it.
+pub fn describe_action_for(state: &GameState, action: &GameAction, viewer: PlayerId) -> String {
+    describe_action_in(
+        Scope {
+            state,
+            viewer: Some(viewer),
+        },
+        action,
+    )
+}
+
+fn describe_action_in(scope: Scope<'_>, action: &GameAction) -> String {
     let verb = humanize_identifier(<&'static str>::from(action));
     let Ok(value) = serde_json::to_value(action) else {
         return verb;
     };
     // A unit variant (`PassPriority`) has no payload; the verb is the whole
     // description.
-    describe_payload(state, verb, value.get("data"))
+    describe_payload(scope, verb, value.get("data"))
 }
 
 /// A one-line description of any engine enum value, read from its serialized
@@ -54,33 +117,54 @@ pub fn describe_action(state: &GameState, action: &GameAction) -> String {
 /// (`{"type": "AtNextPhase", "phase": "End"}`), or an adjacently tagged one
 /// (`{"type": .., "data": {..}}`). The same structural walk
 /// [`describe_action`] uses, so a new variant of any such enum is described the
-/// day it is added.
+/// day it is added. Seat-neutral, like [`describe_action`].
 pub fn describe_tagged(state: &GameState, value: &Value) -> String {
+    describe_tagged_in(
+        Scope {
+            state,
+            viewer: None,
+        },
+        value,
+    )
+}
+
+/// [`describe_tagged`] as `viewer` reads it.
+pub fn describe_tagged_for(state: &GameState, value: &Value, viewer: PlayerId) -> String {
+    describe_tagged_in(
+        Scope {
+            state,
+            viewer: Some(viewer),
+        },
+        value,
+    )
+}
+
+fn describe_tagged_in(scope: Scope<'_>, value: &Value) -> String {
     match value {
         Value::String(variant) => humanize_identifier(variant),
         Value::Object(fields) => {
             let Some(kind) = fields.get("type").and_then(Value::as_str) else {
-                return render_value(state, "", value);
+                return render_value(scope, "", value);
             };
             let verb = humanize_identifier(kind);
             match fields.get("data") {
-                Some(data) => describe_payload(state, verb, Some(data)),
+                Some(data) => describe_payload(scope, verb, Some(data)),
                 None => {
                     let rest: serde_json::Map<String, Value> = fields
                         .iter()
                         .filter(|(field, _)| field.as_str() != "type")
                         .map(|(field, item)| (field.clone(), item.clone()))
                         .collect();
-                    describe_payload(state, verb, Some(&Value::Object(rest)))
+                    describe_payload(scope, verb, Some(&Value::Object(rest)))
                 }
             }
         }
-        other => render_value(state, "", other),
+        other => render_value(scope, "", other),
     }
 }
 
 /// `verb` followed by the payload's non-empty fields: `Verb (Field: value, ..)`.
-fn describe_payload(state: &GameState, verb: String, data: Option<&Value>) -> String {
+fn describe_payload(scope: Scope<'_>, verb: String, data: Option<&Value>) -> String {
     let Some(data) = data.and_then(Value::as_object) else {
         return verb;
     };
@@ -96,7 +180,7 @@ fn describe_payload(state: &GameState, verb: String, data: Option<&Value>) -> St
             format!(
                 "{}: {}",
                 humanize_identifier(field),
-                render_value(state, field, value)
+                render_value(scope, field, value)
             )
         })
         .collect();
@@ -169,14 +253,15 @@ fn is_empty_value(value: &Value) -> bool {
 }
 
 /// Render one payload field. Object-id fields become card names; player fields
-/// become `Player N`; everything else falls through to a compact JSON-ish form.
-fn render_value(state: &GameState, field: &str, value: &Value) -> String {
+/// become seat labels; everything else falls through to a compact JSON-ish form.
+fn render_value(scope: Scope<'_>, field: &str, value: &Value) -> String {
     if names_players(field) {
-        return map_scalars(value, |number| format!("Player {number}"));
+        return map_scalars(value, |number| scope.player(number));
     }
     if names_objects(field) {
         return map_scalars(value, |number| {
-            object_name(state, ObjectId(number)).unwrap_or_else(|| format!("object #{number}"))
+            object_name(scope.state, ObjectId(number))
+                .unwrap_or_else(|| format!("object #{number}"))
         });
     }
     match value {
@@ -186,17 +271,20 @@ fn render_value(state: &GameState, field: &str, value: &Value) -> String {
         Value::Null => "none".to_string(),
         Value::Array(items) => items
             .iter()
-            .map(|item| render_value(state, field, item))
+            .map(|item| render_value(scope, field, item))
             .collect::<Vec<_>>()
             .join(", "),
         Value::Object(fields) => fields
             .iter()
-            .map(|(key, item)| {
-                format!(
+            .map(|(key, item)| match (key.as_str(), item.as_u64()) {
+                // `TargetRef::Player` / `AttackTarget::Player`: an externally
+                // tagged player reference names a seat like a player field.
+                ("Player", Some(number)) => scope.player(number),
+                _ => format!(
                     "{} {}",
                     humanize_identifier(key),
-                    render_value(state, key, item)
-                )
+                    render_value(scope, key, item)
+                ),
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -332,6 +420,85 @@ mod tests {
         );
     }
 
+    /// Every `PlayerId`-typed field of the engine's `GameAction` and
+    /// `WaitingFor`, read from the engine's own source, renders as a seat.
+    /// `WaitingFor` reuses three names for players in one variant and for
+    /// objects in another (`candidates`, `chosen`, `remaining`); those are
+    /// left to the generic walk, which a player field must not shadow.
+    #[test]
+    fn every_player_typed_field_renders_as_a_seat() {
+        const AMBIGUOUS: &[&str] = &["candidates", "chosen", "remaining"];
+        let enum_body = |source: &'static str, header: &str| -> &'static str {
+            let start = source.find(header).expect("enum header") + header.len();
+            let mut depth = 1usize;
+            for (offset, c) in source[start..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &source[start..start + offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unterminated {header}")
+        };
+        let player_fields = |body: &str| -> Vec<String> {
+            body.lines()
+                .filter_map(|line| {
+                    let line = line.trim().trim_start_matches("pub ");
+                    let (name, ty) = line.split_once(':')?;
+                    let name = name.trim();
+                    let ty = ty.trim().trim_end_matches(',');
+                    let wrapped = ty
+                        .trim_start_matches("Option<")
+                        .trim_start_matches("Vec<")
+                        .trim_start_matches("Box<")
+                        .trim_start_matches("crate::types::player::");
+                    (name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                        && wrapped.starts_with("PlayerId")
+                        && !wrapped["PlayerId".len()..].starts_with(|c: char| c.is_alphanumeric()))
+                    .then(|| name.to_string())
+                })
+                .collect()
+        };
+        let actions = include_str!("../../../engine/src/types/actions.rs");
+        let states = include_str!("../../../engine/src/types/game_state.rs");
+        let mut fields = player_fields(enum_body(actions, "pub enum GameAction {"));
+        fields.extend(player_fields(enum_body(states, "pub enum WaitingFor {")));
+        assert!(fields.contains(&"protector".to_string()), "{fields:?}");
+        for field in fields {
+            if AMBIGUOUS.contains(&field.as_str()) {
+                continue;
+            }
+            assert!(
+                names_players(&field),
+                "PlayerId field `{field}` renders as a number"
+            );
+        }
+        for field in AMBIGUOUS {
+            assert!(
+                !names_players(field),
+                "{field} must stay with the generic walk"
+            );
+        }
+
+        let protector = GameAction::ChooseBattleProtector {
+            protector: engine::types::player::PlayerId(2),
+        };
+        let state = empty_state();
+        assert_eq!(
+            describe_action_for(&state, &protector, engine::types::player::PlayerId(2)),
+            "Choose Battle Protector (Protector: You)"
+        );
+        assert_eq!(
+            describe_action_for(&state, &protector, engine::types::player::PlayerId(0)),
+            "Choose Battle Protector (Protector: Player 2)"
+        );
+    }
+
     #[test]
     fn identifier_humanization_keeps_the_id_convention() {
         assert_eq!(humanize_identifier("source_id"), "Source ID");
@@ -339,6 +506,40 @@ mod tests {
         assert_eq!(
             humanize_identifier("card_instance_ids"),
             "Card Instance IDs"
+        );
+    }
+
+    /// A prompt's options name seats as its board does: the viewer is "You"
+    /// and every other seat its 0-based id, in a player field and in a
+    /// player target alike.
+    #[test]
+    fn options_name_seats_as_the_viewer_reads_them() {
+        use engine::types::ability::TargetRef;
+        use engine::types::player::PlayerId;
+
+        let state = empty_state();
+        let target = |player: u8| GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(PlayerId(player))),
+        };
+        assert_eq!(
+            describe_action_for(&state, &target(1), PlayerId(1)),
+            "Choose Target (Target: You)"
+        );
+        assert_eq!(
+            describe_action_for(&state, &target(2), PlayerId(1)),
+            "Choose Target (Target: Player 2)"
+        );
+        let opponent = GameAction::ChooseEntryController {
+            opponent: PlayerId(3),
+        };
+        assert_eq!(
+            describe_action_for(&state, &opponent, PlayerId(3)),
+            "Choose Entry Controller (Opponent: You)"
+        );
+        // The seat-neutral form keeps numbering every seat.
+        assert_eq!(
+            describe_action(&state, &opponent),
+            "Choose Entry Controller (Opponent: Player 3)"
         );
     }
 
