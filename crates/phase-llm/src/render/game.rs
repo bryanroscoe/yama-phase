@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
 use engine::game::combat::{self, AttackTarget};
-use engine::game::derived_views::{derive_views, StackEntryDisplay};
+use engine::game::commander;
+use engine::game::derived_views::{derive_views, DerivedViews, StackEntryDisplay};
 use engine::game::mana_sources;
 use engine::game::players;
 use engine::types::ability::StackAbilityKind;
@@ -68,13 +69,17 @@ pub fn render_board(
     history: &[GameLogEntry],
     options: &GameRenderOptions,
 ) -> String {
+    // The engine's display projections of this seat's view: stack entry
+    // details and which permanents are copies.
+    let views = derive_views(state, Some(viewer));
     let mut out = String::new();
     push_header(&mut out, state, viewer);
     push_players(&mut out, state, viewer);
-    push_stack(&mut out, state, viewer);
+    push_stack(&mut out, state, &views, viewer);
     push_delayed_triggers(&mut out, state, viewer);
     push_combat(&mut out, state, viewer);
-    push_battlefield(&mut out, state, viewer, db, options);
+    push_battlefield(&mut out, state, &views, viewer, db, options);
+    push_command_zone(&mut out, state, viewer);
     push_hand(&mut out, state, viewer, db, options);
     push_available_mana(&mut out, state, viewer);
     push_known_other_hands(&mut out, state, viewer);
@@ -145,15 +150,15 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
     }
 }
 
-fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
+fn push_stack(out: &mut String, state: &GameState, views: &DerivedViews, viewer: PlayerId) {
     if state.stack.is_empty() {
         out.push_str("\n--- STACK ---\n(empty)\n");
         return;
     }
     out.push_str("\n--- STACK (top resolves first) ---\n");
-    // The engine's display projection of each stack entry: what kind of
-    // object it is, its source, its ability text and its live controller.
-    let views = derive_views(state, Some(viewer));
+    // `stack_entry_details` is the engine's display projection of each stack
+    // entry: what kind of object it is, its source, its ability text and its
+    // live controller.
     // CR 405.1: the stack is last-in, first-out; render it that way rather than
     // in storage order, so "top" in the prompt means what it means in the rules.
     for (index, entry) in state.stack.iter().rev().enumerate() {
@@ -295,6 +300,7 @@ fn push_combat(out: &mut String, state: &GameState, viewer: PlayerId) {
 fn push_battlefield(
     out: &mut String,
     state: &GameState,
+    views: &DerivedViews,
     viewer: PlayerId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
@@ -319,7 +325,7 @@ fn push_battlefield(
         out.push_str(&format!("{}:\n", seat_label(PlayerId(controller), viewer)));
         let lines = ids
             .into_iter()
-            .map(|id| permanent_line(state, id, db, options));
+            .map(|id| permanent_line(state, views, id, db, options));
         for line in grouped_lines(lines) {
             out.push_str(&format!("  - {line}\n"));
         }
@@ -560,6 +566,7 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
 /// A battlefield permanent: identity plus the state that changes how it plays.
 fn permanent_line(
     state: &GameState,
+    views: &DerivedViews,
     id: ObjectId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
@@ -567,7 +574,28 @@ fn permanent_line(
     let Some(object) = state.objects.get(&id) else {
         return format!("object #{}", id.0);
     };
-    let mut parts = vec![one_line(&object.name)];
+    // CR 707.2: a copy takes the copied object's name and text, so on its
+    // own it reads exactly like what it copies. The engine's copy
+    // classification (`copied_permanents`, which already leaves face-down
+    // permanents out) marks it, with the permanent's own name when that
+    // differs: "Aurora Shifter, copying Construct".
+    let is_copy = views.copied_permanents.binary_search(&id).is_ok();
+    let own_name = one_line(&object.base_name);
+    let mut parts = vec![
+        if is_copy && !own_name.is_empty() && own_name != one_line(&object.name) {
+            format!("{own_name}, copying {}", one_line(&object.name))
+        } else {
+            one_line(&object.name)
+        },
+    ];
+    // CR 111.1: a token is not a card, which "nontoken" and "token" effects
+    // and the rules for leaving the battlefield (CR 111.7) turn on.
+    if object.is_token {
+        parts.push("token".to_string());
+    }
+    if is_copy {
+        parts.push("copy".to_string());
+    }
 
     let type_line = type_line_text(&object.card_types);
     if !type_line.is_empty() {
@@ -624,6 +652,50 @@ fn permanent_line(
         line.push_str(&format!(" | \"{text}\""));
     }
     line
+}
+
+/// Each player's command zone: commanders waiting to be cast, with their
+/// commander tax, and emblems.
+///
+/// CR 408.1 + CR 903.6: a commander starts the game in the command zone and
+/// may return there; CR 903.8 adds {2} to its cost for each previous cast
+/// from there. Without this section a seat cannot see that its commander is
+/// castable, nor tell a token copy of it on the battlefield from the card.
+fn push_command_zone(out: &mut String, state: &GameState, viewer: PlayerId) {
+    let mut by_owner: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+    for id in state.command_zone.iter() {
+        let Some(object) = state.objects.get(id) else {
+            continue;
+        };
+        if !players::is_alive(state, object.owner) {
+            continue;
+        }
+        let name = one_line(&object.name);
+        let line = if object.is_commander {
+            let tax = commander::commander_tax(state, *id);
+            if tax == 0 {
+                format!("{name} (commander)")
+            } else {
+                format!("{name} (commander, tax {{{tax}}})")
+            }
+        } else if object.is_emblem {
+            format!("{name} (emblem)")
+        } else {
+            name
+        };
+        by_owner.entry(object.owner.0).or_default().push(line);
+    }
+    if by_owner.is_empty() {
+        return;
+    }
+    out.push_str("\n--- COMMAND ZONE ---\n");
+    for (owner, lines) in by_owner {
+        out.push_str(&format!(
+            "{}: {}\n",
+            seat_label(PlayerId(owner), viewer),
+            lines.join(", ")
+        ));
+    }
 }
 
 /// A card in hand: what it is and what it costs, which is the pair that decides
@@ -1082,6 +1154,107 @@ mod tests {
         );
         assert!(!line("Treasure").contains("summoning sick"), "{board}");
         assert!(!line("Goblin Guide").contains("summoning sick"), "{board}");
+    }
+
+    /// CR 111.1: a token reads as a token, so it is never confused with a
+    /// same-named card.
+    #[test]
+    fn a_token_is_marked_as_a_token() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        for is_token in [true, false] {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Aetherstorm Roc".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).expect("created").is_token = is_token;
+        }
+        let board = rendered(&state, PlayerId(1));
+        assert!(board.contains("  - Aetherstorm Roc | token | "), "{board}");
+        assert!(board.contains("  - Aetherstorm Roc | untapped"), "{board}");
+    }
+
+    /// CR 707.2: a nontoken permanent copying a token reads as a copy, under
+    /// its own name, and differently from the token it copies.
+    #[test]
+    fn a_copy_reads_as_a_copy_of_what_it_copies() {
+        use engine::game::printed_cards::intrinsic_copiable_values;
+        use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let construct = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Construct".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&construct).expect("created").is_token = true;
+        let shifter = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aurora Shifter".to_string(),
+            Zone::Battlefield,
+        );
+        let values = intrinsic_copiable_values(state.objects.get(&construct).expect("created"));
+        state.add_transient_continuous_effect(
+            shifter,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: shifter },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display: Default::default(),
+            }],
+            None,
+        );
+        // The layer engine's result: the copy wears the copied name.
+        state.objects.get_mut(&shifter).expect("created").name = "Construct".to_string();
+
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains("  - Aurora Shifter, copying Construct | copy | "),
+            "{board}"
+        );
+        assert!(board.contains("  - Construct | token | "), "{board}");
+    }
+
+    /// CR 408.1 + CR 903.8: a commander in the command zone is listed there,
+    /// with its tax once it has been cast from there.
+    #[test]
+    fn commanders_in_the_command_zone_are_listed_with_their_tax() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let satya = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Satya, Aetherflux Genius".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&satya).expect("created").is_commander = true;
+        if !state.command_zone.contains(&satya) {
+            state.command_zone.push_back(satya);
+        }
+        let board = rendered(&state, PlayerId(1));
+        assert!(board.contains("--- COMMAND ZONE ---"), "{board}");
+        assert!(
+            board.contains("Player 0: Satya, Aetherflux Genius (commander)\n"),
+            "{board}"
+        );
+        state.commander_cast_count.insert(satya, 1);
+        let own = rendered(&state, PlayerId(0));
+        assert!(
+            own.contains("You: Satya, Aetherflux Genius (commander, tax {2})\n"),
+            "{own}"
+        );
+        // No command zone, no section.
+        assert!(
+            !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(0))
+                .contains("COMMAND ZONE")
+        );
     }
 
     #[test]
