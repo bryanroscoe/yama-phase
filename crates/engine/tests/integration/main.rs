@@ -2194,6 +2194,7 @@ mod windgraces_judgment_one_per_opponent;
 mod zaffai_thunder_conductor_magecraft;
 
 mod energy_paid_or_lost_activation;
+mod exile_energy_cast_offer_gate;
 mod priority_after_active_departure;
 mod repeatable_optional_cost_affordability;
 mod required_object_additional_cost_offer_gate;

@@ -7978,6 +7978,35 @@ pub(super) fn push_activated_ability_to_stack(
     )
 }
 
+/// CR 107.14 + CR 118.9: The {E} a cast from exile under an
+/// `ExileWithEnergyCost` permission costs ("cast that card by paying an amount
+/// of {E} equal to its mana value rather than paying its mana cost"), or `None`
+/// when the card isn't cast that way. The single authority for the cost
+/// determination, the payment and the castability check, so a cast is offered
+/// only when its energy can be paid and is charged exactly what it was priced.
+///
+/// CR 118.9a: the energy permission is never the elected route, so a cast
+/// whose method brings its own independent alternative cost (`casting_variant`
+/// is such a rider) owes that cost instead, not the energy.
+pub(super) fn exile_energy_cast_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<u32> {
+    let obj = state.objects.get(&object_id)?;
+    (obj.zone == Zone::Exile
+        && !casting_variant.is_independent_alternative_cost_rider()
+        && obj.casting_permissions.iter().any(|p| {
+            matches!(
+                p,
+                crate::types::ability::CastingPermission::ExileWithEnergyCost
+            )
+        }))
+    // CR 202.3d + CR 709.4b: the card is in exile (off the stack), so a
+    // split card's energy cost is its combined mana value.
+    .then(|| obj.effective_mana_value())
+}
+
 /// CR 107.3 + CR 601.2b + CR 601.2f: the activation cost an announcement of
 /// `x` locks in, for pricing an ability before X is announced at its smallest
 /// legal X ("X can't be 0"). Every `{X}` mana symbol, a waterbend cost's
@@ -9597,22 +9626,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
     }
 
     // CR 107.14: If this is an energy-from-exile cast, pay energy before pushing to stack.
-    let energy_cost = state.objects.get(&object_id).and_then(|obj| {
-        if obj.zone == Zone::Exile
-            && obj.casting_permissions.iter().any(|p| {
-                matches!(
-                    p,
-                    crate::types::ability::CastingPermission::ExileWithEnergyCost
-                )
-            })
-        {
-            // CR 202.3d + CR 709.4b: the card is in exile (off the stack), so a
-            // split card's energy cost is its combined mana value.
-            Some(obj.effective_mana_value())
-        } else {
-            None
-        }
-    });
+    let energy_cost = exile_energy_cast_cost(state, object_id, casting_variant);
     if let Some(energy_mv) = energy_cost {
         let mut pending = pending_cast_keeping(
             object_id,
