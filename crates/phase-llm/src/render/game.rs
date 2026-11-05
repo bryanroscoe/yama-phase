@@ -19,9 +19,9 @@ use engine::types::mana::ManaType;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use super::action::describe_tagged;
+use super::action::describe_tagged_for;
 use super::history::{push_history, HistoryBudget, TurnCycle};
-use super::text::{clamp_text, mana_cost_text, one_line, type_line_text};
+use super::text::{clamp_text, mana_cost_text, one_line, seat_label, type_line_text};
 
 /// How much of the position to render. Driven by difficulty so a low-difficulty
 /// seat genuinely reasons from less information (see
@@ -77,18 +77,14 @@ pub fn render_board(
     push_known_other_hands(&mut out, state, viewer);
     push_graveyards(&mut out, state, viewer);
     push_exile(&mut out, state, viewer);
-    push_history(&mut out, history, TurnCycle::of(state), options.history);
+    push_history(
+        &mut out,
+        history,
+        TurnCycle::of(state),
+        options.history,
+        viewer,
+    );
     out
-}
-
-/// `You` for the seat the prompt belongs to, `Player N` otherwise. One
-/// authority so the same seat never reads two ways in one prompt.
-fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
-    if player == viewer {
-        "You".to_string()
-    } else {
-        format!("Player {}", player.0)
-    }
 }
 
 fn push_header(out: &mut String, state: &GameState, viewer: PlayerId) {
@@ -171,7 +167,7 @@ fn push_delayed_triggers(out: &mut String, state: &GameState, viewer: PlayerId) 
     for trigger in &state.delayed_triggers {
         let source = object_name(state, trigger.source_id).unwrap_or_else(|| "unknown".to_string());
         let when = serde_json::to_value(&trigger.condition)
-            .map(|value| describe_tagged(state, &value))
+            .map(|value| describe_tagged_for(state, &value, viewer))
             .unwrap_or_else(|_| "later".to_string());
         out.push_str(&format!(
             "- from {source} (controlled by {}): {when}\n",
