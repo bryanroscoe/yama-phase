@@ -2261,18 +2261,25 @@ pub fn candidate_actions_broad_with_probe(
             };
             bounded_select_card_candidates(*player, cards, sizes)
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        WaitingFor::OptionalCostChoice { player, .. } => {
+            // CR 601.2f-h + CR 118.3: "pay" only while the total it raises is
+            // payable; declining is always an answer.
+            let pay =
+                crate::game::casting_costs::optional_cost_choice_pay_offerable(state).then(|| {
+                    candidate(
+                        GameAction::DecideOptionalCost { pay: true },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                });
+            pay.into_iter()
+                .chain(std::iter::once(candidate(
+                    GameAction::DecideOptionalCost { pay: false },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )))
+                .collect()
+        }
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..

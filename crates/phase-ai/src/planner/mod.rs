@@ -1309,8 +1309,10 @@ impl<'a> PlannerServices<'a> {
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
-        // DecideOptionalCost { pay: false } is always legal — declining an optional
-        // cost cannot fail since it just proceeds with the base cost.
+        // DecideOptionalCost { pay: false } is always legal: declining proceeds
+        // with the total committed so far, or, when a repeatable cost's earlier
+        // payments left that total unpayable, the engine reverses the whole
+        // cast (CR 733.1). Either way the action is accepted.
         let is_optional_cost = matches!(
             state.waiting_for,
             engine::types::game_state::WaitingFor::OptionalCostChoice { .. }
