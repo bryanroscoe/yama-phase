@@ -2194,5 +2194,6 @@ mod windgraces_judgment_one_per_opponent;
 mod zaffai_thunder_conductor_magecraft;
 
 mod priority_after_active_departure;
+mod repeatable_optional_cost_affordability;
 mod required_object_additional_cost_offer_gate;
 mod x_minimum_offer_gate;
