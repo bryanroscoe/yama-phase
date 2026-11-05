@@ -424,6 +424,94 @@ pub fn describe_waiting_for(waiting_for: &engine::types::game_state::WaitingFor)
     }
 }
 
+/// The decision the engine is waiting on, as a prompt shows it: the kind of
+/// decision and, when it belongs to a spell or ability being put on the stack
+/// or a trigger choosing targets, which one and what it says.
+///
+/// `state` is the seat's viewer-filtered state. A bare "Target Selection"
+/// leaves the seat to guess what is targeting: the decision before may have
+/// been an activation of a different permanent than the one it remembers, and
+/// a trigger's targets read like any other's. The engine already carries the
+/// answer — the cast or activation in progress (`WaitingFor::pending_cast_ref`,
+/// or `GameState::pending_cast` while mana is being paid) and the triggering
+/// source and its text — so it is named here.
+pub fn describe_decision(state: &GameState) -> String {
+    let base = describe_waiting_for(&state.waiting_for);
+    match decision_subject(state) {
+        Some(subject) => one_line(&format!("{base} for {subject}")),
+        None => base,
+    }
+}
+
+/// `Volatile Fault's activated ability: Destroy target ...` for the spell,
+/// ability or trigger a decision belongs to.
+fn decision_subject(state: &GameState) -> Option<String> {
+    use engine::types::game_state::WaitingFor;
+
+    let pending = match &state.waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            source_id,
+            description,
+            ..
+        } => {
+            // CR 111.7 + CR 400.7: a token (or a copy) whose trigger is
+            // choosing targets may already have ceased to exist. Its last
+            // known name still says whose trigger it is, and the trigger's
+            // latched text says what it does even with no name at all.
+            let source = source_id
+                .and_then(|id| {
+                    object_name(state, id)
+                        .or_else(|| state.lki_cache.get(&id).map(|lki| one_line(&lki.name)))
+                })
+                .filter(|name| !name.is_empty());
+            if source.is_none() && description.is_none() {
+                return None;
+            }
+            let subject = match source {
+                Some(source) => format!("{source}'s triggered ability"),
+                None => "a triggered ability".to_string(),
+            };
+            return Some(with_text(subject, description.as_deref()));
+        }
+        // CR 601.2g-h: mana payment does not embed its cast; the cast being
+        // paid for is the state's pending cast.
+        WaitingFor::ManaPayment { .. } | WaitingFor::ManaSourceSelection { .. } => {
+            state.pending_cast.as_deref()?
+        }
+        other => other.pending_cast_ref()?,
+    };
+    // CR 400.7: a source that left its zone mid-cast (sacrificed as a cost)
+    // still names the ability by its last known name.
+    let name = object_name(state, pending.object_id).or_else(|| {
+        state
+            .lki_cache
+            .get(&pending.object_id)
+            .map(|lki| one_line(&lki.name))
+    })?;
+    match pending.activation_ability_index {
+        // CR 602.2: an activation in progress belongs to its source's ability.
+        Some(index) => {
+            let text = pending.ability.description.as_deref().or_else(|| {
+                state
+                    .objects
+                    .get(&pending.object_id)?
+                    .abilities
+                    .get(index)
+                    .and_then(|ability| ability.description.as_deref())
+            });
+            Some(with_text(format!("{name}'s activated ability"), text))
+        }
+        None => Some(with_text(name, pending.ability.description.as_deref())),
+    }
+}
+
+fn with_text(subject: String, text: Option<&str>) -> String {
+    match text.map(one_line).filter(|text| !text.is_empty()) {
+        Some(text) => format!("{subject}: {}", clamp_text(&text, ABILITY_TEXT_BUDGET)),
+        None => subject,
+    }
+}
+
 /// Apply `render` to every number in `value`, preserving array structure.
 fn map_scalars(value: &Value, render: impl Fn(u64) -> String + Copy) -> String {
     match value {
@@ -793,6 +881,130 @@ mod tests {
         );
         assert!(!delve.contains("Convoke"), "{delve}");
         assert!(describe_action_for(&state, &tap(elf), PlayerId(0)).starts_with("Tap For Convoke"),);
+    }
+
+    /// A target choice names what is choosing the targets: the activation in
+    /// progress, or the trigger and its text.
+    #[test]
+    fn a_target_choice_names_the_ability_it_is_for() {
+        use engine::game::create_object;
+        use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, ResolvedAbility};
+        use engine::types::game_state::{PendingCast, WaitingFor};
+        use engine::types::mana::ManaCost;
+        use engine::types::player::PlayerId;
+        use std::sync::Arc;
+
+        let mut state = empty_state();
+        assert_eq!(
+            describe_decision(&state),
+            describe_waiting_for(&state.waiting_for)
+        );
+
+        let fault = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Volatile Fault".to_string(),
+            Zone::Battlefield,
+        );
+        let text =
+            "{1}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls.";
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+        );
+        definition.description = Some(text.to_string());
+        state.objects.get_mut(&fault).expect("created").abilities = Arc::new(vec![definition]);
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            fault,
+            PlayerId(0),
+        );
+        let mut pending = PendingCast::new(fault, CardId(1), ability, ManaCost::zero());
+        pending.activation_ability_index = Some(0);
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: Box::new(pending),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            selection: Default::default(),
+        };
+        assert_eq!(
+            describe_decision(&state),
+            format!("Target Selection for Volatile Fault's activated ability: {text}")
+        );
+
+        let roc = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aetherstorm Roc".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+            source_id: Some(roc),
+            description: Some(
+                "Whenever this creature attacks, tap up to one target creature defending player controls."
+                    .to_string(),
+            ),
+        };
+        assert_eq!(
+            describe_decision(&state),
+            "Trigger Target Selection for Aetherstorm Roc's triggered ability: Whenever this \
+             creature attacks, tap up to one target creature defending player controls."
+        );
+    }
+
+    /// A token's dies trigger chooses its targets after the token has ceased
+    /// to exist (CR 111.7): the trigger's own text still names what is
+    /// choosing targets.
+    #[test]
+    fn a_trigger_from_a_vanished_token_still_names_its_text() {
+        use engine::game::create_object;
+        use engine::types::game_state::WaitingFor;
+        use engine::types::player::PlayerId;
+
+        let mut state = empty_state();
+        let token = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.remove(&token);
+        state.lki_cache.remove(&token);
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+            source_id: Some(token),
+            description: Some("When this token dies, it deals 1 damage to any target.".to_string()),
+        };
+        assert_eq!(
+            decision_subject(&state).as_deref(),
+            Some("a triggered ability: When this token dies, it deals 1 damage to any target.")
+        );
     }
 
     #[test]

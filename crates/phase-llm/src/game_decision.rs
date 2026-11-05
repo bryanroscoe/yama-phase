@@ -22,7 +22,7 @@ use crate::prompt::{
     option_value, untrusted_block, DecisionFrame, LlmPrompt, RESPONSE_CONTRACT,
     UNTRUSTED_DATA_DECLARATION,
 };
-use crate::render::action::{describe_action_for, describe_waiting_for, primary_object_label};
+use crate::render::action::{describe_action_for, describe_decision, primary_object_label};
 use crate::render::game::{render_board, GameRenderOptions};
 use crate::wire::{completion_from_response, LlmReply};
 
@@ -174,7 +174,7 @@ pub fn build_game_decision_prompt(
         // The VIEWER-PROJECTED prompt, not the authoritative one. A raw
         // `WaitingFor` can name objects and choices this seat may not read —
         // the same reason the board above is rendered from the filtered state.
-        describe_waiting_for(&visible.waiting_for),
+        describe_decision(&visible),
     );
     let data = format!(
         "{position}\n\n{}",
