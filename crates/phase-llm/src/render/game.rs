@@ -2146,8 +2146,7 @@ mod tests {
                 Keyword::CumulativeUpkeep(AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                 }),
-                // The non-mana cost follows the dash, in its own words.
-                "Cumulative Upkeep—",
+                "Cumulative Upkeep—Pay 1 life",
             ),
             (
                 Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(
