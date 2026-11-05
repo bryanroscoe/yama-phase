@@ -31018,7 +31018,16 @@ impl GameState {
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {
-                player.energy = apply_u32_delta(player.energy, *delta)?;
+                let energy = apply_u32_delta(player.energy, *delta)?;
+                // CR 107.14: paying {E} removes energy counters, as does losing
+                // them, so every decrease counts toward "paid or lost this turn".
+                if *delta < 0 {
+                    player.energy_paid_or_lost_this_turn = player
+                        .energy_paid_or_lost_this_turn
+                        .checked_add(delta.unsigned_abs())
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                }
+                player.energy = energy;
             }
             ResolvedPlayerEdit::Counter { kind, delta } => {
                 let count = apply_u32_delta(player.player_counter(kind), *delta)?;

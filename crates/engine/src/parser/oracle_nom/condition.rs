@@ -7166,6 +7166,7 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_you_didnt_this_turn,
         parse_zone_history_condition,
         parse_life_history_condition,
+        parse_energy_history_condition,
         parse_discard_history_condition,
         parse_combat_history_condition,
         parse_no_attacked_this_turn,
@@ -7529,6 +7530,26 @@ pub(crate) fn add_owned_with_props(
         }
         other => other,
     }
+}
+
+/// CR 107.14 + CR 122.1: "you've paid or lost N or more {E} this turn"
+/// (Izzet Generatorium). Paying {E} removes energy counters, so paid and lost
+/// counters are one per-turn tally: `EnergyPaidOrLostThisTurn { Controller }`.
+fn parse_energy_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) =
+        alt((value((), tag("you ")), value((), (parse_youve, tag(" "))))).parse(input)?;
+    let (rest, _) = tag("paid or lost ").parse(rest)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (rest, _) = tag("{e} this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::EnergyPaidOrLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            n,
+        ),
+    ))
 }
 
 fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {

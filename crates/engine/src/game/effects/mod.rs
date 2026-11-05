@@ -785,6 +785,10 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::CardsDrawnThisTurn { .. } => {
             Some(u32_to_i32_saturating(p.cards_drawn_this_turn))
         }
+        // CR 107.14: energy counters this candidate paid or lost this turn.
+        QuantityRef::EnergyPaidOrLostThisTurn { .. } => {
+            Some(u32_to_i32_saturating(p.energy_paid_or_lost_this_turn))
+        }
         // CR 101.4 + CR 608.2d: the number this candidate secretly chose during
         // the current resolution. `None` for a player who chose nothing, which
         // fails the candidate predicate CLOSED — "each player who didn't choose

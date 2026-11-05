@@ -3480,6 +3480,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber

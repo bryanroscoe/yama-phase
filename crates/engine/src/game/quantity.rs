@@ -2438,6 +2438,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
@@ -2781,6 +2782,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -3102,6 +3104,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         // CR 400.7 + CR 700.4: zone-change records store last-known information.
@@ -3381,6 +3384,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -6365,6 +6369,16 @@ fn resolve_ref(
             targets,
             ability,
             |p| u32_to_i32_saturating(p.cards_drawn_this_turn),
+        ),
+        // CR 107.14 + CR 122.1: energy counters removed this turn, paid or lost.
+        QuantityRef::EnergyPaidOrLostThisTurn { player } => resolve_per_player_history_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |p| u32_to_i32_saturating(p.energy_paid_or_lost_this_turn),
         ),
         // CR 403.3 + CR 608.2h + CR 608.2i: Battlefield entries this turn for the
         // scoped player. CR 608.2i is the look-back exception that makes a

@@ -414,6 +414,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::Speed { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }

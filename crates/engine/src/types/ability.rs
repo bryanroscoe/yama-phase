@@ -9902,6 +9902,7 @@ pub(crate) fn quantity_ref_grammar_any(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -10727,6 +10728,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -13126,6 +13128,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::EnergyPaidOrLostThisTurn { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::PlayerChosenNumber { player }
@@ -14592,6 +14595,13 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 107.14 + CR 122.1: Number of energy counters removed from `player`
+    /// this turn, whether paid for a cost or lost to an effect ("you've paid or
+    /// lost four or more {E} this turn" — Izzet Generatorium). Reads
+    /// `Player::energy_paid_or_lost_this_turn`; energy the player still has
+    /// does not count. Scoped by `player` on the same axis as
+    /// `LifeLostThisTurn` / `CardsDrawnThisTurn`.
+    EnergyPaidOrLostThisTurn { player: PlayerScope },
     /// CR 403.3 + CR 608.2h + CR 608.2i: Count of battlefield entries this turn by
     /// the scoped player matching `filter`, using `battlefield_entries_this_turn`
     /// snapshots. CR 608.2i is the look-back exception that makes a departed
@@ -14993,6 +15003,7 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::EnergyPaidOrLostThisTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
@@ -15212,6 +15223,7 @@ impl QuantityRef {
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
+            | QuantityRef::EnergyPaidOrLostThisTurn { .. }
             | QuantityRef::LandsPlayedThisTurn { .. }
             | QuantityRef::TurnsTaken
             | QuantityRef::ChosenNumber
@@ -15257,6 +15269,7 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::EnergyPaidOrLostThisTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
@@ -16686,6 +16699,7 @@ pub(crate) fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRe
         | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. } | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. } | QuantityRef::PlayerActionsThisTurn { .. }
@@ -28971,6 +28985,7 @@ pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::EnergyPaidOrLostThisTurn { player }
         | QuantityRef::LandsPlayedThisTurn { player, .. }
         | QuantityRef::PlayerChosenNumber { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }

@@ -32349,6 +32349,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::EnergyPaidOrLostThisTurn { player }
         | QuantityRef::LandsPlayedThisTurn { player, .. }
         | QuantityRef::PlayerChosenNumber { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }

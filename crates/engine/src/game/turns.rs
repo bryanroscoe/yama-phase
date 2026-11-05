@@ -1899,6 +1899,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // CR 603.4: Snapshot life lost before reset for "lost life during their last turn" conditions.
         player.life_lost_last_turn = player.life_lost_this_turn;
         player.life_lost_this_turn = 0;
+        player.energy_paid_or_lost_this_turn = 0;
         player.descended_this_turn = false;
         player.cards_drawn_this_turn = 0;
         // CR 121.1 + CR 504.1: Per-step counter is also reset at turn start so

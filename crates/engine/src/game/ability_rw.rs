@@ -2369,6 +2369,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::EnergyPaidOrLostThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
@@ -7010,6 +7011,8 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Player-resource journals.
         QuantityRef::LifeLostThisTurn { player: _ }
         | QuantityRef::LifeGainedThisTurn { player: _ }
+        // CR 107.14: fed by energy writes, which are `PlayerLife` writes.
+        | QuantityRef::EnergyPaidOrLostThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
