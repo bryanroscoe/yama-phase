@@ -881,6 +881,30 @@ mod tests {
         );
     }
 
+    /// A speed change is the player's speed: the viewer reads "Your speed".
+    #[test]
+    fn a_viewers_speed_change_reads_as_your_speed() {
+        use engine::types::events::GameEvent;
+
+        let (state, _) = four_seats();
+        let log = engine_log(
+            &state,
+            &[GameEvent::SpeedChanged {
+                player: PlayerId(1),
+                old_speed: Some(1),
+                new_speed: Some(2),
+            }],
+        );
+        assert_eq!(
+            render_log_entry(&log[0], PlayerId(1)),
+            "Your speed changes from 1 to 2"
+        );
+        assert_eq!(
+            render_log_entry(&log[0], PlayerId(0)),
+            "Player 1's speed changes from 1 to 2"
+        );
+    }
+
     /// The engine writes a player action as name, a lone " ", then the
     /// action. The verb after the space still agrees with "You", and the
     /// subject's "their" reads "your".
