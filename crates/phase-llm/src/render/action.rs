@@ -7,6 +7,11 @@
 //! second registration point to forget. The engine's `#[serde(tag = "type",
 //! content = "data")]` representation and its `strum::IntoStaticStr` variant
 //! name are the two facts this relies on, and both are structural.
+//!
+//! The walk is the default, not the whole story: an action whose payload is
+//! only an index or flag into other state (an ability index, a pay-or-not
+//! flag, a trigger permutation) is described from that state instead (see
+//! `describe_by_meaning`), and falls back to the walk when it cannot be.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +21,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 use serde_json::Value;
 
-use super::text::{one_line, seat_label};
+use super::text::{clamp_text, one_line, seat_label};
 
 /// Payload fields whose numeric values name a player rather than an object.
 /// An explicit list, not a heuristic: guessing wrong here would print
@@ -126,6 +131,9 @@ pub fn describe_action_for(state: &GameState, action: &GameAction, viewer: Playe
 }
 
 fn describe_action_in(scope: Scope<'_>, action: &GameAction) -> String {
+    if let Some(described) = describe_by_meaning(scope, action) {
+        return described;
+    }
     let verb = humanize_identifier(<&'static str>::from(action));
     let Ok(value) = serde_json::to_value(action) else {
         return verb;
@@ -134,6 +142,46 @@ fn describe_action_in(scope: Scope<'_>, action: &GameAction) -> String {
     // description.
     describe_payload(scope, verb, value.get("data"))
 }
+
+/// What an option DOES, for the actions whose payload alone cannot say it.
+///
+/// The generic walk below describes any action from its fields, which is
+/// right for an action whose fields are its meaning (a target, a mode, a
+/// number). Some payloads are only indices or flags into state the action
+/// refers to — "ability index 2" means nothing without the ability — and a
+/// model shown the index has to guess which ability it is. Those actions are
+/// described here from the state they point into; every other action, and
+/// any of these whose referent is missing, falls through to the generic walk.
+fn describe_by_meaning(scope: Scope<'_>, action: &GameAction) -> Option<String> {
+    match action {
+        // CR 602.1 + CR 602.2: an activated ability is identified by its text
+        // ("[Cost]: [Effect.]"), not by its position on the card.
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            ..
+        } => {
+            let text = scope
+                .state
+                .objects
+                .get(source_id)?
+                .abilities
+                .get(*ability_index)?
+                .description
+                .as_deref()
+                .map(one_line)
+                .filter(|text| !text.is_empty())?;
+            Some(format!(
+                "Activate: \"{}\"",
+                clamp_text(&text, ABILITY_TEXT_BUDGET)
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Characters of ability text kept in one option.
+const ABILITY_TEXT_BUDGET: usize = 320;
 
 /// A one-line description of any engine enum value, read from its serialized
 /// form: a bare unit-variant string, an internally tagged object
@@ -632,6 +680,62 @@ mod tests {
             describe_action(&state, &crew(harvesters[0])),
             "Crew Vehicle (Vehicle ID: Aethersphere Harvester)"
         );
+    }
+
+    /// An activated-ability option quotes the ability it activates, so the
+    /// ability's index never has to be mapped to the card's text.
+    #[test]
+    fn an_activate_option_quotes_the_ability_it_activates() {
+        use engine::game::create_object;
+        use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+        use std::sync::Arc;
+
+        let mut state = empty_state();
+        let sage = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sage of the Maze".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = |text: &str| {
+            let mut definition = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+            );
+            definition.description = Some(text.to_string());
+            definition
+        };
+        state.objects.get_mut(&sage).expect("created").abilities = Arc::new(vec![
+            ability("{T}: Add two mana in any combination of colors."),
+            ability(
+                "{T}: Until end of turn, target land you control becomes an X/X Citizen \
+                 creature with haste in addition to its other types, where X is twice the \
+                 number of Gates you control. Activate only as a sorcery.",
+            ),
+            ability("Tap an untapped Gate you control: Untap this creature."),
+        ]);
+        let activate = |ability_index| GameAction::ActivateAbility {
+            source_id: sage,
+            ability_index,
+            payment_mode: Default::default(),
+        };
+        assert_eq!(
+            describe_action_for(&state, &activate(2), PlayerId(0)),
+            "Activate: \"Tap an untapped Gate you control: Untap this creature.\""
+        );
+        assert_ne!(
+            describe_action_for(&state, &activate(1), PlayerId(0)),
+            describe_action_for(&state, &activate(2), PlayerId(0))
+        );
+        // An index with no ability behind it falls back to the generic walk.
+        assert!(describe_action_for(&state, &activate(7), PlayerId(0))
+            .starts_with("Activate Ability (Ability Index: 7"),);
     }
 
     #[test]
