@@ -19,6 +19,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 use serde_json::Value;
 
 use super::text::{clamp_text, one_line, seat_label};
@@ -174,6 +175,23 @@ fn describe_by_meaning(scope: Scope<'_>, action: &GameAction) -> Option<String> 
             Some(format!(
                 "Activate: \"{}\"",
                 clamp_text(&text, ABILITY_TEXT_BUDGET)
+            ))
+        }
+        // CR 702.66a: the engine offers delve's "exile a card from your
+        // graveyard to pay {1}" through the same action as convoke's tap
+        // (CR 702.51a). Convoke, improvise and waterbend tap a permanent on
+        // the battlefield; the only one of them whose card is in a graveyard
+        // is delve, and that card is exiled, not tapped.
+        GameAction::TapForConvoke { object_id, .. }
+            if scope
+                .state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.zone == Zone::Graveyard) =>
+        {
+            Some(format!(
+                "Exile {} from your graveyard for delve (pays {{1}})",
+                scope.object(object_id.0)
             ))
         }
         _ => None,
@@ -736,6 +754,45 @@ mod tests {
         // An index with no ability behind it falls back to the generic walk.
         assert!(describe_action_for(&state, &activate(7), PlayerId(0))
             .starts_with("Activate Ability (Ability Index: 7"),);
+    }
+
+    /// CR 702.66a: a delve payment exiles a graveyard card. It must not read
+    /// as convoke, which taps a permanent.
+    #[test]
+    fn a_delve_payment_reads_as_delve_and_a_convoke_tap_as_convoke() {
+        use engine::game::create_object;
+        use engine::types::mana::ManaType;
+        use engine::types::player::PlayerId;
+
+        let mut state = empty_state();
+        let fuel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Urban Evolution".to_string(),
+            Zone::Graveyard,
+        );
+        let elf = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        let tap = |object_id| GameAction::TapForConvoke {
+            object_id,
+            mana_type: ManaType::Colorless,
+        };
+        let delve = describe_action_for(&state, &tap(fuel), PlayerId(0));
+        assert_eq!(
+            delve,
+            format!(
+                "Exile Urban Evolution (Object {}) from your graveyard for delve (pays {{1}})",
+                fuel.0
+            )
+        );
+        assert!(!delve.contains("Convoke"), "{delve}");
+        assert!(describe_action_for(&state, &tap(elf), PlayerId(0)).starts_with("Tap For Convoke"),);
     }
 
     #[test]
