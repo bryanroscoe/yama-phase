@@ -162,20 +162,16 @@ fn describe_by_meaning(scope: Scope<'_>, action: &GameAction) -> Option<String> 
             ability_index,
             ..
         } => {
-            let text = scope
-                .state
-                .objects
-                .get(source_id)?
-                .abilities
-                .get(*ability_index)?
-                .description
-                .as_deref()
-                .map(one_line)
-                .filter(|text| !text.is_empty())?;
-            Some(format!(
-                "Activate: \"{}\"",
-                clamp_text(&text, ABILITY_TEXT_BUDGET)
-            ))
+            let ability = activated_ability(scope.state, *source_id, *ability_index)?;
+            match ability_text(&ability) {
+                Some(text) => Some(format!(
+                    "Activate: \"{}\"",
+                    clamp_text(&text, ABILITY_TEXT_BUDGET)
+                )),
+                None => {
+                    granted_ability_label(scope, &ability).map(|label| format!("Activate {label}"))
+                }
+            }
         }
         // CR 702.66a: the engine offers delve's "exile a card from your
         // graveyard to pay {1}" through the same action as convoke's tap
@@ -373,6 +369,20 @@ fn ability_cost_text(scope: Scope<'_>, cost: &engine::types::ability::AbilityCos
         }
         AbilityCost::Tap => "{T}".to_string(),
         AbilityCost::Untap => "{Q}".to_string(),
+        // CR 118.8 + CR 602.1: a cost of several parts is printed as its
+        // parts in order ("{2}, Discard this card").
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .map(|cost| ability_cost_text(scope, cost))
+            .collect::<Vec<_>>()
+            .join(", "),
+        AbilityCost::Discard {
+            self_scope: engine::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => "Discard this card".to_string(),
+        AbilityCost::PayLife {
+            amount: engine::types::ability::QuantityExpr::Fixed { value },
+        } => format!("Pay {value} life"),
         other => serde_json::to_value(other)
             .map(|value| describe_tagged_in(scope, &value))
             .unwrap_or_else(|_| "a cost".to_string()),
@@ -389,6 +399,62 @@ pub(crate) fn cost_text(state: &GameState, cost: &engine::types::ability::Abilit
         },
         cost,
     )
+}
+
+/// The activated ability `ability_index` names on `source_id`.
+///
+/// CR 602.1: the index runs over the object's printed abilities and then the
+/// ones rules grant it at activation time (cycling, unearth, plot, a granted
+/// equip), in the engine's own enumeration order
+/// (`casting::activated_ability_definitions`), so a granted ability is
+/// found at the index the engine offered it under.
+fn activated_ability(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<engine::types::ability::AbilityDefinition> {
+    engine::game::casting::activated_ability_definitions(state, source_id)
+        .into_iter()
+        .find_map(|(index, ability)| (index == ability_index).then_some(ability))
+}
+
+/// An ability's own rules text, when it has one.
+fn ability_text(ability: &engine::types::ability::AbilityDefinition) -> Option<String> {
+    ability
+        .description
+        .as_deref()
+        .map(one_line)
+        .filter(|text| !text.is_empty())
+}
+
+/// `Cycling ({2}) from your hand` for an ability with no rules text of its
+/// own: one synthesized from a keyword a rule or effect grants. Named by its
+/// keyword tag (or effect), with its cost and the zone it works from.
+fn granted_ability_label(
+    scope: Scope<'_>,
+    ability: &engine::types::ability::AbilityDefinition,
+) -> Option<String> {
+    let name = match &ability.ability_tag {
+        Some(tag) => humanize_identifier(&format!("{tag:?}")),
+        None => serde_json::to_value(ability.effect.as_ref())
+            .ok()?
+            .get("type")
+            .and_then(Value::as_str)
+            .map(humanize_identifier)?,
+    };
+    let mut label = name;
+    if let Some(cost) = &ability.cost {
+        label.push_str(&format!(" ({})", ability_cost_text(scope, cost)));
+    }
+    match ability.activation_zone {
+        Some(Zone::Hand) => label.push_str(" from your hand"),
+        Some(Zone::Graveyard) => label.push_str(" from your graveyard"),
+        Some(Zone::Library) => label.push_str(" from the top of your library"),
+        Some(Zone::Exile) => label.push_str(" from exile"),
+        Some(Zone::Command) => label.push_str(" from the command zone"),
+        Some(Zone::Battlefield | Zone::Stack) | None => {}
+    }
+    Some(label)
 }
 
 /// Characters of ability text kept in one option.
@@ -735,15 +801,28 @@ fn decision_subject(state: &GameState) -> Option<String> {
     match pending.activation_ability_index {
         // CR 602.2: an activation in progress belongs to its source's ability.
         Some(index) => {
-            let text = pending.ability.description.as_deref().or_else(|| {
-                state
-                    .objects
-                    .get(&pending.object_id)?
-                    .abilities
-                    .get(index)
-                    .and_then(|ability| ability.description.as_deref())
-            });
-            Some(with_text(format!("{name}'s activated ability"), text))
+            let ability = activated_ability(state, pending.object_id, index);
+            let text = pending
+                .ability
+                .description
+                .clone()
+                .or_else(|| ability.as_ref().and_then(ability_text));
+            let kind = match ability
+                .as_ref()
+                .filter(|_| text.is_none())
+                .and_then(|ability| {
+                    granted_ability_label(
+                        Scope {
+                            state,
+                            viewer: None,
+                        },
+                        ability,
+                    )
+                }) {
+                Some(label) => format!("{name}'s {label} ability"),
+                None => format!("{name}'s activated ability"),
+            };
+            Some(with_text(kind, text.as_deref()))
         }
         None => Some(with_text(name, pending.ability.description.as_deref())),
     }
@@ -1448,6 +1527,58 @@ mod tests {
              the beginning of your precombat main phase, remove all charge counters.)"
         );
         assert!(!described.contains("Order:"), "{described}");
+    }
+
+    /// CR 702.6a: an equip ability a static grants is numbered after the
+    /// printed abilities and has no rules text of its own; its option names
+    /// it by its keyword and cost rather than by index.
+    #[test]
+    fn a_granted_activation_is_named_by_its_keyword_and_cost() {
+        use engine::game::create_object;
+        use engine::types::ability::{AbilityCost, DiscardSelfScope, QuantityExpr};
+        use engine::types::keywords::Keyword;
+        use engine::types::mana::ManaCost;
+        use engine::types::player::PlayerId;
+
+        let mut state = empty_state();
+        let sword = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bludgeon".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&sword)
+            .expect("created")
+            .keywords
+            .push(Keyword::Equip(ManaCost::generic(1)));
+        let index = state.objects[&sword].abilities.len();
+        let equip = GameAction::ActivateAbility {
+            source_id: sword,
+            ability_index: index,
+            payment_mode: Default::default(),
+        };
+        let described = describe_action_for(&state, &equip, PlayerId(0));
+        assert_eq!(described, "Activate Equip ({1})");
+        assert!(!described.contains("Ability Index"), "{described}");
+
+        // Cycling's synthesized cost reads as printed.
+        let cycling = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: Default::default(),
+                    self_scope: DiscardSelfScope::SourceCard,
+                },
+            ],
+        };
+        assert_eq!(cost_text(&state, &cycling), "{2}, Discard this card");
     }
 
     #[test]
