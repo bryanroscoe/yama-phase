@@ -20979,6 +20979,38 @@ fn can_feasibly_pay_mana_cost_with_assist(
     })
 }
 
+/// CR 107.3: the smallest X a prepared spell may announce — its stated
+/// minimum ("X can't be 0"), or 0.
+fn prepared_spell_min_x(prepared: &PreparedSpellCast) -> u32 {
+    prepared
+        .ability_def
+        .as_ref()
+        .map_or(0, |def| def.min_x_value)
+}
+
+/// CR 601.2a-b + CR 601.2f: the pending cast announcing `prepared` would
+/// open, for pricing it before announcement exactly as the announcement
+/// will (base cost, casting method and permission, payment mode).
+fn prepared_preview_pending_cast(prepared: &PreparedSpellCast, player: PlayerId) -> PendingCast {
+    let resolved = prepared.ability_def.as_ref().map_or_else(
+        || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
+        |def| build_resolved_from_def(def, prepared.object_id, player),
+    );
+    let mut pending = PendingCast::new(
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        prepared.mana_cost.clone(),
+    );
+    pending.base_cost = Some(prepared.base_mana_cost.clone());
+    pending.casting_variant = prepared.casting_variant;
+    pending.casting_permission_index = prepared.casting_permission_index;
+    pending.cast_timing_permission = prepared.cast_timing_permission;
+    pending.origin_zone = prepared.origin_zone;
+    pending.payment_mode = prepared.payment_mode;
+    pending
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -20987,6 +21019,35 @@ fn can_cast_prepared_now_with_probe(
 ) -> bool {
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return false;
+    };
+    // CR 107.3 + CR 601.2b + CR 601.2f: a stated minimum ("X can't be 0")
+    // makes X = 0 an illegal announcement, so the cheapest legal total is the
+    // one with X at that minimum. It is priced as the X announcement prices
+    // every value: from the base cost with X fixed, then the cost increases
+    // and reductions, then the floors (Trinisphere), which read the concrete
+    // total. Pricing the already-reduced symbolic cost would apply a reducer
+    // to the wrong total and skip the floors.
+    let priced_at_minimum_x;
+    let min_x = prepared_spell_min_x(prepared);
+    // CR 107.3b: cast while paying neither its mana cost nor an alternative
+    // cost that includes {X} (Omniscience, "without paying its mana cost"),
+    // a spell with {X} in its mana cost has X = 0, which a stated minimum
+    // forbids. An X only in an optional additional cost (Kicker {X}) isn't
+    // in the mana cost and is unaffected.
+    if min_x > 0
+        && casting_costs::cost_has_x(&obj.mana_cost)
+        && !casting_costs::cost_has_x(&prepared.mana_cost)
+    {
+        return false;
+    }
+    let prepared = if min_x > 0 && casting_costs::cost_has_x(&prepared.mana_cost) {
+        let pending = prepared_preview_pending_cast(prepared, player);
+        let mut priced = prepared.clone();
+        priced.mana_cost = recompute_pending_mana_total(state, player, &pending, Some(min_x));
+        priced_at_minimum_x = priced;
+        &priced_at_minimum_x
+    } else {
+        prepared
     };
 
     // CR 202.1b: A card with no mana cost (suspend-only cards like Inevitable
@@ -21243,21 +21304,12 @@ fn can_cast_prepared_now_with_probe(
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        let resolved = prepared.ability_def.as_ref().map_or_else(
-            || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
-            |def| build_resolved_from_def(def, prepared.object_id, player),
-        );
-        let mut pending = PendingCast::new(
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            prepared.mana_cost.clone(),
-        );
-        pending.base_cost = Some(prepared.base_mana_cost.clone());
-        pending.casting_variant = prepared.casting_variant;
-        pending.cast_timing_permission = prepared.cast_timing_permission;
-        pending.origin_zone = prepared.origin_zone;
-        pending.payment_mode = prepared.payment_mode;
+        let mut pending = prepared_preview_pending_cast(prepared, player);
+        // CR 107.3 + CR 601.2f: with a stated minimum, the branch is judged
+        // beside the cheapest legal X, as the main total is above.
+        if min_x > 0 && casting_costs::cost_has_x(&prepared.base_mana_cost) {
+            pending.ability.chosen_x = Some(min_x);
+        }
         let branch_is_offerable = |cost: &AbilityCost| {
             casting_costs::additional_cost_declaration_is_offerable(
                 state,
@@ -21526,7 +21578,16 @@ fn target_dependent_reduction_makes_payable(
                 modifiers.with_target_dependent(target_dependent.0.clone()),
                 floors.with_target_dependent(target_dependent.1.clone()),
             );
-            recompute_pending_mana_total_using(flushed, player, &pending, Some(0), ctx, &collected)
+            // CR 107.3 + CR 601.2f: the cheapest legal X (0 unless a minimum
+            // is stated), priced like every other X.
+            recompute_pending_mana_total_using(
+                flushed,
+                player,
+                &pending,
+                Some(prepared_spell_min_x(prepared)),
+                ctx,
+                &collected,
+            )
         };
         let payable = |cost: &ManaCost| {
             can_feasibly_pay_harmonize_mana_cost_with_probe(
@@ -27894,6 +27955,29 @@ pub(crate) fn activation_verdict(
     if !activation_cost_rider_is_priceable(&ability_def) {
         return ActivationVerdict::Illegal;
     }
+    // CR 107.3 + CR 601.2b + CR 602.2b: X is announced before the total cost
+    // is determined (CR 601.2f), and a stated minimum ("X can't be 0") makes
+    // every smaller announcement illegal. The cheapest legal total therefore
+    // prices X at that minimum, not at 0; the X announcement refuses any
+    // activation whose minimum exceeds what the player can pay.
+    let announced_cost = ability_def.cost.clone();
+    let mut minimum_x_unpayable = false;
+    if ability_def.min_x_value > 0 {
+        if let Some(cost) = ability_def.cost.as_mut() {
+            // CR 107.3 + CR 118.3: the X legs that count objects or resources
+            // (sacrifice X artifacts) must be payable at the minimum, as the
+            // X announcement's own bound requires.
+            minimum_x_unpayable = !casting_costs::activation_x_legs_admit(
+                state,
+                player,
+                source_id,
+                activated_ability_granting_object(state, source_id, Some(ability_index)),
+                cost,
+                ability_def.min_x_value,
+            );
+            *cost = casting_costs::activation_cost_at_announced_x(cost, ability_def.min_x_value);
+        }
+    }
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
     // CR 601.2c + CR 602.2b: a cost that may depend on the targets is judged
     // over the legal assignments; `proved_unpayable` means none is affordable.
@@ -27935,7 +28019,8 @@ pub(crate) fn activation_verdict(
     // CR 118.3: the resource-availability gate — the ONE evaluation.
     // CR 107.4f + CR 119.4: an automatic payment's Phyrexian life is also
     // judged in its payer's order, before any mana source is tapped.
-    let cost_not_payable = proved_unpayable
+    let cost_not_payable = minimum_x_unpayable
+        || proved_unpayable
         || affordability_cost.as_ref().is_some_and(|cost| {
             !can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index), &life)
                 || (matches!(life, ActivationLifeWindow::Current)
@@ -28013,7 +28098,8 @@ pub(crate) fn activation_verdict(
                     }
                 }
                 Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
-                    ability_def.cost.as_ref().is_some_and(|cost| {
+                    // The printed cost: whether X is still to be announced.
+                    announced_cost.as_ref().is_some_and(|cost| {
                         casting_costs::extract_x_mana_cost(cost).is_some()
                             || find_non_self_sacrifice_cost(cost)
                                 .is_some_and(|(count, _)| count == u32::MAX)
