@@ -10,18 +10,37 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
-use engine::game::combat::AttackTarget;
+use engine::game::combat::{self, AttackTarget};
+use engine::game::commander;
+use engine::game::derived_views::{
+    derive_views, DerivedViews, StackEntryDisplay, StackPaidFactView,
+};
 use engine::game::mana_sources;
-use engine::types::game_state::GameState;
+use engine::game::players;
+use engine::types::ability::{
+    AbilityCost, CardSelectionMode, ControllerRef, QuantityExpr, StackAbilityKind, TargetRef,
+    TypeFilter,
+};
+use engine::types::card_type::{CardType, LAND_SUBTYPES};
+use engine::types::game_state::{GameState, StackEntry, StackObjectClass};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::{
+    BestowCost, BlitzCost, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost, EchoCost,
+    EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, EvokeCost, FlashbackCost,
+    HexproofFilter, Keyword, MorphCost, PartnerType, ProtectionColorSet, ProtectionTarget,
+    WardCost,
+};
 use engine::types::log::GameLogEntry;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::player::PlayerId;
+use engine::types::statics::CostModifyMode;
 use engine::types::zones::Zone;
 
-use super::action::describe_tagged;
+use super::action::{
+    cost_text, describe_tagged, describe_tagged_for, humanize_identifier, object_label,
+};
 use super::history::{push_history, HistoryBudget, TurnCycle};
-use super::text::{clamp_text, mana_cost_text, one_line, type_line_text};
+use super::text::{clamp_text, mana_cost_text, one_line, seat_label, type_line_text};
 
 /// How much of the position to render. Driven by difficulty so a low-difficulty
 /// seat genuinely reasons from less information (see
@@ -65,30 +84,30 @@ pub fn render_board(
     history: &[GameLogEntry],
     options: &GameRenderOptions,
 ) -> String {
+    // The engine's display projections of this seat's view: stack entry
+    // details and which permanents are copies.
+    let views = derive_views(state, Some(viewer));
     let mut out = String::new();
     push_header(&mut out, state, viewer);
     push_players(&mut out, state, viewer);
-    push_stack(&mut out, state, viewer);
+    push_stack(&mut out, state, &views, viewer);
     push_delayed_triggers(&mut out, state, viewer);
     push_combat(&mut out, state, viewer);
-    push_battlefield(&mut out, state, viewer, db, options);
+    push_battlefield(&mut out, state, &views, viewer, db, options);
+    push_command_zone(&mut out, state, viewer);
     push_hand(&mut out, state, viewer, db, options);
     push_available_mana(&mut out, state, viewer);
     push_known_other_hands(&mut out, state, viewer);
     push_graveyards(&mut out, state, viewer);
     push_exile(&mut out, state, viewer);
-    push_history(&mut out, history, TurnCycle::of(state), options.history);
+    push_history(
+        &mut out,
+        history,
+        TurnCycle::of(state),
+        options.history,
+        viewer,
+    );
     out
-}
-
-/// `You` for the seat the prompt belongs to, `Player N` otherwise. One
-/// authority so the same seat never reads two ways in one prompt.
-fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
-    if player == viewer {
-        "You".to_string()
-    } else {
-        format!("Player {}", player.0)
-    }
 }
 
 fn push_header(out: &mut String, state: &GameState, viewer: PlayerId) {
@@ -105,6 +124,14 @@ fn push_header(out: &mut String, state: &GameState, viewer: PlayerId) {
 fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- PLAYERS ---\n");
     for player in &state.players {
+        // CR 104.3a + CR 800.4a: a player who has lost has left the game. Their
+        // life total and empty zones are not a position to reason about, and
+        // reading them as one ("-49 life") is how a seat mistakes a departed
+        // player for a live one.
+        if !players::is_alive(state, player.id) {
+            out.push_str(&format!("{}: eliminated\n", seat_label(player.id, viewer)));
+            continue;
+        }
         let mut facts = vec![
             format!("{} life", player.life),
             format!("{} cards in hand", player.hand.len()),
@@ -138,25 +165,167 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
     }
 }
 
-fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
+fn push_stack(out: &mut String, state: &GameState, views: &DerivedViews, viewer: PlayerId) {
     if state.stack.is_empty() {
         out.push_str("\n--- STACK ---\n(empty)\n");
         return;
     }
     out.push_str("\n--- STACK (top resolves first) ---\n");
+    // `stack_entry_details` is the engine's display projection of each stack
+    // entry: what kind of object it is, its source, its ability text and its
+    // live controller.
     // CR 405.1: the stack is last-in, first-out; render it that way rather than
     // in storage order, so "top" in the prompt means what it means in the rules.
     for (index, entry) in state.stack.iter().rev().enumerate() {
-        let name = object_name(state, entry.id)
-            .or_else(|| object_name(state, entry.source_id))
-            .unwrap_or_else(|| "unknown".to_string());
         out.push_str(&format!(
-            "{}. {} (controlled by {})\n",
+            "{}. {}\n",
             index + 1,
-            name,
-            seat_label(entry.controller, viewer)
+            stack_entry_line(
+                state,
+                entry,
+                views.stack_entry_details.get(&entry.id),
+                viewer
+            )
         ));
     }
+}
+
+/// Characters of ability text kept for one stack entry.
+const STACK_TEXT_BUDGET: usize = 320;
+
+/// One stack entry. A spell reads as its name. An ability says it is one and
+/// whose it is — CR 113.3b/c, an activated or triggered ability is not the
+/// permanent it came from, which is usually still on the battlefield — and
+/// quotes the ability's text, so a seat can tell an enters trigger or a ward
+/// trigger from the spell or permanent it shares a name with.
+fn stack_entry_line(
+    state: &GameState,
+    entry: &StackEntry,
+    detail: Option<&StackEntryDisplay>,
+    viewer: PlayerId,
+) -> String {
+    let controller = seat_label(
+        detail.map_or(entry.controller, |detail| detail.controller),
+        viewer,
+    );
+    let source = || {
+        detail
+            .map(|detail| one_line(&detail.source_name))
+            .filter(|name| !name.is_empty())
+            .or_else(|| known_name(state, entry.source_id))
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let kind = match entry.kind.class() {
+        StackObjectClass::Spell => {
+            let name = known_name(state, entry.id)
+                .or_else(|| known_name(state, entry.source_id))
+                .unwrap_or_else(|| "unknown".to_string());
+            return format!(
+                "{name} (Object {}, controlled by {controller}){}",
+                entry.id.0,
+                stack_facts(state, detail, viewer)
+            );
+        }
+        StackObjectClass::Ability(StackAbilityKind::Activated) => "Activated ability",
+        StackObjectClass::Ability(StackAbilityKind::Triggered) => "Triggered ability",
+        StackObjectClass::CombatDamage => {
+            let label = detail.map_or_else(
+                || "Combat damage".to_string(),
+                |detail| one_line(&detail.kind_label),
+            );
+            return format!(
+                "{label} (Object {}, controlled by {controller})",
+                entry.id.0
+            );
+        }
+    };
+    // Keyword actions (Equip, Crew, ...) carry no ability text; their keyword
+    // is what the ability is.
+    let text = detail.and_then(|detail| {
+        detail.ability_description.clone().or_else(|| {
+            detail
+                .ability_kind
+                .is_none()
+                .then(|| detail.kind_label.clone())
+        })
+    });
+    let head = format!(
+        "{kind} of {} (Object {}, controlled by {controller}){}",
+        source(),
+        entry.id.0,
+        stack_facts(state, detail, viewer)
+    );
+    match text
+        .map(|text| one_line(&text))
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) => format!("{head}: {}", clamp_text(&text, STACK_TEXT_BUDGET)),
+        None => head,
+    }
+}
+
+/// What the stack entry has already locked in: its chosen modes, its targets
+/// (CR 601.2c, by seat or by object number as the options name them) and the
+/// facts of how it was cast (X, kicked, mana spent), from the engine's stack
+/// display projection. Empty when there is none.
+fn stack_facts(state: &GameState, detail: Option<&StackEntryDisplay>, viewer: PlayerId) -> String {
+    let Some(detail) = detail else {
+        return String::new();
+    };
+    let mut facts: Vec<String> = Vec::new();
+    if !detail.selected_mode_labels.is_empty() {
+        let modes: Vec<String> = detail
+            .selected_mode_labels
+            .iter()
+            .map(|mode| one_line(mode))
+            .collect();
+        facts.push(format!("modes: {}", modes.join("; ")));
+    }
+    if !detail.targets.is_empty() {
+        let targets: Vec<String> = detail
+            .targets
+            .iter()
+            .map(|target| match target.target {
+                TargetRef::Player(player) => seat_label(player, viewer),
+                TargetRef::Object(id) if state.objects.contains_key(&id) => object_label(state, id),
+                TargetRef::Object(id) => format!("{} (Object {})", one_line(&target.label), id.0),
+            })
+            .collect();
+        facts.push(format!("targeting {}", targets.join(", ")));
+    }
+    for paid in &detail.paid {
+        facts.push(match paid {
+            StackPaidFactView::XValue { value } => format!("X = {value}"),
+            StackPaidFactView::ManaSpent { amount } => format!("{amount} mana spent"),
+            StackPaidFactView::ColorsSpent { distinct } => {
+                format!("{distinct} colors of mana spent")
+            }
+            StackPaidFactView::Kicked { count: 1 } => "kicked".to_string(),
+            StackPaidFactView::Kicked { count } => format!("kicked {count} times"),
+            StackPaidFactView::AdditionalCostPaid => "additional cost paid".to_string(),
+            StackPaidFactView::CastVariant { variant } => {
+                format!("cast {}", humanize_identifier(variant).to_lowercase())
+            }
+            StackPaidFactView::Convoked { count } => format!("convoked with {count}"),
+        });
+    }
+    if facts.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", facts.join("; "))
+    }
+}
+
+/// An object's name, or its last known name once it has left the zone it was
+/// in (CR 400.7): a sacrificed source still names its ability on the stack.
+fn known_name(state: &GameState, id: ObjectId) -> Option<String> {
+    object_name(state, id).or_else(|| {
+        state
+            .lki_cache
+            .get(&id)
+            .map(|lki| one_line(&lki.name))
+            .filter(|name| !name.is_empty())
+    })
 }
 
 /// Effects already set to happen later: CR 603.7a delayed triggered abilities
@@ -169,13 +338,28 @@ fn push_delayed_triggers(out: &mut String, state: &GameState, viewer: PlayerId) 
     }
     out.push_str("\n--- PENDING DELAYED TRIGGERS ---\n");
     for trigger in &state.delayed_triggers {
-        let source = object_name(state, trigger.source_id).unwrap_or_else(|| "unknown".to_string());
+        let source = known_name(state, trigger.source_id).unwrap_or_else(|| "unknown".to_string());
         let when = serde_json::to_value(&trigger.condition)
-            .map(|value| describe_tagged(state, &value))
+            .map(|value| describe_tagged_for(state, &value, viewer))
             .unwrap_or_else(|_| "later".to_string());
+        // What it will do: the ability's own text, else its effect described
+        // from its fields, so two delayed triggers from one source at one
+        // time ("gain 1 life" and "sacrifice it") read differently.
+        let what = trigger
+            .ability
+            .description
+            .as_deref()
+            .map(one_line)
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| {
+                serde_json::to_value(&trigger.ability.effect)
+                    .map(|value| describe_tagged_for(state, &value, viewer))
+                    .unwrap_or_default()
+            });
         out.push_str(&format!(
-            "- from {source} (controlled by {}): {when}\n",
-            seat_label(trigger.controller, viewer)
+            "- from {source} (controlled by {}): {when} — {}\n",
+            seat_label(trigger.controller, viewer),
+            clamp_text(&what, STACK_TEXT_BUDGET)
         ));
     }
 }
@@ -189,19 +373,19 @@ fn push_combat(out: &mut String, state: &GameState, viewer: PlayerId) {
     }
     out.push_str("\n--- COMBAT ---\n");
     for attacker in &combat.attackers {
-        let name = object_name(state, attacker.object_id).unwrap_or_else(|| "unknown".to_string());
+        // Numbered as the options name them, so a block or a damage order
+        // option maps to its attacker and blockers.
+        let name = object_label(state, attacker.object_id);
         let target = match attacker.attack_target {
             AttackTarget::Player(player) => seat_label(player, viewer),
-            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
-                object_name(state, id).unwrap_or_else(|| "unknown".to_string())
-            }
+            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => object_label(state, id),
         };
         let blockers = combat
             .blocker_assignments
             .get(&attacker.object_id)
             .map(|ids| {
                 ids.iter()
-                    .filter_map(|id| object_name(state, *id))
+                    .map(|id| object_label(state, *id))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -222,6 +406,7 @@ fn push_combat(out: &mut String, state: &GameState, viewer: PlayerId) {
 fn push_battlefield(
     out: &mut String,
     state: &GameState,
+    views: &DerivedViews,
     viewer: PlayerId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
@@ -244,12 +429,58 @@ fn push_battlefield(
     }
     for (controller, ids) in by_controller {
         out.push_str(&format!("{}:\n", seat_label(PlayerId(controller), viewer)));
-        let lines = ids
-            .into_iter()
-            .map(|id| permanent_line(state, id, db, options));
-        for line in grouped_lines(lines) {
+        let rows = ids.into_iter().map(|id| {
+            let (head, tail) = permanent_line(state, views, id, db, options);
+            (id, head, tail)
+        });
+        for line in numbered_rows(rows) {
             out.push_str(&format!("  - {line}\n"));
         }
+    }
+}
+
+/// Board rows that name their objects by number, as the options do
+/// ([`super::action::object_label`]): `Forest (Objects 3, 4, 7) | Basic Land
+/// — Forest | untapped`.
+///
+/// Rows whose every stated fact is the same collapse into one row listing
+/// all their numbers, so five identical Forests stay one row; two
+/// same-named permanents that differ in anything the row states (tapped,
+/// counters, damage) are separate rows, each under its own number. An option
+/// that names "Grizzly Bears (Object 12)" therefore points at exactly one
+/// row, and that row says which Bears it is.
+fn numbered_rows(rows: impl IntoIterator<Item = (ObjectId, String, String)>) -> Vec<String> {
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut ids: BTreeMap<(String, String), Vec<ObjectId>> = BTreeMap::new();
+    for (id, head, tail) in rows {
+        let key = (head, tail);
+        let group = ids.entry(key.clone()).or_default();
+        if group.is_empty() {
+            order.push(key);
+        }
+        group.push(id);
+    }
+    order
+        .into_iter()
+        .map(|key| {
+            let numbers = ids.get(&key).map(Vec::as_slice).unwrap_or_default();
+            let (head, tail) = key;
+            format!("{head} ({}){tail}", object_numbers(numbers))
+        })
+        .collect()
+}
+
+/// `Object 3` / `Objects 3, 4, 7`.
+fn object_numbers(ids: &[ObjectId]) -> String {
+    let numbers = ids
+        .iter()
+        .map(|id| id.0.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if ids.len() == 1 {
+        format!("Object {numbers}")
+    } else {
+        format!("Objects {numbers}")
     }
 }
 
@@ -293,11 +524,11 @@ fn push_hand(
         out.push_str("(empty)\n");
         return;
     }
-    let lines = player
-        .hand
-        .iter()
-        .map(|id| card_line(state, *id, db, options));
-    for line in grouped_lines(lines) {
+    let rows = player.hand.iter().map(|id| {
+        let (head, tail) = card_line(state, *id, db, options);
+        (*id, head, tail)
+    });
+    for line in numbered_rows(rows) {
         out.push_str(&format!("  - {line}\n"));
     }
 }
@@ -396,7 +627,11 @@ fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
 /// revealed card, or a teammate's hand where the format shares it.
 fn push_known_other_hands(out: &mut String, state: &GameState, viewer: PlayerId) {
     let mut lines: Vec<String> = Vec::new();
-    for player in state.players.iter().filter(|player| player.id != viewer) {
+    for player in state
+        .players
+        .iter()
+        .filter(|player| player.id != viewer && players::is_alive(state, player.id))
+    {
         let known: Vec<String> = player
             .hand
             .iter()
@@ -425,12 +660,17 @@ fn push_known_other_hands(out: &mut String, state: &GameState, viewer: PlayerId)
 
 fn push_graveyards(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- GRAVEYARDS ---\n");
-    for player in &state.players {
-        let names = grouped_lines(
+    // CR 800.4a: an eliminated player's cards left the game with them.
+    for player in state
+        .players
+        .iter()
+        .filter(|player| players::is_alive(state, player.id))
+    {
+        let names = numbered_rows(
             state
                 .graveyard_of(player.id)
                 .iter()
-                .filter_map(|id| object_name(state, *id)),
+                .filter_map(|id| object_name(state, *id).map(|name| (*id, name, String::new()))),
         );
         out.push_str(&format!(
             "{}: {}\n",
@@ -448,14 +688,22 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
     // CR 406.1: exile is a public zone, but face-down exiled cards are not
     // public. The filtered state has already replaced any name this seat may not
     // read, so rendering names here cannot leak.
+    //
+    // CR 800.4a: when a player leaves the game, every object they own leaves
+    // with them. The engine parks those objects in exile; they are not exiled
+    // cards anyone can interact with, so they are not listed as such.
     let names: Vec<String> = state
         .exile
         .iter()
         .filter_map(|id| {
             let object = state.objects.get(id)?;
+            if !players::is_alive(state, object.owner) {
+                return None;
+            }
             Some(format!(
-                "{} (owned by {})",
+                "{} (Object {}, owned by {})",
                 one_line(&object.name),
+                id.0,
                 seat_label(object.owner, viewer)
             ))
         })
@@ -471,16 +719,38 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
 /// A battlefield permanent: identity plus the state that changes how it plays.
 fn permanent_line(
     state: &GameState,
+    views: &DerivedViews,
     id: ObjectId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
-) -> String {
+) -> (String, String) {
     let Some(object) = state.objects.get(&id) else {
-        return format!("object #{}", id.0);
+        return ("object".to_string(), String::new());
     };
-    let mut parts = vec![one_line(&object.name)];
+    // CR 707.2: a copy takes the copied object's name and text, so on its
+    // own it reads exactly like what it copies. The engine's copy
+    // classification (`copied_permanents`, which already leaves face-down
+    // permanents out) marks it, with the permanent's own name when that
+    // differs: "Aurora Shifter, copying Construct".
+    let is_copy = views.copied_permanents.binary_search(&id).is_ok();
+    let own_name = one_line(&object.base_name);
+    let mut parts = vec![
+        if is_copy && !own_name.is_empty() && own_name != one_line(&object.name) {
+            format!("{own_name}, copying {}", one_line(&object.name))
+        } else {
+            one_line(&object.name)
+        },
+    ];
+    // CR 111.1: a token is not a card, which "nontoken" and "token" effects
+    // and the rules for leaving the battlefield (CR 111.7) turn on.
+    if object.is_token {
+        parts.push("token".to_string());
+    }
+    if is_copy {
+        parts.push("copy".to_string());
+    }
 
-    let type_line = type_line_text(&object.card_types);
+    let type_line = board_type_line(state, &object.card_types, &object.base_card_types);
     if !type_line.is_empty() {
         parts.push(type_line);
     }
@@ -491,9 +761,13 @@ fn permanent_line(
         parts.push(format!("loyalty {loyalty}"));
     }
     parts.push(if object.tapped { "tapped" } else { "untapped" }.to_string());
-    if object.summoning_sick {
-        // CR 302.6: only matters for attacking and {T} abilities, but it is the
-        // single most common reason a plausible play is illegal.
+    // CR 302.6: summoning sickness restricts creatures only — a land or a
+    // Treasure that entered this turn can tap at once — and haste lifts it
+    // (CR 702.10). The engine's combat authority answers exactly that
+    // question; `summoning_sick` alone is set on every newly arrived
+    // permanent. It only matters for attacking and {T} abilities, but it is
+    // the single most common reason a plausible play is illegal.
+    if combat::has_summoning_sickness(object) {
         parts.push("summoning sick".to_string());
     }
     if object.face_down {
@@ -517,20 +791,77 @@ fn permanent_line(
         }
     }
     if !object.keywords.is_empty() {
+        // The card's own rules text, read whether or not this prompt shows
+        // it: `keyword_text` quotes a keyword's line from it when the
+        // keyword's parameter has no short printed form.
+        let rules_text = db
+            .and_then(|db| db.get_face_by_name(&object.name))
+            .and_then(|face| face.oracle_text.as_deref());
         parts.push(
             object
                 .keywords
                 .iter()
-                .map(|keyword| format!("{keyword:?}"))
+                .map(|keyword| keyword_text(state, keyword, rules_text))
                 .collect::<Vec<_>>()
                 .join(", "),
         );
     }
-    let mut line = parts.join(" | ");
+    let head = parts.remove(0);
+    let mut tail: String = parts.iter().map(|part| format!(" | {part}")).collect();
     if let Some(text) = oracle_text(object.name.as_str(), db, options) {
-        line.push_str(&format!(" | \"{text}\""));
+        tail.push_str(&format!(" | \"{text}\""));
     }
-    line
+    (head, tail)
+}
+
+/// Each player's command zone: commanders waiting to be cast, with their
+/// commander tax, and emblems.
+///
+/// CR 408.1 + CR 903.6: a commander starts the game in the command zone and
+/// may return there; CR 903.8 adds {2} to its cost for each previous cast
+/// from there. Without this section a seat cannot see that its commander is
+/// castable, nor tell a token copy of it on the battlefield from the card.
+fn push_command_zone(out: &mut String, state: &GameState, viewer: PlayerId) {
+    let mut by_owner: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+    for id in state.command_zone.iter() {
+        let Some(object) = state.objects.get(id) else {
+            continue;
+        };
+        if !players::is_alive(state, object.owner) {
+            continue;
+        }
+        let name = one_line(&object.name);
+        let line = if object.is_commander {
+            let tax = commander::commander_tax(state, *id);
+            if tax == 0 {
+                format!("{name} (Object {}, commander)", id.0)
+            } else {
+                format!("{name} (Object {}, commander, tax {{{tax}}})", id.0)
+            }
+        } else if object.is_emblem {
+            format!("{name} (Object {}, emblem)", id.0)
+        } else {
+            format!("{name} (Object {})", id.0)
+        };
+        by_owner.entry(object.owner.0).or_default().push(line);
+    }
+    if by_owner.is_empty() {
+        return;
+    }
+    out.push_str("\n--- COMMAND ZONE ---\n");
+    for (owner, lines) in by_owner {
+        out.push_str(&format!(
+            "{}: {}\n",
+            seat_label(PlayerId(owner), viewer),
+            lines.join(", ")
+        ));
+    }
+}
+
+/// Whether `subtypes` holds every one of a non-empty `wanted` list.
+fn has_every<'a>(subtypes: &[String], wanted: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut wanted = wanted.into_iter().peekable();
+    wanted.peek().is_some() && wanted.all(|wanted| subtypes.iter().any(|subtype| subtype == wanted))
 }
 
 /// A card in hand: what it is and what it costs, which is the pair that decides
@@ -540,9 +871,9 @@ fn card_line(
     id: ObjectId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
-) -> String {
+) -> (String, String) {
     let Some(object) = state.objects.get(&id) else {
-        return format!("object #{}", id.0);
+        return ("object".to_string(), String::new());
     };
     let mut parts = vec![one_line(&object.name)];
     let cost = mana_cost_text(&object.mana_cost);
@@ -556,33 +887,707 @@ fn card_line(
     if let (Some(power), Some(toughness)) = (object.power, object.toughness) {
         parts.push(format!("{power}/{toughness}"));
     }
-    let mut line = parts.join(" | ");
+    let head = parts.remove(0);
+    let mut tail: String = parts.iter().map(|part| format!(" | {part}")).collect();
     if let Some(text) = oracle_text(object.name.as_str(), db, options) {
-        line.push_str(&format!(" | \"{text}\""));
+        tail.push_str(&format!(" | \"{text}\""));
     }
-    line
+    (head, tail)
 }
 
+/// `2 +1/+1 counters, 1 everything counter`.
 fn counter_text(object: &engine::game::game_object::GameObject) -> String {
     if object.counters.is_empty() {
         return String::new();
     }
     // `BTreeMap` for a deterministic order: `counters` is a `HashMap`, and an
-    // unordered render would make the decision fingerprint unstable.
+    // unordered render would make the decision fingerprint unstable. The
+    // engine's player-facing counter phrase ("+1/+1", "charge"), not its
+    // serialization key or Rust variant name.
     let ordered: BTreeMap<String, u32> = object
         .counters
         .iter()
         .filter(|(_, count)| **count > 0)
-        .map(|(kind, count)| (format!("{kind:?}"), *count))
+        .map(|(kind, count)| (one_line(&kind.display_phrase()), *count))
         .collect();
-    if ordered.is_empty() {
-        return String::new();
-    }
     ordered
         .into_iter()
-        .map(|(kind, count)| format!("{count} {kind} counter(s)"))
+        .map(|(kind, count)| match count {
+            1 => format!("1 {kind} counter"),
+            count => format!("{count} {kind} counters"),
+        })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// A keyword as a player reads it: `Flying`, `Islandwalk`, `Crew 1`,
+/// `Kicker {2}{R}`, `Annihilator 2`, `Protection from red`, `Ward—Pay 2 life`.
+///
+/// The engine's `Display` names most keywords as printed, and falls back to
+/// the Rust `Debug` form for the ones it has no label for yet — which for a
+/// parameterized keyword is a struct dump ("Crew { power: 1, once_per_turn:
+/// None }") that means nothing to a player. Keywords whose parameter is a
+/// quality or a structured cost (protection, hexproof from, ward, flashback,
+/// cycling) are spelled here from their typed parameters. Any other keyword
+/// is read from its serialized payload, which for these keywords is a number
+/// ("Annihilator 2", "Dredge 3") or a mana cost ("Ninjutsu {1}{U}"); only a
+/// keyword whose parameter is neither is named by its kind alone. The
+/// parameter matters even beside the rules text: a granted keyword (Mother
+/// of Runes' protection) is in no rules text on the permanent, and the
+/// lowest difficulty is shown no rules text at all.
+///
+/// A few keyword parameters are a quality, a count or a filter with no short
+/// printed form of their own (a disguise cost reduced "for each instant and
+/// sorcery card in your graveyard", craft's materials, what an Aura can
+/// enchant). For those the card's own line is quoted from `rules_text`
+/// when the card prints the keyword; a granted keyword falls back to a
+/// structural rendering that still states the parameter.
+fn keyword_text(state: &GameState, keyword: &Keyword, rules_text: Option<&str>) -> String {
+    let name = || variant_name(keyword);
+    let own_words = || rules_line(rules_text, &name());
+    let mana = |cost: &ManaCost| with_mana_cost(&name(), cost, rules_text);
+    let non_mana = |cost: &AbilityCost| format!("{}—{}", name(), cost_text(state, cost));
+    // Exhaustive by design: a keyword added to the engine does not compile
+    // here until it says how its parameter is printed.
+    match keyword {
+        // No parameter: the engine's label, or the variant name where the
+        // engine has none yet.
+        Keyword::Flying
+        | Keyword::FirstStrike
+        | Keyword::DoubleStrike
+        | Keyword::Trample
+        | Keyword::TrampleOverPlaneswalkers
+        | Keyword::Deathtouch
+        | Keyword::Lifelink
+        | Keyword::Vigilance
+        | Keyword::Haste
+        | Keyword::Reach
+        | Keyword::Defender
+        | Keyword::Menace
+        | Keyword::Indestructible
+        | Keyword::Hexproof
+        | Keyword::Shroud
+        | Keyword::Flash
+        | Keyword::Fear
+        | Keyword::Intimidate
+        | Keyword::Skulk
+        | Keyword::Shadow
+        | Keyword::Horsemanship
+        | Keyword::Wither
+        | Keyword::Infect
+        | Keyword::Prowess
+        | Keyword::Undying
+        | Keyword::Persist
+        | Keyword::Cascade
+        | Keyword::Exalted
+        | Keyword::Flanking
+        | Keyword::Evolve
+        | Keyword::Extort
+        | Keyword::Exploit
+        | Keyword::Explore
+        | Keyword::Ascend
+        | Keyword::Storied
+        | Keyword::StartYourEngines
+        | Keyword::Soulbond
+        | Keyword::Convoke
+        | Keyword::Waterbend
+        | Keyword::Delve
+        | Keyword::Devoid
+        | Keyword::Changeling
+        | Keyword::Phasing
+        | Keyword::Battlecry
+        | Keyword::Decayed
+        | Keyword::Unleash
+        | Keyword::Riot
+        | Keyword::LivingWeapon
+        | Keyword::JobSelect
+        | Keyword::TotemArmor
+        | Keyword::Banding
+        | Keyword::Epic
+        | Keyword::Fuse
+        | Keyword::Gravestorm
+        | Keyword::Haunt
+        | Keyword::Improvise
+        | Keyword::Ingest
+        | Keyword::Melee
+        | Keyword::Mentor
+        | Keyword::Myriad
+        | Keyword::Provoke
+        | Keyword::Rebound
+        | Keyword::Retrace
+        | Keyword::SplitSecond
+        | Keyword::Storm
+        | Keyword::Totem
+        | Keyword::Spree
+        | Keyword::Tiered
+        | Keyword::Ravenous
+        | Keyword::Daybound
+        | Keyword::Nightbound
+        | Keyword::Enlist
+        | Keyword::ReadAhead
+        | Keyword::Compleated
+        | Keyword::Conspire
+        | Keyword::Demonstrate
+        | Keyword::Dethrone
+        | Keyword::DoubleTeam
+        | Keyword::LivingMetal
+        | Keyword::Bargain
+        | Keyword::Sunburst
+        | Keyword::Training
+        | Keyword::Assist
+        | Keyword::Augment
+        | Keyword::Aftermath
+        | Keyword::JumpStart
+        | Keyword::Cipher
+        | Keyword::Undaunted
+        | Keyword::Paradigm
+        | Keyword::Station
+        | Keyword::ForMirrodin
+        | Keyword::Increment => unit_keyword_text(keyword),
+        // A number: "Annihilator 2", "Dredge 3".
+        Keyword::Afflict(count)
+        | Keyword::StartingIntensity(count)
+        | Keyword::Dredge(count)
+        | Keyword::Modular(count)
+        | Keyword::Renown(count)
+        | Keyword::Fabricate(count)
+        | Keyword::Annihilator(count)
+        | Keyword::Bushido(count)
+        | Keyword::Frenzy(count)
+        | Keyword::Tribute(count)
+        | Keyword::Afterlife(count)
+        | Keyword::Fading(count)
+        | Keyword::Vanishing(count)
+        | Keyword::Rampage(count)
+        | Keyword::Absorb(count)
+        | Keyword::Casualty(count)
+        | Keyword::Hideaway(count)
+        | Keyword::Ripple(count)
+        | Keyword::Discover(count)
+        | Keyword::Poisonous(count)
+        | Keyword::Amplify(count)
+        | Keyword::Graft(count)
+        | Keyword::Toxic(count)
+        | Keyword::Saddle(count)
+        | Keyword::Teamwork(count)
+        | Keyword::Soulshift(count)
+        | Keyword::Backup(count) => {
+            format!("{} {count}", name())
+        }
+        // A mana cost: "Ninjutsu {1}{U}", "Equip {0}".
+        Keyword::Unearth(cost)
+        | Keyword::Reconfigure(cost)
+        | Keyword::Kicker(cost)
+        | Keyword::Equip(cost)
+        | Keyword::Ninjutsu(cost)
+        | Keyword::CommanderNinjutsu(cost)
+        | Keyword::Prowl(cost)
+        | Keyword::Megamorph(cost)
+        | Keyword::Mayhem(cost)
+        | Keyword::Madness(cost)
+        | Keyword::Miracle(cost)
+        | Keyword::Dash(cost)
+        | Keyword::Harmonize(cost)
+        | Keyword::Foretell(cost)
+        | Keyword::Mutate(cost)
+        | Keyword::Disturb(cost)
+        | Keyword::Overload(cost)
+        | Keyword::Spectacle(cost)
+        | Keyword::Surge(cost)
+        | Keyword::Encore(cost)
+        | Keyword::Outlast(cost)
+        | Keyword::Scavenge(cost)
+        | Keyword::Fortify(cost)
+        | Keyword::Plot(cost)
+        | Keyword::Offspring(cost)
+        | Keyword::LevelUp(cost)
+        | Keyword::Warp(cost)
+        | Keyword::Sneak(cost)
+        | Keyword::WebSlinging(cost)
+        | Keyword::Squad(cost)
+        | Keyword::Transmute(cost)
+        | Keyword::Transfigure(cost)
+        | Keyword::Recover(cost)
+        | Keyword::Cleave(cost)
+        | Keyword::Replicate(cost)
+        | Keyword::MoreThanMeetsTheEye(cost)
+        | Keyword::Freerunning(cost)
+        | Keyword::Specialize(cost) => mana(cost),
+        // A mana or other cost: "Echo {2}{R}", "Cycling—Pay 2 life".
+        Keyword::Bestow(BestowCost::Mana(cost))
+        | Keyword::Embalm(EmbalmCost::Mana(cost))
+        | Keyword::Eternalize(EternalizeCost::Mana(cost))
+        | Keyword::Cycling(CyclingCost::Mana(cost))
+        | Keyword::Flashback(FlashbackCost::Mana(cost))
+        | Keyword::Morph(MorphCost::Mana(cost))
+        | Keyword::Escape(EscapeCost::Mana(cost))
+        | Keyword::Evoke(EvokeCost::Mana(cost))
+        | Keyword::Blitz(BlitzCost::Mana(cost))
+        | Keyword::Buyback(BuybackCost::Mana(cost))
+        | Keyword::Echo(EchoCost::Mana(cost))
+        | Keyword::Entwine(EntwineCost::Mana(cost)) => mana(cost),
+        Keyword::Bestow(BestowCost::NonMana(cost))
+        | Keyword::Embalm(EmbalmCost::NonMana(cost))
+        | Keyword::Eternalize(EternalizeCost::NonMana(cost))
+        | Keyword::Cycling(CyclingCost::NonMana(cost))
+        | Keyword::Flashback(FlashbackCost::NonMana(cost))
+        | Keyword::Morph(MorphCost::NonMana(cost))
+        | Keyword::Escape(EscapeCost::NonMana(cost))
+        | Keyword::Evoke(EvokeCost::NonMana(cost))
+        | Keyword::Blitz(BlitzCost::NonMana(cost))
+        | Keyword::Buyback(BuybackCost::NonMana(cost))
+        | Keyword::Echo(EchoCost::NonMana(cost))
+        | Keyword::Entwine(EntwineCost::NonMana(cost)) => non_mana(cost),
+        Keyword::Disguise(DisguiseCost::Mana(cost)) => mana(cost),
+        // CR 702.168a + CR 601.2f: "This cost is reduced by {N} for each ...".
+        Keyword::Disguise(DisguiseCost::Reduced { cost, reduction }) => {
+            own_words().unwrap_or_else(|| {
+                let more_or_less = match reduction.mode {
+                    CostModifyMode::Raise => "more",
+                    CostModifyMode::Reduce | CostModifyMode::Minimum => "less",
+                };
+                let mut text = format!(
+                    "{}, costs {{{}}} {more_or_less} for each {}",
+                    mana(cost),
+                    reduction.amount_per,
+                    value_words(state, &reduction.count)
+                );
+                if reduction.condition.is_some() {
+                    text.push_str(" (only while its condition holds)");
+                }
+                text
+            })
+        }
+        // CR 702.119a: emerge sacrifices a creature unless it names another
+        // quality.
+        Keyword::Emerge(emerge) => {
+            if emerge == &EmergeCost::creature(emerge.mana_cost.clone()) {
+                mana(&emerge.mana_cost)
+            } else {
+                own_words().unwrap_or_else(|| {
+                    format!(
+                        "{}, sacrificing {}",
+                        mana(&emerge.mana_cost),
+                        value_words(state, &emerge.sacrifice_filter)
+                    )
+                })
+            }
+        }
+        // CR 702.24a, CR 702.155a: a cost that may be any cost.
+        Keyword::CumulativeUpkeep(cost) | Keyword::Escalate(cost) => match cost {
+            AbilityCost::Mana { cost } => mana(cost),
+            other => non_mana(other),
+        },
+        Keyword::Mobilize(amount) | Keyword::Firebending(amount) => match amount {
+            QuantityExpr::Fixed { value } => format!("{} {value}", name()),
+            // A counted amount ("Mobilize X, where X is ..."): the card's line.
+            other => {
+                own_words().unwrap_or_else(|| format!("{} {}", name(), value_words(state, other)))
+            }
+        },
+        Keyword::Bloodthirst(BloodthirstValue::Fixed(count)) => format!("Bloodthirst {count}"),
+        Keyword::Bloodthirst(BloodthirstValue::X) => "Bloodthirst X".to_string(),
+        // CR 702.21a: "Ward—[cost]".
+        Keyword::Ward(WardCost::Mana(cost)) => with_mana_cost("Ward", cost, rules_text),
+        // A discard or sacrifice ward cost may name what to discard or
+        // sacrifice ("Discard an enchantment, instant, or sorcery card").
+        Keyword::Ward(
+            cost @ (WardCost::Discard {
+                filter: Some(_), ..
+            }
+            | WardCost::Sacrifice { .. }),
+        ) => own_words().unwrap_or_else(|| format!("Ward—{}", ward_cost_text(state, cost))),
+        Keyword::Ward(cost) => format!("Ward—{}", ward_cost_text(state, cost)),
+        // CR 702.16a: "protection from [quality]".
+        Keyword::Protection(target) => {
+            let structural = format!("Protection from {}", protection_text(state, target));
+            // A quality with no short printed form (Reaver Titan's "mana
+            // value 3 or less"): the card's own line, when it prints one.
+            let printed_form = match target {
+                ProtectionTarget::Filter(_) => false,
+                ProtectionTarget::FromPlayer(player) => {
+                    matches!(player, ControllerRef::You | ControllerRef::Opponent)
+                }
+                _ => true,
+            };
+            if printed_form {
+                structural
+            } else {
+                own_words().unwrap_or(structural)
+            }
+        }
+        // CR 702.11d: "hexproof from [quality]".
+        Keyword::HexproofFrom(filter) => format!("Hexproof from {}", hexproof_text(filter)),
+        Keyword::Crew {
+            power,
+            once_per_turn: None,
+        } => format!("Crew {power}"),
+        Keyword::Crew {
+            power,
+            once_per_turn: Some(_),
+        } => format!("Crew {power} (once each turn)"),
+        Keyword::Suspend { count, cost }
+        | Keyword::Reinforce { count, cost }
+        | Keyword::Awaken { count, cost }
+        | Keyword::Impending {
+            counters: count,
+            cost,
+        } => format!("{} {count}—{}", name(), mana_cost_text(cost)),
+        Keyword::Prototype {
+            cost,
+            power: Some(power),
+            toughness: Some(toughness),
+        } => format!("Prototype {} — {power}/{toughness}", mana_cost_text(cost)),
+        // Without both numbers there is no P/T to state.
+        Keyword::Prototype {
+            cost,
+            power: None,
+            toughness: _,
+        }
+        | Keyword::Prototype {
+            cost,
+            power: _,
+            toughness: None,
+        } => mana(cost),
+        // CR 702.167a: "Craft with [materials] [cost]".
+        Keyword::Craft {
+            cost,
+            materials,
+            count,
+        } => own_words().unwrap_or_else(|| {
+            format!(
+                "{}, exiling {} {}",
+                mana(cost),
+                value_words(state, count),
+                value_words(state, materials)
+            )
+        }),
+        Keyword::Typecycling { cost, subtype } => {
+            with_mana_cost(&format!("{}cycling", one_line(subtype)), cost, rules_text)
+        }
+        Keyword::Splice { subtype, cost } => with_mana_cost(
+            &format!("Splice onto {}", one_line(subtype)),
+            cost,
+            rules_text,
+        ),
+        // CR 702.82a + CR 702.82c: "Devour [quality] N".
+        Keyword::Devour {
+            n,
+            quality: TypeFilter::Creature,
+        } => format!("Devour {n}"),
+        Keyword::Devour { n, quality } => {
+            format!("Devour {} {n}", value_words(state, quality).to_lowercase())
+        }
+        Keyword::EtbCounter {
+            counter_type,
+            count,
+        } => format!(
+            "Enters with {count} {} counter{}",
+            one_line(&counter_type.display_phrase()),
+            if *count == 1 { "" } else { "s" }
+        ),
+        Keyword::Champion(quality) => format!("Champion a {}", one_line(quality)),
+        Keyword::Offering(quality) => format!("{} offering", one_line(quality)),
+        Keyword::Unknown(text) => one_line(text),
+        Keyword::Landwalk(_) | Keyword::BandsWithOther(_) => keyword.to_string(),
+        Keyword::Partner(PartnerType::With(partner)) => {
+            format!("Partner with {}", one_line(partner))
+        }
+        Keyword::Gift(kind) => {
+            format!(
+                "Gift a {}",
+                humanize_identifier(&format!("{kind:?}")).to_lowercase()
+            )
+        }
+        // CR 702.124: the partner variant is its name ("Friends forever",
+        // "Choose a Background").
+        Keyword::Partner(PartnerType::Generic) => "Partner".to_string(),
+        Keyword::Partner(other) => humanize_identifier(&format!("{other:?}")),
+        // The quality these name (what an Aura enchants, what affinity counts,
+        // a companion's deck condition) is a filter with no short printed
+        // form; the card's own line states it.
+        Keyword::Companion(condition) => {
+            own_words().unwrap_or_else(|| format!("Companion—{}", value_words(state, condition)))
+        }
+        Keyword::Enchant(filter) => {
+            own_words().unwrap_or_else(|| format!("Enchant {}", value_words(state, filter)))
+        }
+        Keyword::Affinity(filter) => {
+            own_words().unwrap_or_else(|| format!("Affinity for {}", value_words(state, filter)))
+        }
+    }
+}
+
+/// The line of `rules_text` that prints the keyword `name` ("Disguise {5}{R}.
+/// This cost is reduced by {1} for each ..."), without reminder text: the
+/// card's own words for a parameter with no short printed form.
+fn rules_line(rules_text: Option<&str>, name: &str) -> Option<String> {
+    let name = name.to_lowercase();
+    rules_text?.lines().find_map(|line| {
+        // A keyword line may open with an ability or flavor word ("Void
+        // Shields — Protection from ..."); the keyword starts after it.
+        let line = line.trim_start();
+        let line = match line.split_once(" — ") {
+            Some((_, after)) if !line.to_lowercase().starts_with(&name) => after,
+            _ => line,
+        };
+        let lower = line.to_lowercase();
+        let rest = lower.strip_prefix(&name)?;
+        // The keyword itself, not a word that starts with it.
+        if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let without_reminder = match line.find(" (") {
+            Some(at) if line.trim_end().ends_with(')') => &line[..at],
+            _ => line,
+        };
+        Some(clamp_text(&one_line(without_reminder), KEYWORD_LINE_BUDGET))
+    })
+}
+
+/// Characters kept of a keyword line quoted from rules text.
+const KEYWORD_LINE_BUDGET: usize = 200;
+
+/// An engine value (a count, a filter, a condition) described from its
+/// fields, for a keyword parameter the card's rules text does not supply.
+fn value_words(state: &GameState, value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .map(|value| describe_tagged(state, &value))
+        .unwrap_or_default()
+}
+
+/// A keyword's own name, from its variant: "Cumulative Upkeep".
+fn variant_name(keyword: &Keyword) -> String {
+    match serde_json::to_value(keyword) {
+        Ok(serde_json::Value::String(variant)) => humanize_identifier(&variant),
+        Ok(serde_json::Value::Object(fields)) => fields.keys().next().map_or_else(
+            || unit_keyword_text(keyword),
+            |variant| humanize_identifier(variant),
+        ),
+        _ => unit_keyword_text(keyword),
+    }
+}
+
+/// The engine's `Display` label, or the keyword's kind where the engine has
+/// no label and falls back to `Debug`.
+fn unit_keyword_text(keyword: &Keyword) -> String {
+    let shown = keyword.to_string();
+    if shown == format!("{keyword:?}") {
+        humanize_identifier(&format!("{:?}", keyword.kind()))
+    } else {
+        shown
+    }
+}
+
+/// `Kicker {2}{R}`; the bare name for a cost with no printed form.
+///
+/// A zero cost is printed: "Equip {0}" and "Cycling {0}" are real costs. The
+/// one zero that is not is an {X} the parser could not keep (Thieving
+/// Skydiver's "Kicker {X}", stored as {0}); a keyword cost carries nothing
+/// that tells the two apart. So when the stored cost is {0} and the card's
+/// own line for the keyword prints a cost with an {X}, that printed cost is
+/// used ("Kicker {X}"); when the card's text has an {X} but no keyword line
+/// to read it from, the cost is left out rather than stated as {0}.
+fn with_mana_cost(name: &str, cost: &ManaCost, rules_text: Option<&str>) -> String {
+    match mana_cost_text(cost).as_str() {
+        // No printed form at all (a self-referential placeholder).
+        "" => name.to_string(),
+        "{0}" => match printed_keyword_cost(rules_text, name) {
+            Some(printed) if printed.contains("{X}") => format!("{name} {printed}"),
+            _ if rules_text.is_some_and(|text| text.contains("{X}")) => name.to_string(),
+            _ => format!("{name} {{0}}"),
+        },
+        printed => format!("{name} {printed}"),
+    }
+}
+
+/// `{X}` from "Kicker {X} (You may pay ...)": the mana symbols the card's own
+/// line prints right after the keyword `name`.
+fn printed_keyword_cost(rules_text: Option<&str>, name: &str) -> Option<String> {
+    let line = rules_line(rules_text, name)?;
+    let rest = line.get(name.len()..)?.trim_start();
+    let mut printed = String::new();
+    let mut symbols = rest;
+    while let Some(after_open) = symbols.strip_prefix('{') {
+        let close = after_open.find('}')?;
+        printed.push('{');
+        printed.push_str(&after_open[..close]);
+        printed.push('}');
+        symbols = &after_open[close + 1..];
+    }
+    (!printed.is_empty()).then_some(printed)
+}
+
+/// CR 702.21a: a ward cost after "Ward—".
+fn ward_cost_text(state: &GameState, cost: &WardCost) -> String {
+    let some = |count: u32, one: &str, many: &str| match count {
+        1 => one.to_string(),
+        count => format!("{count} {many}"),
+    };
+    match cost {
+        WardCost::Mana(cost) => match mana_cost_text(cost).as_str() {
+            "" => "Pay its mana cost".to_string(),
+            printed => printed.to_string(),
+        },
+        WardCost::PayLife(life) => format!("Pay {life} life"),
+        WardCost::PayLifeEqualToPower => "Pay life equal to its power".to_string(),
+        WardCost::Discard {
+            count,
+            filter: None,
+            selection,
+        } => format!(
+            "Discard {}{}",
+            some(*count, "a card", "cards"),
+            random_suffix(selection)
+        ),
+        WardCost::Discard {
+            count,
+            filter: Some(filter),
+            selection,
+        } => format!(
+            "Discard {} matching {}{}",
+            some(*count, "a card", "cards"),
+            value_words(state, filter),
+            random_suffix(selection)
+        ),
+        WardCost::Sacrifice { count, filter } => format!(
+            "Sacrifice {} matching {}",
+            some(*count, "a permanent", "permanents"),
+            value_words(state, filter)
+        ),
+        WardCost::Waterbend(cost) => format!("Waterbend {}", mana_cost_text(cost)),
+        WardCost::Compound(costs) => costs
+            .iter()
+            .map(|cost| ward_cost_text(state, cost))
+            .collect::<Vec<_>>()
+            .join(", "),
+        WardCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => {
+            let kind = counter_kind.to_string().to_lowercase();
+            format!(
+                "Get {count} {kind} counter{}",
+                if *count == 1 { "" } else { "s" }
+            )
+        }
+    }
+}
+
+/// " at random" for a discard chosen at random (CR 701.9b).
+fn random_suffix(selection: &CardSelectionMode) -> &'static str {
+    match selection {
+        CardSelectionMode::Random => " at random",
+        CardSelectionMode::Chosen => "",
+    }
+}
+
+/// "red", "creatures", "everything": what a protection keyword protects from.
+fn protection_text(state: &GameState, target: &ProtectionTarget) -> String {
+    match target {
+        ProtectionTarget::Color(color) => color_word(*color),
+        ProtectionTarget::CardType(card_type) => plural_type(card_type),
+        ProtectionTarget::Quality(quality) => one_line(quality),
+        ProtectionTarget::Multicolored => "multicolored".to_string(),
+        ProtectionTarget::ChosenColor => "the chosen color".to_string(),
+        ProtectionTarget::ChosenCardType => "the chosen card type".to_string(),
+        ProtectionTarget::ChosenPlayer => "the chosen player".to_string(),
+        ProtectionTarget::Everything => "everything".to_string(),
+        ProtectionTarget::Filter(filter) => value_words(state, filter),
+        ProtectionTarget::FromPlayer(player) => match player {
+            ControllerRef::You => "you".to_string(),
+            ControllerRef::Opponent => "each opponent".to_string(),
+            other => value_words(state, other).to_lowercase(),
+        },
+        ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity) => {
+            "each color outside its controller's commanders' color identity".to_string()
+        }
+    }
+}
+
+/// "red", "artifacts": what a hexproof-from keyword is hexproof from.
+fn hexproof_text(filter: &HexproofFilter) -> String {
+    match filter {
+        HexproofFilter::Color(color) => color_word(*color),
+        HexproofFilter::CardType(card_type) => plural_type(card_type),
+        HexproofFilter::Quality(quality) => one_line(quality),
+        HexproofFilter::ChosenColor => "the chosen color".to_string(),
+    }
+}
+
+fn color_word(color: ManaColor) -> String {
+    format!("{color:?}").to_lowercase()
+}
+
+/// "Creature" -> "creatures", as protection and hexproof from a card type
+/// are printed.
+fn plural_type(card_type: &str) -> String {
+    let lower = one_line(card_type).to_lowercase();
+    // Only a single card-type word is pluralized; a longer phrase is printed
+    // as written, without a trailing period.
+    if lower.contains(' ') || !lower.chars().all(|c| c.is_alphabetic() || c == '-') {
+        return lower.trim_end_matches('.').to_string();
+    }
+    if lower.ends_with('s') {
+        lower
+    } else if lower.ends_with('y') {
+        format!("{}ies", &lower[..lower.len() - 1])
+    } else {
+        format!("{lower}s")
+    }
+}
+
+/// The type line as the board shows it, with an object that has every
+/// creature type, or every land type, saying so in two words instead of
+/// listing hundreds.
+///
+/// CR 205.3m + CR 702.73a: "every creature type" (Changeling, Omo's
+/// everything counter) gives the object all creature types; the engine
+/// grants them as the explicit list `GameState::all_creature_types`, so the
+/// rendered type line of such a creature runs to hundreds of words. CR
+/// 205.3i likewise for land types (`LAND_SUBTYPES`).
+///
+/// The compact form is used only when the types were GRANTED, i.e. the
+/// permanent's printed subtypes (`base_card_types`) do not already hold the
+/// whole list. Without a card database the engine fills
+/// `all_creature_types` from the loaded decks alone, so a short list could
+/// otherwise match an ordinary printed "Elf Warrior" and call it every
+/// creature type.
+fn board_type_line(state: &GameState, card_type: &CardType, printed: &CardType) -> String {
+    let granted_every = |all: &[&str]| {
+        has_every(&card_type.subtypes, all.iter().copied())
+            && !has_every(&printed.subtypes, all.iter().copied())
+    };
+    let creature_types: Vec<&str> = state
+        .all_creature_types
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let every_creature = granted_every(&creature_types);
+    let every_land = granted_every(LAND_SUBTYPES);
+    if !every_creature && !every_land {
+        return type_line_text(card_type);
+    }
+    let mut compact = card_type.clone();
+    compact.subtypes.retain(|subtype| {
+        !(every_creature && state.all_creature_types.contains(subtype)
+            || every_land && LAND_SUBTYPES.contains(&subtype.as_str()))
+    });
+    let mut line = type_line_text(&compact);
+    let mut every = Vec::new();
+    if every_creature {
+        every.push("every creature type");
+    }
+    if every_land {
+        every.push("every land type");
+    }
+    line.push_str(if compact.subtypes.is_empty() {
+        " — "
+    } else {
+        " "
+    });
+    line.push_str(&every.join(" and "));
+    line
 }
 
 fn oracle_text(
@@ -650,7 +1655,8 @@ mod tests {
         }
         let board = rendered(&state, PlayerId(1));
         assert_eq!(board.matches("Mountain").count(), 1, "{board}");
-        assert!(board.contains("Mountain | untapped ×4"), "{board}");
+        assert!(board.contains("  - Mountain (Objects "), "{board}");
+        assert!(board.contains(") | untapped\n"), "{board}");
     }
 
     #[test]
@@ -792,15 +1798,750 @@ mod tests {
             board.contains("--- PENDING DELAYED TRIGGERS ---"),
             "{board}"
         );
+        let lines: Vec<&str> = board
+            .lines()
+            .filter(|line| {
+                line.starts_with(
+                    "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End) — ",
+                )
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{board}");
+        // The effect is part of the line.
+        assert!(lines[0].contains("Gain Life"), "{board}");
+
+        // A second delayed trigger from the same source at the same time,
+        // doing something else, reads differently, and an ability with its
+        // own text is quoted.
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.description = Some("Draw a card.".to_string());
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            Box::new(draw),
+            PlayerId(0),
+            source,
+            true,
+        ));
+        let board = rendered(&state, PlayerId(1));
         assert!(
             board.contains(
-                "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End)"
+                "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End) — Draw a card.\n"
+            ),
+            "{board}"
+        );
+        assert!(board.contains("Gain Life"), "{board}");
+        assert!(
+            !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(1))
+                .contains("PENDING DELAYED TRIGGERS")
+        );
+    }
+
+    /// CR 104.3a + CR 800.4a: a seat that has lost reads as eliminated, with
+    /// no life total, zones or left-the-game cards presented as live state.
+    #[test]
+    fn an_eliminated_seat_reads_as_eliminated_and_nothing_else() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 3);
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(2),
+                format!("Departed {zone:?}"),
+                zone,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Swords to Plowshares".to_string(),
+            Zone::Exile,
+        );
+        let live = rendered(&state, PlayerId(0));
+        // Reach guard: while seat 2 is alive, its zones are on the board.
+        assert!(live.contains("Departed Graveyard"), "{live}");
+        assert!(
+            live.contains("Departed Exile (Object ") && live.contains(", owned by Player 2)"),
+            "{live}"
+        );
+
+        state.players[2].life = -49;
+        state.players[2].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(2));
+        let board = rendered(&state, PlayerId(0));
+        assert!(board.contains("Player 2: eliminated\n"), "{board}");
+        assert!(!board.contains("-49"), "{board}");
+        assert_eq!(board.matches("Player 2").count(), 1, "{board}");
+        assert!(!board.contains("Departed"), "{board}");
+        // The living seats are rendered as before.
+        assert!(board.contains("Player 1: 20 life"), "{board}");
+        assert!(
+            board.contains("Swords to Plowshares (Object ")
+                && board.contains(", owned by Player 1)"),
+            "{board}"
+        );
+    }
+
+    /// CR 113.3b/c: an ability on the stack reads as an ability of its
+    /// source, with its text, and never as the bare name of the permanent it
+    /// came from (which is still on the battlefield). A spell reads as before.
+    #[test]
+    fn stack_abilities_say_what_they_are_and_quote_their_text() {
+        use engine::types::ability::{Effect, ResolvedAbility};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let racer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Filigree Racer".to_string(),
+            Zone::Battlefield,
+        );
+        let bolt = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        let inert = |source| {
+            Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(1),
+            ))
+        };
+        state.stack.push_back(StackEntry {
+            id: bolt,
+            source_id: bolt,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "test".to_string(),
+                        description: None,
+                    },
+                    vec![engine::types::ability::TargetRef::Player(PlayerId(1))],
+                    bolt,
+                    PlayerId(0),
+                ))),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(9000),
+            source_id: racer,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: racer,
+                ability: inert(racer),
+                condition: None,
+                trigger_event: None,
+                description: Some("When this Vehicle enters, you get {E}{E}{E}{E}.".to_string()),
+                source_name: "Filigree Racer".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let mut activated = inert(racer);
+        activated.description = Some("{2}: This Vehicle gets +1/+0.".to_string());
+        state.stack.push_back(StackEntry {
+            id: ObjectId(9001),
+            source_id: racer,
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: racer,
+                ability: activated,
+            },
+        });
+
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains(
+                "1. Activated ability of Filigree Racer (Object 9001, controlled by You): {2}: This Vehicle gets +1/+0.\n"
             ),
             "{board}"
         );
         assert!(
-            !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(1))
-                .contains("PENDING DELAYED TRIGGERS")
+            board.contains(
+                "2. Triggered ability of Filigree Racer (Object 9000, controlled by You): When this Vehicle enters, you get {E}{E}{E}{E}.\n"
+            ),
+            "{board}"
+        );
+        assert!(
+            board.contains(&format!(
+                "3. Lightning Bolt (Object {}, controlled by Player 0) [targeting You]\n",
+                bolt.0
+            )),
+            "{board}"
+        );
+        assert!(!board.contains(". Filigree Racer (controlled"), "{board}");
+    }
+
+    /// CR 302.6: only a creature can be summoning sick. A land that entered
+    /// this turn is not; a creature that did is, unless it has haste.
+    #[test]
+    fn summoning_sickness_is_shown_only_on_creatures_it_restricts() {
+        use engine::types::card_type::CoreType;
+        use engine::types::keywords::Keyword;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut arrive = |name: &str, core: CoreType| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&id).expect("created");
+            object.card_types.core_types = vec![core];
+            object.summoning_sick = true;
+            id
+        };
+        arrive("Adarkar Wastes", CoreType::Land);
+        arrive("Treasure", CoreType::Artifact);
+        arrive("Grizzly Bears", CoreType::Creature);
+        let hasty = arrive("Goblin Guide", CoreType::Creature);
+        state
+            .objects
+            .get_mut(&hasty)
+            .expect("created")
+            .keywords
+            .push(Keyword::Haste);
+
+        let board = rendered(&state, PlayerId(0));
+        let line = |name: &str| {
+            board
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("no {name} in {board}"))
+                .to_string()
+        };
+        assert!(line("Grizzly Bears").contains("summoning sick"), "{board}");
+        assert!(
+            !line("Adarkar Wastes").contains("summoning sick"),
+            "{board}"
+        );
+        assert!(!line("Treasure").contains("summoning sick"), "{board}");
+        assert!(!line("Goblin Guide").contains("summoning sick"), "{board}");
+    }
+
+    /// CR 111.1: a token reads as a token, so it is never confused with a
+    /// same-named card.
+    #[test]
+    fn a_token_is_marked_as_a_token() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        for is_token in [true, false] {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Aetherstorm Roc".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).expect("created").is_token = is_token;
+        }
+        let board = rendered(&state, PlayerId(1));
+        let rows: Vec<&str> = board
+            .lines()
+            .filter(|line| line.starts_with("  - Aetherstorm Roc (Object "))
+            .collect();
+        assert_eq!(rows.len(), 2, "{board}");
+        assert!(rows[0].contains(") | token | "), "{board}");
+        assert!(rows[1].contains(") | untapped"), "{board}");
+    }
+
+    /// CR 707.2: a nontoken permanent copying a token reads as a copy, under
+    /// its own name, and differently from the token it copies.
+    #[test]
+    fn a_copy_reads_as_a_copy_of_what_it_copies() {
+        use engine::game::printed_cards::intrinsic_copiable_values;
+        use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let construct = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Construct".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&construct).expect("created").is_token = true;
+        let shifter = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aurora Shifter".to_string(),
+            Zone::Battlefield,
+        );
+        let values = intrinsic_copiable_values(state.objects.get(&construct).expect("created"));
+        state.add_transient_continuous_effect(
+            shifter,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: shifter },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display: Default::default(),
+            }],
+            None,
+        );
+        // The layer engine's result: the copy wears the copied name.
+        state.objects.get_mut(&shifter).expect("created").name = "Construct".to_string();
+
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains(&format!(
+                "  - Aurora Shifter, copying Construct (Object {}) | copy | ",
+                shifter.0
+            )),
+            "{board}"
+        );
+        assert!(
+            board.contains(&format!(
+                "  - Construct (Object {}) | token | ",
+                construct.0
+            )),
+            "{board}"
+        );
+    }
+
+    /// CR 408.1 + CR 903.8: a commander in the command zone is listed there,
+    /// with its tax once it has been cast from there.
+    #[test]
+    fn commanders_in_the_command_zone_are_listed_with_their_tax() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let satya = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Satya, Aetherflux Genius".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&satya).expect("created").is_commander = true;
+        if !state.command_zone.contains(&satya) {
+            state.command_zone.push_back(satya);
+        }
+        let board = rendered(&state, PlayerId(1));
+        assert!(board.contains("--- COMMAND ZONE ---"), "{board}");
+        assert!(
+            board.contains(&format!(
+                "Player 0: Satya, Aetherflux Genius (Object {}, commander)\n",
+                satya.0
+            )),
+            "{board}"
+        );
+        state.commander_cast_count.insert(satya, 1);
+        let own = rendered(&state, PlayerId(0));
+        assert!(
+            own.contains(&format!(
+                "You: Satya, Aetherflux Genius (Object {}, commander, tax {{2}})\n",
+                satya.0
+            )),
+            "{own}"
+        );
+        // No command zone, no section.
+        assert!(
+            !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(0))
+                .contains("COMMAND ZONE")
+        );
+    }
+
+    /// Keywords, counters and type lines read as printed, never as Rust
+    /// debug output, and an object with every creature type says so in one
+    /// phrase.
+    #[test]
+    fn keywords_counters_and_type_lines_read_as_printed() {
+        use engine::types::card_type::CoreType;
+        use engine::types::counter::CounterType;
+        use engine::types::mana::ManaCostShard;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        state.all_creature_types = ["Advisor", "Elf", "Noble", "Shapeshifter", "Zubera"]
+            .map(str::to_string)
+            .to_vec();
+        let omo = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Omo, Queen of Vesuva".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&omo).expect("created");
+            object.card_types.core_types = vec![CoreType::Creature];
+            object.card_types.subtypes = state.all_creature_types.clone();
+            object
+                .counters
+                .insert(CounterType::Generic("everything".to_string()), 1);
+            object.counters.insert(CounterType::Plus1Plus1, 2);
+            object.keywords = vec![
+                Keyword::FirstStrike,
+                Keyword::Landwalk("Island".to_string()),
+                Keyword::Crew {
+                    power: 1,
+                    once_per_turn: None,
+                },
+                Keyword::Kicker(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 2,
+                }),
+                Keyword::Kicker(ManaCost::zero()),
+                Keyword::Ward(WardCost::PayLife(2)),
+            ];
+        }
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Simic Guildgate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&land).expect("created");
+            object.card_types.core_types = vec![CoreType::Land];
+            object.card_types.subtypes = LAND_SUBTYPES.iter().map(|t| t.to_string()).collect();
+        }
+
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains(&format!(
+                "Omo, Queen of Vesuva (Object {}) | Creature — every creature type | ",
+                omo.0
+            )),
+            "{board}"
+        );
+        assert!(
+            board.contains("2 +1/+1 counters, 1 everything counter"),
+            "{board}"
+        );
+        assert!(
+            board.contains(
+                "First Strike, Islandwalk, Crew 1, Kicker {2}{R}, Kicker {0}, Ward—Pay 2 life"
+            ),
+            "{board}"
+        );
+        assert!(
+            board.contains(&format!(
+                "Simic Guildgate (Object {}) | Land — every land type | ",
+                land.0
+            )),
+            "{board}"
+        );
+        for debug in [
+            "{ ",
+            "(Cost",
+            "Generic(",
+            "Plus1Plus1",
+            "PayLife",
+            "Landwalk(",
+            "counter(s)",
+        ] {
+            assert!(!board.contains(debug), "{debug:?} in {board}");
+        }
+    }
+
+    /// A printed type line that happens to cover a short deck-derived
+    /// creature-type list is printed in full; only granted types compact.
+    #[test]
+    fn a_printed_type_line_is_never_called_every_creature_type() {
+        use engine::types::card_type::CoreType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        state.all_creature_types = ["Elf", "Warrior"].map(str::to_string).to_vec();
+        let elf = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Elvish Warrior".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&elf).expect("created");
+            object.card_types.core_types = vec![CoreType::Creature];
+            object.card_types.subtypes = vec!["Elf".to_string(), "Warrior".to_string()];
+            object.base_card_types = object.card_types.clone();
+        }
+        let board = rendered(&state, PlayerId(1));
+        assert!(board.contains("Creature — Elf Warrior"), "{board}");
+        assert!(!board.contains("every creature type"), "{board}");
+    }
+
+    /// A keyword's parameter survives rendering: a quality, a number or a
+    /// cost is printed with the keyword, never dropped to its bare name.
+    #[test]
+    fn parameterized_keywords_keep_their_parameters() {
+        use engine::types::mana::ManaCostShard;
+
+        let state = GameState::new(FormatConfig::standard(), 2, 3);
+        let blue = |generic| ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic,
+        };
+        for (keyword, printed) in [
+            (
+                Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+                "Protection from red",
+            ),
+            (
+                Keyword::Protection(ProtectionTarget::CardType("Creature".to_string())),
+                "Protection from creatures",
+            ),
+            (
+                Keyword::Protection(ProtectionTarget::Everything),
+                "Protection from everything",
+            ),
+            (
+                Keyword::HexproofFrom(HexproofFilter::CardType("Artifact".to_string())),
+                "Hexproof from artifacts",
+            ),
+            (Keyword::Annihilator(2), "Annihilator 2"),
+            (Keyword::Dredge(3), "Dredge 3"),
+            (Keyword::Bushido(1), "Bushido 1"),
+            (Keyword::Afflict(2), "Afflict 2"),
+            (Keyword::Afterlife(1), "Afterlife 1"),
+            (Keyword::Casualty(2), "Casualty 2"),
+            (Keyword::Ninjutsu(blue(1)), "Ninjutsu {1}{U}"),
+            (Keyword::Unearth(blue(2)), "Unearth {2}{U}"),
+            (Keyword::Madness(blue(0)), "Madness {U}"),
+            (
+                Keyword::Flashback(FlashbackCost::Mana(blue(4))),
+                "Flashback {4}{U}",
+            ),
+            (
+                Keyword::Ward(WardCost::PayLifeEqualToPower),
+                "Ward—Pay life equal to its power",
+            ),
+            (
+                Keyword::Ward(WardCost::Compound(vec![
+                    WardCost::Mana(ManaCost::generic(2)),
+                    WardCost::PayLife(2),
+                ])),
+                "Ward—{2}, Pay 2 life",
+            ),
+        ] {
+            assert_eq!(keyword_text(&state, &keyword, None), printed, "{keyword:?}");
+        }
+    }
+
+    /// Keywords whose parameter is a structured cost keep the cost.
+    #[test]
+    fn structured_keyword_costs_are_printed() {
+        use engine::types::ability::{AbilityCost, QuantityExpr, TargetFilter};
+        use engine::types::mana::ManaCostShard;
+
+        let state = GameState::new(FormatConfig::standard(), 2, 3);
+        let red = |generic| ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic,
+        };
+        for (keyword, printed) in [
+            (
+                Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                }),
+                "Cumulative Upkeep {1}",
+            ),
+            (Keyword::Echo(EchoCost::Mana(red(2))), "Echo {2}{R}"),
+            (
+                Keyword::CumulativeUpkeep(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                }),
+                "Cumulative Upkeep—Pay 1 life",
+            ),
+            (
+                Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(
+                    engine::types::ability::SacrificeCost::count(TargetFilter::SelfRef, 1),
+                )),
+                "Cumulative Upkeep—",
+            ),
+            (
+                Keyword::Suspend {
+                    count: 3,
+                    cost: red(1),
+                },
+                "Suspend 3—{1}{R}",
+            ),
+            (Keyword::Evoke(EvokeCost::Mana(red(0))), "Evoke {R}"),
+        ] {
+            let shown = keyword_text(&state, &keyword, None);
+            assert!(shown.starts_with(printed), "{keyword:?} -> {shown}");
+            assert!(!shown.contains("{ "), "{shown}");
+        }
+    }
+
+    /// CR 702.168a: a disguise cost reduced "for each" something keeps its
+    /// reduction: quoted in the card's words when the card prints it, and
+    /// spelled from the parsed reduction when the keyword is granted.
+    #[test]
+    fn a_reduced_disguise_cost_keeps_its_reduction() {
+        use engine::parser::oracle::parse_oracle_text;
+
+        let line = "Disguise {5}{R}. This cost is reduced by {1} for each instant and \
+                    sorcery card in your graveyard.";
+        let rules = format!(
+            "{line} (You may cast this card face down for {{3}} as a 2/2 creature with ward \
+             {{2}}. Turn it face up any time for its disguise cost.)\nWhen this creature is \
+             turned face up, discard your hand, then draw three cards."
+        );
+        let parsed = parse_oracle_text(
+            &rules,
+            "Fugitive Codebreaker",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Rogue".to_string()],
+        );
+        let disguise = parsed
+            .extracted_keywords
+            .iter()
+            .find(|keyword| matches!(keyword, Keyword::Disguise(DisguiseCost::Reduced { .. })))
+            .unwrap_or_else(|| panic!("no reduced disguise in {:?}", parsed.extracted_keywords))
+            .clone();
+        let state = GameState::new(FormatConfig::standard(), 2, 3);
+
+        assert_eq!(keyword_text(&state, &disguise, Some(&rules)), line);
+        let granted = keyword_text(&state, &disguise, None);
+        assert!(
+            granted.starts_with("Disguise {5}{R}, costs {1} less for each "),
+            "{granted}"
+        );
+        assert!(
+            granted.len() > "Disguise {5}{R}, costs {1} less for each ".len(),
+            "{granted}"
+        );
+    }
+
+    /// CR 702.16a: protection from a quality with no short printed form
+    /// (Reaver Titan's "mana value 3 or less") reads in the card's words, and
+    /// is spelled from the parsed filter when no rules text is at hand.
+    #[test]
+    fn protection_from_a_filtered_quality_keeps_the_quality() {
+        use engine::parser::oracle::parse_oracle_text;
+
+        let rules = "Void Shields — Protection from mana value 3 or less";
+        let parsed = parse_oracle_text(
+            rules,
+            "Reaver Titan",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Robot".to_string()],
+        );
+        let protection = parsed
+            .extracted_keywords
+            .iter()
+            .find(|keyword| matches!(keyword, Keyword::Protection(ProtectionTarget::Filter(_))))
+            .unwrap_or_else(|| panic!("no filtered protection in {:?}", parsed.extracted_keywords))
+            .clone();
+        let state = GameState::new(FormatConfig::standard(), 2, 3);
+        assert_eq!(
+            keyword_text(&state, &protection, Some(rules)),
+            "Protection from mana value 3 or less"
+        );
+        let granted = keyword_text(&state, &protection, None);
+        assert!(granted.starts_with("Protection from "), "{granted}");
+        assert!(!granted.contains("rules text"), "{granted}");
+        assert!(granted.len() > "Protection from ".len(), "{granted}");
+        // A card-type quality that is not one card type word (a parse that
+        // kept the whole phrase) is printed as written, not pluralized.
+        assert_eq!(
+            keyword_text(
+                &state,
+                &Keyword::Protection(ProtectionTarget::CardType(
+                    "mana value 3 or less.".to_string()
+                )),
+                None
+            ),
+            "Protection from mana value 3 or less"
+        );
+    }
+
+    /// A zero cost is a real cost and is printed. Where the stored {0} is
+    /// the parser's placeholder for an {X}, the card's own keyword line
+    /// supplies the printed cost.
+    #[test]
+    fn a_zero_keyword_cost_is_printed_unless_it_stands_for_x() {
+        let state = GameState::new(FormatConfig::standard(), 2, 3);
+        let zero = ManaCost::zero();
+        for (keyword, printed) in [
+            (Keyword::Equip(zero.clone()), "Equip {0}"),
+            (
+                Keyword::Cycling(CyclingCost::Mana(zero.clone())),
+                "Cycling {0}",
+            ),
+            (Keyword::Kicker(zero.clone()), "Kicker {0}"),
+            (Keyword::Ward(WardCost::Mana(zero.clone())), "Ward {0}"),
+        ] {
+            assert_eq!(keyword_text(&state, &keyword, None), printed, "{keyword:?}");
+        }
+        let skydiver = "Kicker {X}. X can't be 0.\nFlying\nWhen this creature enters, if it \
+                        was kicked, gain control of target artifact with mana value X or less.";
+        assert_eq!(
+            keyword_text(&state, &Keyword::Kicker(zero.clone()), Some(skydiver)),
+            "Kicker {X}",
+            "Thieving Skydiver's Kicker {{X}}, stored as {{0}}"
+        );
+        // An {X} elsewhere in the text with no kicker line to read: the
+        // cost is left out rather than stated as {0}.
+        assert_eq!(
+            keyword_text(
+                &state,
+                &Keyword::Kicker(zero),
+                Some("{X}: This creature gets +X/+0.")
+            ),
+            "Kicker"
+        );
+    }
+
+    /// Attackers and blockers are numbered as the options name them, so two
+    /// same-named attackers are told apart in combat too.
+    #[test]
+    fn combat_names_attackers_and_blockers_by_number() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let bear = |state: &mut GameState, owner| {
+            create_object(
+                state,
+                CardId(1),
+                owner,
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let attacker = bear(&mut state, PlayerId(0));
+        let blocker = bear(&mut state, PlayerId(1));
+        let mut combat = CombatState::default();
+        combat.attackers.push(AttackerInfo::new(
+            attacker,
+            AttackTarget::Player(PlayerId(1)),
+            PlayerId(1),
+        ));
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        state.combat = Some(combat);
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains(&format!(
+                "Grizzly Bears (Object {}) attacking You — blocked by Grizzly Bears (Object {})",
+                attacker.0, blocker.0
+            )),
+            "{board}"
         );
     }
 

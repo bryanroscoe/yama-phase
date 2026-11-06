@@ -2,6 +2,19 @@
 
 use engine::types::card_type::CardType;
 use engine::types::mana::ManaCost;
+use engine::types::player::PlayerId;
+
+/// `You` for the seat a prompt belongs to, `Player N` (the engine's 0-based
+/// `PlayerId`) for every other seat. The one authority for naming a seat in a
+/// prompt — the board, the history and the options all call it — so the same
+/// seat never reads two ways in one prompt.
+pub fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
+    if player == viewer {
+        "You".to_string()
+    } else {
+        format!("Player {}", player.0)
+    }
+}
 
 /// Printed-style mana cost, e.g. `{2}{U}{U}`. `{0}` for a zero cost, and an
 /// empty string for a cost that is not a concrete symbol run (a land, or an
