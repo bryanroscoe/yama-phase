@@ -4683,13 +4683,24 @@ mod tests {
         state.waiting_for = WaitingFor::Priority { player: P0 };
 
         assert_eq!(harvest_amount(state, harvest), Some(0));
-        let pre_harvest_cast = engine::ai_support::candidate_actions(state)
-            .into_iter()
-            .find(|candidate| {
-                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
-            })
-            .expect("the engine issues a held-spell cast before resource payment preflight")
-            .action;
+        // CR 601.2f-h + CR 118.3: with an empty graveyard the required exile
+        // can't be paid, so the held spell is not offered at all; a cast
+        // submitted anyway is rejected and rolled back.
+        assert!(
+            !engine::ai_support::candidate_actions(state)
+                .iter()
+                .any(|candidate| matches!(
+                    candidate.action,
+                    GameAction::CastSpell { object_id, .. } if object_id == held_draw
+                )),
+            "the engine does not issue a held-spell cast whose required cost is unpayable"
+        );
+        let pre_harvest_cast = GameAction::CastSpell {
+            object_id: held_draw,
+            card_id: state.objects[&held_draw].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
         let pre_harvest_state = state.clone();
         let mut rejected_state = state.clone();
         let rejected =

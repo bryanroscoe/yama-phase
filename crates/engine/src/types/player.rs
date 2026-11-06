@@ -118,6 +118,12 @@ pub struct Player {
     /// CR 122.1: Energy counters are a kind of counter that a player may have.
     #[serde(default)]
     pub energy: u32,
+    /// CR 107.14 + CR 122.1: Energy counters this player removed this turn,
+    /// whether paid for a cost ("to pay {E}, a player removes one energy
+    /// counter") or lost to an effect. Read by "you've paid or lost N or
+    /// more {E} this turn"; reset at the start of each turn.
+    #[serde(default)]
+    pub energy_paid_or_lost_this_turn: u32,
     #[serde(default)]
     pub life_gained_this_turn: u32,
     #[serde(default)]
@@ -237,6 +243,7 @@ impl Default for Player {
             lands_played_this_turn: 0,
             poison_counters: 0,
             energy: 0,
+            energy_paid_or_lost_this_turn: 0,
             life_gained_this_turn: 0,
             life_lost_this_turn: 0,
             life_lost_last_turn: 0,

@@ -13472,6 +13472,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::EnergyPaidOrLostThisTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             player_scope_unbound_at_fire_time(player)

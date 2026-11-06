@@ -483,6 +483,26 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     }
     let mut pending = pending.clone();
     pending.declared_mana_additions.extend(split.declared);
+    Ok(declared_mana_total_is_payable(
+        state,
+        player,
+        &pending,
+        exile_this_way_cost,
+        split.payment_mode,
+    ))
+}
+
+/// CR 601.2f-h + CR 118.3: whether the mana total `pending` locks in, with
+/// every mana addition declared so far, can be paid. `exile_this_way_cost`
+/// credits the largest reduction an optional exile-this-way cost could earn;
+/// `payment_mode` is a tap-to-pay allowance the declared cost brings with it.
+fn declared_mana_total_is_payable(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    exile_this_way_cost: bool,
+    payment_mode: Option<ConvokeMode>,
+) -> bool {
     // CR 601.2f + CR 702.119a + CR 702.48c: preview against the total the cast
     // will lock in, including the reduction an Emerge or Offering sacrifice
     // already earned, so an optional cost the pool pays beside the reduced
@@ -490,9 +510,9 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     let mut total = super::casting::recompute_pending_mana_total_with(
         state,
         player,
-        &pending,
+        pending,
         pending.ability.chosen_x,
-        &super::casting::CostFinalizeContext::from_pending(&pending),
+        &super::casting::CostFinalizeContext::from_pending(pending),
     );
     // CR 601.2f: An optional exile-this-way cost can make the announced X
     // payable. The declaration preview runs before the cards are selected, so
@@ -509,22 +529,18 @@ pub(crate) fn additional_cost_declaration_is_offerable(
         }
     }
     if total.is_without_paying_mana() {
-        return Ok(true);
+        return true;
     }
-    let can_pay_normally =
-        super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total);
-    if can_pay_normally {
-        return Ok(true);
-    }
-    Ok(split.payment_mode.is_some_and(|mode| {
-        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
-            state,
-            player,
-            pending.object_id,
-            &total,
-            mode,
-        )
-    }))
+    super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total)
+        || payment_mode.is_some_and(|mode| {
+            super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
+                state,
+                player,
+                pending.object_id,
+                &total,
+                mode,
+            )
+        })
 }
 
 fn continue_after_declared_mana_split(
@@ -1407,6 +1423,57 @@ fn next_offerable_kicker_option(
     }
 }
 
+/// CR 601.2f-h + CR 118.3: whether answering the pending `OptionalCostChoice`
+/// with "pay" is a legal action. A further payment of a repeatable optional
+/// cost (squad, replicate, "any number of times") raises the total cost, so it
+/// is offered only while the raised total is still payable; the prompt stays
+/// up so the caster can decline. Every other optional-cost prompt is raised
+/// only once its payment has been found offerable.
+pub(crate) fn optional_cost_choice_pay_offerable(state: &GameState) -> bool {
+    let WaitingFor::OptionalCostChoice {
+        player,
+        cost:
+            AdditionalCost::Optional {
+                cost,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            },
+        pending_cast,
+        ..
+    } = &state.waiting_for
+    else {
+        return true;
+    };
+    let mut preview_state = state.clone();
+    repeatable_payment_offerable(&mut preview_state, *player, pending_cast, cost).unwrap_or(false)
+}
+
+/// CR 601.2f-h + CR 118.3: whether one more payment of `pending`'s repeatable
+/// optional cost `cost` keeps the total payable. As for a kicker
+/// (`next_offerable_kicker_option`), the total is previewed with that payment
+/// recorded on the cast, so cost modifiers that read the payments see it.
+fn repeatable_payment_offerable(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    cost: &AbilityCost,
+) -> Result<bool, EngineError> {
+    let mut preview = pending.clone();
+    match preview.additional_cost_queue.first().cloned() {
+        Some(instance) => preview
+            .ability
+            .context
+            .record_payment_for_instance(&instance, 1),
+        None => preview
+            .ability
+            .context
+            .record_additional_cost_payment(AdditionalCostOrigin::Other, 1),
+    }
+    let prior_pending = state.pending_cast.replace(Box::new(preview));
+    let offerable = additional_cost_declaration_is_offerable(state, player, pending, cost.clone());
+    state.pending_cast = prior_pending;
+    offerable
+}
+
 fn handle_decide_repeatable_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -1431,6 +1498,39 @@ fn handle_decide_repeatable_additional_cost(
     };
 
     if !pay {
+        // CR 601.2h + CR 733.1: declining ends the payments, so the cast goes on
+        // to pay the total they committed it to. Each payment was offered only
+        // while that total was payable; if it no longer is (a mana source was
+        // lost since), the cast can't be completed and is reversed, rather than
+        // left waiting on a choice whose only accepted answer is to cancel.
+        let payments_made = match queued_instance.as_ref() {
+            Some(instance) => pending
+                .ability
+                .context
+                .instance_payment_count_for_ordinal(instance.origin, instance.origin_ordinal),
+            None => pending.ability.context.additional_cost_payment_count,
+        };
+        // The total is judged with the tap-to-pay allowance this cost brings,
+        // as each payment's offer was.
+        // A cost that can't be split has no allowance; declining never fails on it.
+        let tap_payment_mode =
+            split_declared_mana_addition_and_residual(Some(state), Some(&pending), cost.clone())
+                .ok()
+                .and_then(|split| split.payment_mode);
+        if payments_made > 0
+            && !declared_mana_total_is_payable(
+                state,
+                player,
+                &pending,
+                is_exile_any_number_effect_cost(&cost),
+                tap_payment_mode,
+            )
+        {
+            return Err(EngineError::SpellCastReversed {
+                player,
+                pending: Box::new(pending),
+            });
+        }
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
             // CR 601.2b: as for a once-only instance, an emptied queue is
@@ -1442,6 +1542,13 @@ fn handle_decide_repeatable_additional_cost(
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
+    // CR 601.2f-h + CR 118.3: a payment that would raise the total beyond what
+    // the player can pay is not offered; one submitted anyway is refused.
+    if !repeatable_payment_offerable(state, player, &pending, &cost)? {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot pay the additional cost again: the total cost would be unpayable".to_string(),
+        ));
+    }
     if let Some(instance) = queued_instance.as_ref() {
         pending
             .ability
@@ -7871,6 +7978,84 @@ pub(super) fn push_activated_ability_to_stack(
     )
 }
 
+/// CR 107.14 + CR 118.9: The {E} a cast from exile under an
+/// `ExileWithEnergyCost` permission costs ("cast that card by paying an amount
+/// of {E} equal to its mana value rather than paying its mana cost"), or `None`
+/// when the card isn't cast that way. The single authority for the cost
+/// determination, the payment and the castability check, so a cast is offered
+/// only when its energy can be paid and is charged exactly what it was priced.
+///
+/// CR 118.9a: the energy permission is never the elected route, so a cast
+/// whose method brings its own independent alternative cost (`casting_variant`
+/// is such a rider) owes that cost instead, not the energy.
+pub(super) fn exile_energy_cast_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<u32> {
+    let obj = state.objects.get(&object_id)?;
+    (obj.zone == Zone::Exile
+        && !casting_variant.is_independent_alternative_cost_rider()
+        && obj.casting_permissions.iter().any(|p| {
+            matches!(
+                p,
+                crate::types::ability::CastingPermission::ExileWithEnergyCost
+            )
+        }))
+    // CR 202.3d + CR 709.4b: the card is in exile (off the stack), so a
+    // split card's energy cost is its combined mana value.
+    .then(|| obj.effective_mana_value())
+}
+
+/// CR 107.3 + CR 601.2b + CR 601.2f: the activation cost an announcement of
+/// `x` locks in, for pricing an ability before X is announced at its smallest
+/// legal X ("X can't be 0"). Every `{X}` mana symbol, a waterbend cost's
+/// included (CR 701.67a), becomes `x` generic mana, and the legs
+/// [`concretize_chosen_x_cost`] fixes after the announcement (remove X
+/// counters, exile X cards from a graveyard, pay X {E}, pay X life) are fixed
+/// at `x`. The object-counting X legs (sacrifice X permanents, discard or
+/// reveal X cards) are bounded by [`activation_x_legs_admit`] instead. Larger
+/// announcements only cost more.
+pub(super) fn activation_cost_at_announced_x(cost: &AbilityCost, x: u32) -> AbilityCost {
+    let announced_mana = |mana: &ManaCost| {
+        let mut mana = mana.clone();
+        mana.concretize_x(x);
+        mana
+    };
+    match cost {
+        AbilityCost::Mana { cost: mana } if cost_has_x(mana) => AbilityCost::Mana {
+            cost: announced_mana(mana),
+        },
+        AbilityCost::Waterbend { cost: mana } if cost_has_x(mana) => AbilityCost::Waterbend {
+            cost: announced_mana(mana),
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| activation_cost_at_announced_x(cost, x))
+                .collect(),
+        },
+        other => concretize_chosen_x_cost(other, x),
+    }
+}
+
+/// CR 107.3 + CR 601.2b + CR 118.3: whether every X-sized non-mana leg of an
+/// activation cost can be paid with X = `x`. This is the bound the X
+/// announcement itself applies (`additional_cost_x_max`): the permanents that
+/// can be sacrificed, the cards that can be discarded, revealed or exiled, the
+/// counters that can be removed, the life and energy that can be paid.
+pub(super) fn activation_x_legs_admit(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    cost: &AbilityCost,
+    x: u32,
+) -> bool {
+    additional_cost_x_max(state, player, source_id, granting_object, cost)
+        .is_none_or(|max| max >= x)
+}
+
 fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
     match cost {
         AbilityCost::RemoveCounter {
@@ -9441,22 +9626,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
     }
 
     // CR 107.14: If this is an energy-from-exile cast, pay energy before pushing to stack.
-    let energy_cost = state.objects.get(&object_id).and_then(|obj| {
-        if obj.zone == Zone::Exile
-            && obj.casting_permissions.iter().any(|p| {
-                matches!(
-                    p,
-                    crate::types::ability::CastingPermission::ExileWithEnergyCost
-                )
-            })
-        {
-            // CR 202.3d + CR 709.4b: the card is in exile (off the stack), so a
-            // split card's energy cost is its combined mana value.
-            Some(obj.effective_mana_value())
-        } else {
-            None
-        }
-    });
+    let energy_cost = exile_energy_cast_cost(state, object_id, casting_variant);
     if let Some(energy_mv) = energy_cost {
         let mut pending = pending_cast_keeping(
             object_id,
@@ -19910,6 +20080,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -26421,6 +26592,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -26568,6 +26740,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -26684,6 +26857,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -26789,6 +26963,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -26927,6 +27102,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

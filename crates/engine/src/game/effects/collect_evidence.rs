@@ -24,7 +24,7 @@ fn graveyard_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
                 .graveyard_of(p.id)
                 .iter()
                 .copied()
-                .filter(|&id| !super::super::casting::is_spell_being_cast(state, id))
+                .filter(|&id| !super::super::casting::committed_to_cast_in_progress(state, id))
                 .collect()
         })
         .unwrap_or_default()

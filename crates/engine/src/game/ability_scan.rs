@@ -2784,7 +2784,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             aggregate: _,
         } => Axes::NONE,
         QuantityRef::PreviousEffectCount => Axes::NONE,
-        QuantityRef::LifeLostThisTurn { player } => {
+        QuantityRef::LifeLostThisTurn { player }
+        // CR 107.14: the energy paid-or-lost tracker is projected out with the
+        // other per-turn player resource trackers.
+        | QuantityRef::EnergyPaidOrLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,

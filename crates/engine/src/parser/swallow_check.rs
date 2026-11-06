@@ -5612,6 +5612,7 @@ fn detect_duration_this_turn(
                 | QuantityRef::BendTypesThisTurn
                 | QuantityRef::LifeGainedThisTurn { .. }
                 | QuantityRef::CardsDrawnThisTurn { .. }
+                | QuantityRef::EnergyPaidOrLostThisTurn { .. }
                 | QuantityRef::BattlefieldEntriesThisTurn { .. }
                 | QuantityRef::LandsPlayedThisTurn { .. }
                 | QuantityRef::ZoneChangeCountThisTurn { .. }

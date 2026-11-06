@@ -8640,6 +8640,13 @@ pub struct PendingCast {
     /// payment commit so mana abilities can be activated first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_sacrificed_permanents: Vec<DeferredSacrificeSelection>,
+    /// CR 118.10 + CR 601.2g-h: cards in a hand or graveyard kept for this
+    /// cast's own additional cost (a discard, an exile from a zone). They stay
+    /// in their zone while mana abilities are activated, so they still count
+    /// for what reads that zone, but no other cost (a mana ability's discard
+    /// or exile) may use them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved_cost_cards: Vec<ObjectId>,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -9503,6 +9510,7 @@ impl PendingCast {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -31010,7 +31018,16 @@ impl GameState {
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {
-                player.energy = apply_u32_delta(player.energy, *delta)?;
+                let energy = apply_u32_delta(player.energy, *delta)?;
+                // CR 107.14: paying {E} removes energy counters, as does losing
+                // them, so every decrease counts toward "paid or lost this turn".
+                if *delta < 0 {
+                    player.energy_paid_or_lost_this_turn = player
+                        .energy_paid_or_lost_this_turn
+                        .checked_add(delta.unsigned_abs())
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                }
+                player.energy = energy;
             }
             ResolvedPlayerEdit::Counter { kind, delta } => {
                 let count = apply_u32_delta(player.player_counter(kind), *delta)?;
@@ -49066,6 +49083,7 @@ mod tests {
                 convoked_creatures: Vec::new(),
                 delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
+                reserved_cost_cards: Vec::new(),
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
@@ -49616,6 +49634,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            reserved_cost_cards: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

@@ -472,15 +472,34 @@ pub fn resolve_lose_all(
 }
 
 /// CR 122.1: Zero out every counter kind on a single player. Poison counters
-/// live in their own field (CR 104.3d state-based action routing); every other
-/// kind is tracked in the `player_counters` map. Both paths drain to zero and
-/// emit a per-kind `PlayerCounterChanged { delta: -count }` event so replay
-/// and UI can itemize what was removed.
+/// live in their own field (CR 104.3d state-based action routing), energy
+/// counters in theirs (CR 107.14), and every other kind in the
+/// `player_counters` map. Each path drains to zero and emits a per-kind event
+/// (`PlayerCounterChanged` / `EnergyChanged`) so replay and UI can itemize what
+/// was removed.
 fn clear_all_player_counters(
     state: &mut GameState,
     player_id: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 122.1 + CR 107.14: energy counters are counters too. Losing them goes
+    // through the energy edit, so they count as energy lost this turn.
+    let energy = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .expect("counter target must be a live player")
+        .energy;
+    if energy > 0 {
+        let delta = -i32::try_from(energy).unwrap_or(i32::MAX);
+        state
+            .resolve_and_apply_player_edit(player_id, ResolvedPlayerEdit::Energy { delta })
+            .expect("live player energy removal must apply");
+        events.push(GameEvent::EnergyChanged {
+            player: player_id,
+            delta,
+        });
+    }
     let poison = state
         .players
         .iter()

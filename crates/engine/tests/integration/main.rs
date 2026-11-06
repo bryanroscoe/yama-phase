@@ -2193,4 +2193,11 @@ mod token_attack_destination;
 mod windgraces_judgment_one_per_opponent;
 mod zaffai_thunder_conductor_magecraft;
 
+mod another_target_player_trigger;
+mod energy_paid_or_lost_activation;
+mod exile_energy_cast_offer_gate;
+mod lose_all_counters_energy;
 mod priority_after_active_departure;
+mod repeatable_optional_cost_affordability;
+mod required_object_additional_cost_offer_gate;
+mod x_minimum_offer_gate;

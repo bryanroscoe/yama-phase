@@ -372,7 +372,7 @@ pub(crate) fn discard_legs_jointly_payable(
                     .copied()
                     .filter(|&id| {
                         id != source
-                            && !super::casting::is_spell_being_cast(state, id)
+                            && !super::casting::committed_to_cast_in_progress(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -773,7 +773,7 @@ fn object_leg_demand_and_candidates(
                 .iter()
                 .copied()
                 // CR 601.2a: a spell being cast is on the stack.
-                .filter(|&id| !super::casting::is_spell_being_cast(state, id))
+                .filter(|&id| !super::casting::committed_to_cast_in_progress(state, id))
                 .collect(),
         ),
         // CR 702.49a: ninjutsu returns an unblocked attacker the player controls.
@@ -1441,7 +1441,7 @@ impl AbilityCostLegPayability for AbilityCost {
                     .iter()
                     .filter(|&&id| {
                         id != source
-                            && !super::casting::is_spell_being_cast(state, id)
+                            && !super::casting::committed_to_cast_in_progress(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -1966,7 +1966,7 @@ pub(super) fn eligible_exile_cost_objects(
         .with_granting_object(granting_object);
     ids.filter(|&id| {
         id != source
-            && !super::casting::is_spell_being_cast(state, id)
+            && !super::casting::committed_to_cast_in_progress(state, id)
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
@@ -2004,7 +2004,7 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
         .filter(|&id| {
             id != source
                 // CR 601.2a: a spell being cast is on the stack, not in `zone`.
-                && !super::casting::is_spell_being_cast(state, id)
+                && !super::casting::committed_to_cast_in_progress(state, id)
                 && matches_target_filter_in_owner_zone(state, id, filter, &ctx)
         })
         .collect()
