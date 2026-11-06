@@ -33,7 +33,9 @@ use engine::types::player::PlayerId;
 use engine::types::statics::CostModifyMode;
 use engine::types::zones::Zone;
 
-use super::action::{cost_text, describe_tagged, describe_tagged_for, humanize_identifier};
+use super::action::{
+    cost_text, describe_tagged, describe_tagged_for, humanize_identifier, object_label,
+};
 use super::history::{push_history, HistoryBudget, TurnCycle};
 use super::text::{clamp_text, mana_cost_text, one_line, seat_label, type_line_text};
 
@@ -215,7 +217,7 @@ fn stack_entry_line(
             let name = object_name(state, entry.id)
                 .or_else(|| object_name(state, entry.source_id))
                 .unwrap_or_else(|| "unknown".to_string());
-            return format!("{name} (controlled by {controller})");
+            return format!("{name} (Object {}, controlled by {controller})", entry.id.0);
         }
         StackObjectClass::Ability(StackAbilityKind::Activated) => "Activated ability",
         StackObjectClass::Ability(StackAbilityKind::Triggered) => "Triggered ability",
@@ -224,7 +226,10 @@ fn stack_entry_line(
                 || "Combat damage".to_string(),
                 |detail| one_line(&detail.kind_label),
             );
-            return format!("{label} (controlled by {controller})");
+            return format!(
+                "{label} (Object {}, controlled by {controller})",
+                entry.id.0
+            );
         }
     };
     // Keyword actions (Equip, Crew, ...) carry no ability text; their keyword
@@ -237,7 +242,11 @@ fn stack_entry_line(
                 .then(|| detail.kind_label.clone())
         })
     });
-    let head = format!("{kind} of {} (controlled by {controller})", source());
+    let head = format!(
+        "{kind} of {} (Object {}, controlled by {controller})",
+        source(),
+        entry.id.0
+    );
     match text
         .map(|text| one_line(&text))
         .filter(|text| !text.is_empty())
@@ -277,19 +286,19 @@ fn push_combat(out: &mut String, state: &GameState, viewer: PlayerId) {
     }
     out.push_str("\n--- COMBAT ---\n");
     for attacker in &combat.attackers {
-        let name = object_name(state, attacker.object_id).unwrap_or_else(|| "unknown".to_string());
+        // Numbered as the options name them, so a block or a damage order
+        // option maps to its attacker and blockers.
+        let name = object_label(state, attacker.object_id);
         let target = match attacker.attack_target {
             AttackTarget::Player(player) => seat_label(player, viewer),
-            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
-                object_name(state, id).unwrap_or_else(|| "unknown".to_string())
-            }
+            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => object_label(state, id),
         };
         let blockers = combat
             .blocker_assignments
             .get(&attacker.object_id)
             .map(|ids| {
                 ids.iter()
-                    .filter_map(|id| object_name(state, *id))
+                    .map(|id| object_label(state, *id))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -333,12 +342,58 @@ fn push_battlefield(
     }
     for (controller, ids) in by_controller {
         out.push_str(&format!("{}:\n", seat_label(PlayerId(controller), viewer)));
-        let lines = ids
-            .into_iter()
-            .map(|id| permanent_line(state, views, id, db, options));
-        for line in grouped_lines(lines) {
+        let rows = ids.into_iter().map(|id| {
+            let (head, tail) = permanent_line(state, views, id, db, options);
+            (id, head, tail)
+        });
+        for line in numbered_rows(rows) {
             out.push_str(&format!("  - {line}\n"));
         }
+    }
+}
+
+/// Board rows that name their objects by number, as the options do
+/// ([`super::action::object_label`]): `Forest (Objects 3, 4, 7) | Basic Land
+/// — Forest | untapped`.
+///
+/// Rows whose every stated fact is the same collapse into one row listing
+/// all their numbers, so five identical Forests stay one row; two
+/// same-named permanents that differ in anything the row states (tapped,
+/// counters, damage) are separate rows, each under its own number. An option
+/// that names "Grizzly Bears (Object 12)" therefore points at exactly one
+/// row, and that row says which Bears it is.
+fn numbered_rows(rows: impl IntoIterator<Item = (ObjectId, String, String)>) -> Vec<String> {
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut ids: BTreeMap<(String, String), Vec<ObjectId>> = BTreeMap::new();
+    for (id, head, tail) in rows {
+        let key = (head, tail);
+        let group = ids.entry(key.clone()).or_default();
+        if group.is_empty() {
+            order.push(key);
+        }
+        group.push(id);
+    }
+    order
+        .into_iter()
+        .map(|key| {
+            let numbers = ids.get(&key).map(Vec::as_slice).unwrap_or_default();
+            let (head, tail) = key;
+            format!("{head} ({}){tail}", object_numbers(numbers))
+        })
+        .collect()
+}
+
+/// `Object 3` / `Objects 3, 4, 7`.
+fn object_numbers(ids: &[ObjectId]) -> String {
+    let numbers = ids
+        .iter()
+        .map(|id| id.0.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if ids.len() == 1 {
+        format!("Object {numbers}")
+    } else {
+        format!("Objects {numbers}")
     }
 }
 
@@ -382,11 +437,11 @@ fn push_hand(
         out.push_str("(empty)\n");
         return;
     }
-    let lines = player
-        .hand
-        .iter()
-        .map(|id| card_line(state, *id, db, options));
-    for line in grouped_lines(lines) {
+    let rows = player.hand.iter().map(|id| {
+        let (head, tail) = card_line(state, *id, db, options);
+        (*id, head, tail)
+    });
+    for line in numbered_rows(rows) {
         out.push_str(&format!("  - {line}\n"));
     }
 }
@@ -524,11 +579,11 @@ fn push_graveyards(out: &mut String, state: &GameState, viewer: PlayerId) {
         .iter()
         .filter(|player| players::is_alive(state, player.id))
     {
-        let names = grouped_lines(
+        let names = numbered_rows(
             state
                 .graveyard_of(player.id)
                 .iter()
-                .filter_map(|id| object_name(state, *id)),
+                .filter_map(|id| object_name(state, *id).map(|name| (*id, name, String::new()))),
         );
         out.push_str(&format!(
             "{}: {}\n",
@@ -559,8 +614,9 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
                 return None;
             }
             Some(format!(
-                "{} (owned by {})",
+                "{} (Object {}, owned by {})",
                 one_line(&object.name),
+                id.0,
                 seat_label(object.owner, viewer)
             ))
         })
@@ -580,9 +636,9 @@ fn permanent_line(
     id: ObjectId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
-) -> String {
+) -> (String, String) {
     let Some(object) = state.objects.get(&id) else {
-        return format!("object #{}", id.0);
+        return ("object".to_string(), String::new());
     };
     // CR 707.2: a copy takes the copied object's name and text, so on its
     // own it reads exactly like what it copies. The engine's copy
@@ -663,11 +719,12 @@ fn permanent_line(
                 .join(", "),
         );
     }
-    let mut line = parts.join(" | ");
+    let head = parts.remove(0);
+    let mut tail: String = parts.iter().map(|part| format!(" | {part}")).collect();
     if let Some(text) = oracle_text(object.name.as_str(), db, options) {
-        line.push_str(&format!(" | \"{text}\""));
+        tail.push_str(&format!(" | \"{text}\""));
     }
-    line
+    (head, tail)
 }
 
 /// Each player's command zone: commanders waiting to be cast, with their
@@ -690,14 +747,14 @@ fn push_command_zone(out: &mut String, state: &GameState, viewer: PlayerId) {
         let line = if object.is_commander {
             let tax = commander::commander_tax(state, *id);
             if tax == 0 {
-                format!("{name} (commander)")
+                format!("{name} (Object {}, commander)", id.0)
             } else {
-                format!("{name} (commander, tax {{{tax}}})")
+                format!("{name} (Object {}, commander, tax {{{tax}}})", id.0)
             }
         } else if object.is_emblem {
-            format!("{name} (emblem)")
+            format!("{name} (Object {}, emblem)", id.0)
         } else {
-            name
+            format!("{name} (Object {})", id.0)
         };
         by_owner.entry(object.owner.0).or_default().push(line);
     }
@@ -727,9 +784,9 @@ fn card_line(
     id: ObjectId,
     db: Option<&CardDatabase>,
     options: &GameRenderOptions,
-) -> String {
+) -> (String, String) {
     let Some(object) = state.objects.get(&id) else {
-        return format!("object #{}", id.0);
+        return ("object".to_string(), String::new());
     };
     let mut parts = vec![one_line(&object.name)];
     let cost = mana_cost_text(&object.mana_cost);
@@ -743,11 +800,12 @@ fn card_line(
     if let (Some(power), Some(toughness)) = (object.power, object.toughness) {
         parts.push(format!("{power}/{toughness}"));
     }
-    let mut line = parts.join(" | ");
+    let head = parts.remove(0);
+    let mut tail: String = parts.iter().map(|part| format!(" | {part}")).collect();
     if let Some(text) = oracle_text(object.name.as_str(), db, options) {
-        line.push_str(&format!(" | \"{text}\""));
+        tail.push_str(&format!(" | \"{text}\""));
     }
-    line
+    (head, tail)
 }
 
 /// `2 +1/+1 counters, 1 everything counter`.
@@ -1510,7 +1568,8 @@ mod tests {
         }
         let board = rendered(&state, PlayerId(1));
         assert_eq!(board.matches("Mountain").count(), 1, "{board}");
-        assert!(board.contains("Mountain | untapped ×4"), "{board}");
+        assert!(board.contains("  - Mountain (Objects "), "{board}");
+        assert!(board.contains(") | untapped\n"), "{board}");
     }
 
     #[test]
@@ -1689,7 +1748,7 @@ mod tests {
         // Reach guard: while seat 2 is alive, its zones are on the board.
         assert!(live.contains("Departed Graveyard"), "{live}");
         assert!(
-            live.contains("Departed Exile (owned by Player 2)"),
+            live.contains("Departed Exile (Object ") && live.contains(", owned by Player 2)"),
             "{live}"
         );
 
@@ -1704,7 +1763,8 @@ mod tests {
         // The living seats are rendered as before.
         assert!(board.contains("Player 1: 20 life"), "{board}");
         assert!(
-            board.contains("Swords to Plowshares (owned by Player 1)"),
+            board.contains("Swords to Plowshares (Object ")
+                && board.contains(", owned by Player 1)"),
             "{board}"
         );
     }
@@ -1785,18 +1845,21 @@ mod tests {
         let board = rendered(&state, PlayerId(1));
         assert!(
             board.contains(
-                "1. Activated ability of Filigree Racer (controlled by You): {2}: This Vehicle gets +1/+0.\n"
+                "1. Activated ability of Filigree Racer (Object 9001, controlled by You): {2}: This Vehicle gets +1/+0.\n"
             ),
             "{board}"
         );
         assert!(
             board.contains(
-                "2. Triggered ability of Filigree Racer (controlled by You): When this Vehicle enters, you get {E}{E}{E}{E}.\n"
+                "2. Triggered ability of Filigree Racer (Object 9000, controlled by You): When this Vehicle enters, you get {E}{E}{E}{E}.\n"
             ),
             "{board}"
         );
         assert!(
-            board.contains("3. Lightning Bolt (controlled by Player 0)\n"),
+            board.contains(&format!(
+                "3. Lightning Bolt (Object {}, controlled by Player 0)\n",
+                bolt.0
+            )),
             "{board}"
         );
         assert!(!board.contains(". Filigree Racer (controlled"), "{board}");
@@ -1867,8 +1930,13 @@ mod tests {
             state.objects.get_mut(&id).expect("created").is_token = is_token;
         }
         let board = rendered(&state, PlayerId(1));
-        assert!(board.contains("  - Aetherstorm Roc | token | "), "{board}");
-        assert!(board.contains("  - Aetherstorm Roc | untapped"), "{board}");
+        let rows: Vec<&str> = board
+            .lines()
+            .filter(|line| line.starts_with("  - Aetherstorm Roc (Object "))
+            .collect();
+        assert_eq!(rows.len(), 2, "{board}");
+        assert!(rows[0].contains(") | token | "), "{board}");
+        assert!(rows[1].contains(") | untapped"), "{board}");
     }
 
     /// CR 707.2: a nontoken permanent copying a token reads as a copy, under
@@ -1911,10 +1979,19 @@ mod tests {
 
         let board = rendered(&state, PlayerId(1));
         assert!(
-            board.contains("  - Aurora Shifter, copying Construct | copy | "),
+            board.contains(&format!(
+                "  - Aurora Shifter, copying Construct (Object {}) | copy | ",
+                shifter.0
+            )),
             "{board}"
         );
-        assert!(board.contains("  - Construct | token | "), "{board}");
+        assert!(
+            board.contains(&format!(
+                "  - Construct (Object {}) | token | ",
+                construct.0
+            )),
+            "{board}"
+        );
     }
 
     /// CR 408.1 + CR 903.8: a commander in the command zone is listed there,
@@ -1936,13 +2013,19 @@ mod tests {
         let board = rendered(&state, PlayerId(1));
         assert!(board.contains("--- COMMAND ZONE ---"), "{board}");
         assert!(
-            board.contains("Player 0: Satya, Aetherflux Genius (commander)\n"),
+            board.contains(&format!(
+                "Player 0: Satya, Aetherflux Genius (Object {}, commander)\n",
+                satya.0
+            )),
             "{board}"
         );
         state.commander_cast_count.insert(satya, 1);
         let own = rendered(&state, PlayerId(0));
         assert!(
-            own.contains("You: Satya, Aetherflux Genius (commander, tax {2})\n"),
+            own.contains(&format!(
+                "You: Satya, Aetherflux Genius (Object {}, commander, tax {{2}})\n",
+                satya.0
+            )),
             "{own}"
         );
         // No command zone, no section.
@@ -2010,7 +2093,10 @@ mod tests {
 
         let board = rendered(&state, PlayerId(1));
         assert!(
-            board.contains("Omo, Queen of Vesuva | Creature — every creature type | "),
+            board.contains(&format!(
+                "Omo, Queen of Vesuva (Object {}) | Creature — every creature type | ",
+                omo.0
+            )),
             "{board}"
         );
         assert!(
@@ -2024,7 +2110,10 @@ mod tests {
             "{board}"
         );
         assert!(
-            board.contains("Simic Guildgate | Land — every land type | "),
+            board.contains(&format!(
+                "Simic Guildgate (Object {}) | Land — every land type | ",
+                land.0
+            )),
             "{board}"
         );
         for debug in [
@@ -2288,6 +2377,42 @@ mod tests {
                 Some("{X}: This creature gets +X/+0.")
             ),
             "Kicker"
+        );
+    }
+
+    /// Attackers and blockers are numbered as the options name them, so two
+    /// same-named attackers are told apart in combat too.
+    #[test]
+    fn combat_names_attackers_and_blockers_by_number() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let bear = |state: &mut GameState, owner| {
+            create_object(
+                state,
+                CardId(1),
+                owner,
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let attacker = bear(&mut state, PlayerId(0));
+        let blocker = bear(&mut state, PlayerId(1));
+        let mut combat = CombatState::default();
+        combat.attackers.push(AttackerInfo::new(
+            attacker,
+            AttackTarget::Player(PlayerId(1)),
+            PlayerId(1),
+        ));
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        state.combat = Some(combat);
+        let board = rendered(&state, PlayerId(1));
+        assert!(
+            board.contains(&format!(
+                "Grizzly Bears (Object {}) attacking You — blocked by Grizzly Bears (Object {})",
+                attacker.0, blocker.0
+            )),
+            "{board}"
         );
     }
 
