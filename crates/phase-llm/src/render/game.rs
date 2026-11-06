@@ -12,11 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use engine::database::CardDatabase;
 use engine::game::combat::{self, AttackTarget};
 use engine::game::commander;
-use engine::game::derived_views::{derive_views, DerivedViews, StackEntryDisplay};
+use engine::game::derived_views::{
+    derive_views, DerivedViews, StackEntryDisplay, StackPaidFactView,
+};
 use engine::game::mana_sources;
 use engine::game::players;
 use engine::types::ability::{
-    AbilityCost, CardSelectionMode, ControllerRef, QuantityExpr, StackAbilityKind, TypeFilter,
+    AbilityCost, CardSelectionMode, ControllerRef, QuantityExpr, StackAbilityKind, TargetRef,
+    TypeFilter,
 };
 use engine::types::card_type::{CardType, LAND_SUBTYPES};
 use engine::types::game_state::{GameState, StackEntry, StackObjectClass};
@@ -209,15 +212,19 @@ fn stack_entry_line(
         detail
             .map(|detail| one_line(&detail.source_name))
             .filter(|name| !name.is_empty())
-            .or_else(|| object_name(state, entry.source_id))
+            .or_else(|| known_name(state, entry.source_id))
             .unwrap_or_else(|| "unknown".to_string())
     };
     let kind = match entry.kind.class() {
         StackObjectClass::Spell => {
-            let name = object_name(state, entry.id)
-                .or_else(|| object_name(state, entry.source_id))
+            let name = known_name(state, entry.id)
+                .or_else(|| known_name(state, entry.source_id))
                 .unwrap_or_else(|| "unknown".to_string());
-            return format!("{name} (Object {}, controlled by {controller})", entry.id.0);
+            return format!(
+                "{name} (Object {}, controlled by {controller}){}",
+                entry.id.0,
+                stack_facts(state, detail, viewer)
+            );
         }
         StackObjectClass::Ability(StackAbilityKind::Activated) => "Activated ability",
         StackObjectClass::Ability(StackAbilityKind::Triggered) => "Triggered ability",
@@ -243,9 +250,10 @@ fn stack_entry_line(
         })
     });
     let head = format!(
-        "{kind} of {} (Object {}, controlled by {controller})",
+        "{kind} of {} (Object {}, controlled by {controller}){}",
         source(),
-        entry.id.0
+        entry.id.0,
+        stack_facts(state, detail, viewer)
     );
     match text
         .map(|text| one_line(&text))
@@ -254,6 +262,70 @@ fn stack_entry_line(
         Some(text) => format!("{head}: {}", clamp_text(&text, STACK_TEXT_BUDGET)),
         None => head,
     }
+}
+
+/// What the stack entry has already locked in: its chosen modes, its targets
+/// (CR 601.2c, by seat or by object number as the options name them) and the
+/// facts of how it was cast (X, kicked, mana spent), from the engine's stack
+/// display projection. Empty when there is none.
+fn stack_facts(state: &GameState, detail: Option<&StackEntryDisplay>, viewer: PlayerId) -> String {
+    let Some(detail) = detail else {
+        return String::new();
+    };
+    let mut facts: Vec<String> = Vec::new();
+    if !detail.selected_mode_labels.is_empty() {
+        let modes: Vec<String> = detail
+            .selected_mode_labels
+            .iter()
+            .map(|mode| one_line(mode))
+            .collect();
+        facts.push(format!("modes: {}", modes.join("; ")));
+    }
+    if !detail.targets.is_empty() {
+        let targets: Vec<String> = detail
+            .targets
+            .iter()
+            .map(|target| match target.target {
+                TargetRef::Player(player) => seat_label(player, viewer),
+                TargetRef::Object(id) if state.objects.contains_key(&id) => object_label(state, id),
+                TargetRef::Object(id) => format!("{} (Object {})", one_line(&target.label), id.0),
+            })
+            .collect();
+        facts.push(format!("targeting {}", targets.join(", ")));
+    }
+    for paid in &detail.paid {
+        facts.push(match paid {
+            StackPaidFactView::XValue { value } => format!("X = {value}"),
+            StackPaidFactView::ManaSpent { amount } => format!("{amount} mana spent"),
+            StackPaidFactView::ColorsSpent { distinct } => {
+                format!("{distinct} colors of mana spent")
+            }
+            StackPaidFactView::Kicked { count: 1 } => "kicked".to_string(),
+            StackPaidFactView::Kicked { count } => format!("kicked {count} times"),
+            StackPaidFactView::AdditionalCostPaid => "additional cost paid".to_string(),
+            StackPaidFactView::CastVariant { variant } => {
+                format!("cast {}", humanize_identifier(variant).to_lowercase())
+            }
+            StackPaidFactView::Convoked { count } => format!("convoked with {count}"),
+        });
+    }
+    if facts.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", facts.join("; "))
+    }
+}
+
+/// An object's name, or its last known name once it has left the zone it was
+/// in (CR 400.7): a sacrificed source still names its ability on the stack.
+fn known_name(state: &GameState, id: ObjectId) -> Option<String> {
+    object_name(state, id).or_else(|| {
+        state
+            .lki_cache
+            .get(&id)
+            .map(|lki| one_line(&lki.name))
+            .filter(|name| !name.is_empty())
+    })
 }
 
 /// Effects already set to happen later: CR 603.7a delayed triggered abilities
@@ -266,13 +338,28 @@ fn push_delayed_triggers(out: &mut String, state: &GameState, viewer: PlayerId) 
     }
     out.push_str("\n--- PENDING DELAYED TRIGGERS ---\n");
     for trigger in &state.delayed_triggers {
-        let source = object_name(state, trigger.source_id).unwrap_or_else(|| "unknown".to_string());
+        let source = known_name(state, trigger.source_id).unwrap_or_else(|| "unknown".to_string());
         let when = serde_json::to_value(&trigger.condition)
             .map(|value| describe_tagged_for(state, &value, viewer))
             .unwrap_or_else(|_| "later".to_string());
+        // What it will do: the ability's own text, else its effect described
+        // from its fields, so two delayed triggers from one source at one
+        // time ("gain 1 life" and "sacrifice it") read differently.
+        let what = trigger
+            .ability
+            .description
+            .as_deref()
+            .map(one_line)
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| {
+                serde_json::to_value(&trigger.ability.effect)
+                    .map(|value| describe_tagged_for(state, &value, viewer))
+                    .unwrap_or_default()
+            });
         out.push_str(&format!(
-            "- from {source} (controlled by {}): {when}\n",
-            seat_label(trigger.controller, viewer)
+            "- from {source} (controlled by {}): {when} — {}\n",
+            seat_label(trigger.controller, viewer),
+            clamp_text(&what, STACK_TEXT_BUDGET)
         ));
     }
 }
@@ -1711,12 +1798,46 @@ mod tests {
             board.contains("--- PENDING DELAYED TRIGGERS ---"),
             "{board}"
         );
+        let lines: Vec<&str> = board
+            .lines()
+            .filter(|line| {
+                line.starts_with(
+                    "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End) — ",
+                )
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{board}");
+        // The effect is part of the line.
+        assert!(lines[0].contains("Gain Life"), "{board}");
+
+        // A second delayed trigger from the same source at the same time,
+        // doing something else, reads differently, and an ability with its
+        // own text is quoted.
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        draw.description = Some("Draw a card.".to_string());
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            Box::new(draw),
+            PlayerId(0),
+            source,
+            true,
+        ));
+        let board = rendered(&state, PlayerId(1));
         assert!(
             board.contains(
-                "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End)"
+                "- from Sneak Attack (controlled by Player 0): At Next Phase (Phase: End) — Draw a card.\n"
             ),
             "{board}"
         );
+        assert!(board.contains("Gain Life"), "{board}");
         assert!(
             !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(1))
                 .contains("PENDING DELAYED TRIGGERS")
@@ -1809,7 +1930,15 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(2),
-                ability: None,
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "test".to_string(),
+                        description: None,
+                    },
+                    vec![engine::types::ability::TargetRef::Player(PlayerId(1))],
+                    bolt,
+                    PlayerId(0),
+                ))),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -1857,7 +1986,7 @@ mod tests {
         );
         assert!(
             board.contains(&format!(
-                "3. Lightning Bolt (Object {}, controlled by Player 0)\n",
+                "3. Lightning Bolt (Object {}, controlled by Player 0) [targeting You]\n",
                 bolt.0
             )),
             "{board}"
