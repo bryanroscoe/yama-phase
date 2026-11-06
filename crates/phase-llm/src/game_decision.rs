@@ -1379,6 +1379,71 @@ mod tests {
         assert!(second.contains("Stop paying multikicker {2}"), "{second}");
     }
 
+    /// Two same-named creatures in different states: each option names its
+    /// creature by number, and the board row under that number says which
+    /// one it is, tapped with a counter or not.
+    #[test]
+    fn every_object_an_option_names_is_on_a_board_row_with_its_number() {
+        use engine::types::ability::TargetRef;
+        use engine::types::card_type::CoreType;
+        use engine::types::counter::CounterType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let bears: Vec<ObjectId> = (0..2)
+            .map(|index| {
+                let id = create_object(
+                    &mut state,
+                    CardId(index),
+                    PlayerId(0),
+                    "Grizzly Bears".to_string(),
+                    Zone::Battlefield,
+                );
+                let object = state.objects.get_mut(&id).expect("created");
+                object.card_types.core_types = vec![CoreType::Creature];
+                object.power = Some(2);
+                object.toughness = Some(2);
+                id
+            })
+            .collect();
+        {
+            let veteran = state.objects.get_mut(&bears[1]).expect("created");
+            veteran.tapped = true;
+            veteran.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        let target = |id| GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(id)),
+        };
+        let request = build_game_decision_prompt(
+            &state,
+            &contract(vec![target(bears[0]), target(bears[1])]),
+            AiDifficulty::Medium,
+            None,
+            &[],
+        )
+        .unwrap();
+        let user = &request.prompt.user;
+        let row = |id: ObjectId| {
+            user.lines()
+                .find(|line| line.starts_with(&format!("  - Grizzly Bears (Object {})", id.0)))
+                .unwrap_or_else(|| panic!("no board row for {id:?} in {user}"))
+                .to_string()
+        };
+        assert!(row(bears[0]).ends_with("| untapped"), "{user}");
+        assert!(
+            row(bears[1]).contains("| tapped | 1 +1/+1 counter"),
+            "{user}"
+        );
+        for id in &bears {
+            assert!(
+                user.contains(&format!(
+                    "Choose Target (Target: Grizzly Bears (Object {}))",
+                    id.0
+                )),
+                "{user}"
+            );
+        }
+    }
+
     #[test]
     fn every_brief_counts_mana_artifacts_as_mana_sources() {
         for difficulty in [
