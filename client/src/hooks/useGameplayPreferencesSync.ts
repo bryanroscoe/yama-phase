@@ -188,11 +188,12 @@ async function drainGameplayPreferenceSync(): Promise<void> {
           );
         } catch {
           // As above, a rejected dispatch must remain retryable.
+          if (!isCurrentSession(adapter, generation, hostPreferences)) syncRequested = true;
           continue;
         }
 
         if (
-          isCurrentSession(adapter, generation)
+          isCurrentSession(adapter, generation, hostPreferences)
           && usePreferencesStore.getState().unCardActionsEnabled === unCardActions
         ) {
           lastSent = { ...successfulSendFor(adapter, generation), unCardActions };
