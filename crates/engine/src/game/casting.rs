@@ -22238,7 +22238,7 @@ fn can_cast_prepared_now_with_probe(
     // only when its caster has what the cost consumes: the life it pays
     // (CR 119.4 + CR 119.8), a permanent of theirs to sacrifice (CR 701.21a:
     // only a permanent the player controls), a card to discard or exile, and
-    // so on. `is_payable` is the single choice-of-object and resource
+    // so on. `is_payable_for_spell` is the single choice-of-object and resource
     // authority the declaration step itself consults; its mana legs are left
     // to the mana check below.
     if let Some(AdditionalCost::Required(cost)) = state
@@ -22246,9 +22246,6 @@ fn can_cast_prepared_now_with_probe(
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        if !cost.is_payable(state, player, prepared.object_id) {
-            return false;
-        }
         // CR 601.2f + CR 601.2h: a REQUIRED additional cost the parser could not
         // read is part of the total cost and has no payment procedure, so it
         // can't be paid and the spell can't be cast. Gate enumeration here so

@@ -8,8 +8,7 @@ use engine::ai_support::legal_actions;
 use engine::game::casting::can_activate_ability_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, ActivationRestriction, Comparator, ParsedCondition, PlayerScope, QuantityExpr,
-    QuantityRef,
+    AbilityCost, ActivationRestriction, Comparator, ParsedCondition, QuantityExpr, QuantityRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::CastPaymentMode;
@@ -100,9 +99,7 @@ fn the_restriction_parses_as_energy_paid_or_lost_this_turn() {
         &vec![ActivationRestriction::RequiresCondition {
             condition: Some(ParsedCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::EnergyPaidOrLostThisTurn {
-                        player: PlayerScope::Controller,
-                    },
+                    qty: QuantityRef::EnergyPaidOrLostThisTurn,
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
