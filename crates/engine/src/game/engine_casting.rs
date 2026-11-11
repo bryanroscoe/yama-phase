@@ -310,31 +310,6 @@ impl CastUndoLists {
     }
 }
 
-/// CR 601.2h + CR 733.1: how one admitted action of an incomplete cast
-/// enters the cast's reversal record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CastUndoAction {
-    /// An ordinary casting action. Its journal may show part of the total
-    /// cost being paid (CR 601.2h).
-    Casting,
-    /// CR 733.1: the player reverses a mana ability they activated while
-    /// casting. Mana abilities are activated before costs are paid
-    /// (CR 601.2g), so reversing one pays no cost: it never begins the
-    /// cast's inverse, and folds into one an earlier payment began.
-    ManaAbilityReversal,
-}
-
-impl CastUndoAction {
-    /// The role of `action`. A new action that reverses a mana ability
-    /// belongs in the reversal arm.
-    pub(super) fn of(action: &crate::types::actions::GameAction) -> Self {
-        match action {
-            crate::types::actions::GameAction::UntapLandForMana { .. } => Self::ManaAbilityReversal,
-            _ => Self::Casting,
-        }
-    }
-}
-
 struct CastUndoFrame {
     action_boundary: std::sync::Arc<GameState>,
     cast_start: Option<CastStartBoundary>,
