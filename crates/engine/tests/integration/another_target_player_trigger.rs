@@ -74,12 +74,8 @@ fn cast_first_spell(players: u8, caster: PlayerId) -> Board {
 
 fn trigger_legal_targets(runner: &GameRunner) -> Vec<TargetRef> {
     match &runner.state().waiting_for {
-        WaitingFor::TriggerTargetSelection {
-            target_slots,
-            selection,
-            ..
-        } => {
-            let mut targets = target_slots[selection.current_slot].legal_targets.clone();
+        WaitingFor::TriggerTargetSelection { selection, .. } => {
+            let mut targets = selection.current_legal_targets.clone();
             targets.sort_by_key(|t| format!("{t:?}"));
             targets
         }

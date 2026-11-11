@@ -792,7 +792,11 @@ mod tests {
             .collect();
         assert_eq!(
             mine,
-            ["You cast Shock", "You pass priority", "You lose the game"]
+            [
+                "You cast Shock",
+                "Priority passes to You",
+                "You lose the game"
+            ]
         );
         let theirs: Vec<String> = log
             .iter()
@@ -802,7 +806,7 @@ mod tests {
             theirs,
             [
                 "Player 1 casts Shock",
-                "Player 1 passes priority",
+                "Priority passes to Player 1",
                 "Player 1 loses the game"
             ]
         );

@@ -16697,7 +16697,7 @@ mod tests {
         .collect();
         assert_eq!(
             labels.len(),
-            9,
+            10,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }

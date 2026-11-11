@@ -135,21 +135,12 @@ fn maybe_declare_no_blocks(runner: &mut GameRunner) {
 /// Answer the current target slot with a graveyard creature card when one is
 /// legal, else decline ("up to one").
 fn answer_graveyard_slot(runner: &mut GameRunner) {
-    let (slot, has_slot) = match runner.state().waiting_for.clone() {
-        WaitingFor::TriggerTargetSelection {
-            target_slots,
-            selection,
-            ..
-        }
-        | WaitingFor::TargetSelection {
-            target_slots,
-            selection,
-            ..
-        } => (target_slots[selection.current_slot].clone(), true),
+    let legal_targets = match runner.state().waiting_for.clone() {
+        WaitingFor::TriggerTargetSelection { selection, .. }
+        | WaitingFor::TargetSelection { selection, .. } => selection.current_legal_targets,
         _ => panic!("expected a target selection prompt"),
     };
-    assert!(has_slot);
-    let pick = slot.legal_targets.iter().find_map(|target| match target {
+    let pick = legal_targets.iter().find_map(|target| match target {
         TargetRef::Object(id)
             if runner.state().objects.get(id).is_some_and(|obj| {
                 obj.zone == Zone::Graveyard

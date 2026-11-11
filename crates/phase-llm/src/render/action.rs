@@ -55,6 +55,7 @@ const PLAYER_FIELDS: &[&str] = &[
     "proposer",
     "pw_controller",
     "remaining_players",
+    "remaining_heroes",
     "scoped_players",
     "source_controller",
     "trigger_controller",
