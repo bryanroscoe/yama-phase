@@ -40,9 +40,6 @@ const SUFFICIENT_MANA_BONUS: f64 = 0.3;
 /// that won't fight before it stops being one.
 const NO_COMBAT_WINDOW_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
-/// Penalty for animating a land that is already a creature: the activation
-/// spends its cost and adds nothing the land doesn't already have this turn.
-
 pub struct LandAnimationPolicy;
 
 impl TacticalPolicy for LandAnimationPolicy {
