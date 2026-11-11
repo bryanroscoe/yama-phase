@@ -142,6 +142,7 @@ fn choose(
         AbilityKind::Activated,
         Effect::Choose {
             choice_type,
+            chooser: engine::types::ability::ControllerRef::You,
             persist,
             selection,
         },

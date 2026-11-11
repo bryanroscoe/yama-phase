@@ -743,6 +743,7 @@ fn condition_reads_a_hand(condition: &ParsedCondition) -> bool {
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        | ParsedCondition::IsMonarch
         | ParsedCondition::HasEnduringStory
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed

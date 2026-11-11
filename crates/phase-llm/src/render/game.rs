@@ -1491,6 +1491,7 @@ fn protection_text(state: &GameState, target: &ProtectionTarget) -> String {
         ProtectionTarget::Multicolored => "multicolored".to_string(),
         ProtectionTarget::ChosenColor => "the chosen color".to_string(),
         ProtectionTarget::ChosenCardType => "the chosen card type".to_string(),
+        ProtectionTarget::ChosenCardName => "the chosen card name".to_string(),
         ProtectionTarget::ChosenPlayer => "the chosen player".to_string(),
         ProtectionTarget::Everything => "everything".to_string(),
         ProtectionTarget::Filter(filter) => value_words(state, filter),
