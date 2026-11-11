@@ -19587,6 +19587,7 @@ fn try_parse_choose_another_target_player(
         target: TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::TriggeringPlayer),
+                relation: crate::types::ability::PlayerRelation::All,
             }),
         },
     })

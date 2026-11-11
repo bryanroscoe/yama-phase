@@ -194,6 +194,7 @@ fn another_target_player_after_you_and_is_not_the_triggering_player() {
     let triggering = serde_json::to_string(&TargetFilter::PlayerMatching {
         player: Box::new(PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            relation: engine::types::ability::PlayerRelation::All,
         }),
     })
     .unwrap();
