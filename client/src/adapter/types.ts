@@ -5740,6 +5740,8 @@ export interface GameplayPreferences {
   phase_stops: PhaseStop[];
   priority_passing_mode: PriorityPassingMode;
   full_control: boolean;
+  /** Older hosts predate un-card actions and therefore have them disabled. */
+  un_card_actions_enabled?: boolean;
 }
 
 export interface EngineAdapter {

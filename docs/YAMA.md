@@ -24,6 +24,11 @@ servers omit the extension and retain device-default initialization. This is a
 Yama envelope extension, not a change to the Phase wire payload or protocol version;
 Yama pins the matching client and server together.
 
+The envelope also carries the engine's per-seat `un_card_actions_enabled`
+opt-in. An older host that omits it has un-card actions disabled. Reconnect
+hydrates this setting without sending an engine action; a subsequent explicit
+toggle still uses upstream's actor-scoped `UnAction::SetEnabled` path.
+
 ## The stack
 
 Every commit on top of upstream is one of two kinds:

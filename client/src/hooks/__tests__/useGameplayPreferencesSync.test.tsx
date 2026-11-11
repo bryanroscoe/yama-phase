@@ -155,6 +155,30 @@ describe("useGameplayPreferencesSync", () => {
     );
   });
 
+  it("adopts hosted un-card opt-in without replaying it and sends only an explicit change", async () => {
+    const server = { initialGameplayPreferences: {
+      phase_stops: [], priority_passing_mode: "Standard", full_control: false,
+      un_card_actions_enabled: true,
+    } as GameplayPreferences };
+    const serverAdapter = server as unknown as EngineAdapter;
+    useGameStore.setState({ adapter: serverAdapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+    expect(usePreferencesStore.getState().unCardActionsEnabled).toBe(true);
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+    act(() => usePreferencesStore.setState({ unCardActionsEnabled: false }));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      serverAdapter, expect.any(Number),
+    );
+    act(() => {
+      server.initialGameplayPreferences = { ...server.initialGameplayPreferences, un_card_actions_enabled: true };
+      useGameStore.setState({ engineCommitEpoch: 2 });
+    });
+    expect(usePreferencesStore.getState().unCardActionsEnabled).toBe(true);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a read-only server attachment from sending local defaults", () => {
     const spectatorAdapter = { initialGameplayPreferences: null } as unknown as EngineAdapter;
     useGameStore.setState({ adapter: spectatorAdapter, gameState, engineCommitEpoch: 1 });

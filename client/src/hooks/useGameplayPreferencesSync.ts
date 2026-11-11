@@ -82,10 +82,12 @@ function initializeServerPreferences(adapter: EngineAdapter, generation: number)
     hostPreferences: initial,
     stops: initial.phase_stops.slice(),
     mode: initial.full_control ? "FullControl" : initial.priority_passing_mode,
+    unCardActions: initial.un_card_actions_enabled ?? false,
   };
   usePreferencesStore.setState({
     phaseStops: initial.phase_stops.slice(),
     priorityPassingMode: initial.priority_passing_mode,
+    unCardActionsEnabled: initial.un_card_actions_enabled ?? false,
   });
   useUiStore.setState({ fullControl: initial.full_control });
 }
