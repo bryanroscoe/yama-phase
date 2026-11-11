@@ -1833,7 +1833,9 @@ fn score_whole_attack(
         if prevented && attack_trigger_payoff(state, attacker_id, AttackTarget::Player(defender)) {
             prevented_payoff = true;
         }
-        let open = if prevented { 0 } else {
+        let open = if prevented {
+            0
+        } else {
             engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[])
         };
         open_damage += open;

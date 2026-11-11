@@ -2646,14 +2646,7 @@ pub(crate) fn parse_conditional_enters_with_counters_grant(lower: &str) -> Optio
                     tag(" counters on it equal to the number of "),
                     crate::parser::oracle_nom::quantity::parse_commander_cast_count_times,
                 ),
-                |(_, counter_type, _, qty)| {
-                    (
-                        counter_type,
-                        QuantityExpr::Ref {
-                            qty,
-                        },
-                    )
-                },
+                |(_, counter_type, _, qty)| (counter_type, QuantityExpr::Ref { qty }),
             ),
         )),
         opt(char('.')),

@@ -42,7 +42,6 @@ const NO_COMBAT_WINDOW_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 /// Penalty for animating a land that is already a creature: the activation
 /// spends its cost and adds nothing the land doesn't already have this turn.
-const ALREADY_CREATURE_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 pub struct LandAnimationPolicy;
 
@@ -153,24 +152,22 @@ impl TacticalPolicy for LandAnimationPolicy {
         // CR 508.1a + CR 509.1a: a man-land's animation lasts until end of
         // turn, so it only pays off if the creature can attack or block this
         // turn.
-        if !has_combat_window(ctx.state, ctx.ai_player, obj, ability_def) {
+        if !obj.card_types.core_types.contains(&CoreType::Creature)
+            && ctx.state.stack.is_empty()
+            && !has_combat_window(ctx.state, ctx.ai_player, obj, ability_def)
+        {
             return PolicyVerdict::critical(
                 NO_COMBAT_WINDOW_PENALTY,
                 PolicyReason::new("land_animation_no_combat_window"),
             );
         }
 
-        if obj.card_types.core_types.contains(&CoreType::Creature) {
-            return PolicyVerdict::critical(
-                ALREADY_CREATURE_PENALTY,
-                PolicyReason::new("land_animation_already_creature"),
-            );
-        }
-
         // CR 508.1: on its own turn the AI animates a man-land to attack with
         // it, so ask the combat AI whether it would attack with the animated
         // body on this board.
-        if ctx.state.active_player == ctx.ai_player
+        if !obj.card_types.core_types.contains(&CoreType::Creature)
+            && ctx.state.stack.is_empty()
+            && ctx.state.active_player == ctx.ai_player
             && !animated_land_would_attack(ctx.state, ctx.ai_player, *source_id, ability_def)
         {
             return PolicyVerdict::critical(
@@ -596,27 +593,6 @@ mod tests {
             reason_kind(&policy_verdict(&state, source_id)),
             "land_animation_would_not_attack"
         );
-    }
-
-    #[test]
-    fn animating_a_land_that_is_already_a_creature_is_penalized() {
-        let mut state = GameState::new_two_player(42);
-        let source_id = affordable_manland(&mut state);
-        state.active_player = AI;
-        state.phase = Phase::PreCombatMain;
-        state
-            .objects
-            .get_mut(&source_id)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Creature);
-        let verdict = policy_verdict(&state, source_id);
-        assert_eq!(reason_kind(&verdict), "land_animation_already_creature");
-        let PolicyVerdict::Score { delta, .. } = verdict else {
-            panic!("expected score verdict");
-        };
-        assert_eq!(delta, ALREADY_CREATURE_PENALTY);
     }
 
     #[test]

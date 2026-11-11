@@ -812,7 +812,10 @@ fn object_leg_demand_and_candidates(
                 state,
                 player,
                 role.spell_being_cast(source),
-            ).into_iter().filter(|&id| !super::casting::committed_to_cast_in_progress(state, id)).collect(),
+            )
+            .into_iter()
+            .filter(|&id| !super::casting::committed_to_cast_in_progress(state, id))
+            .collect(),
         ),
         // CR 702.49a: ninjutsu returns an unblocked attacker the player controls.
         ObjectLegKind::Ninjutsu { variant } => (
