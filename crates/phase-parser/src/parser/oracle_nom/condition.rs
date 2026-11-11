@@ -7739,10 +7739,7 @@ fn parse_energy_history_condition(input: &str) -> OracleResult<'_, StaticConditi
     let (rest, _) = tag("{e} this turn").parse(rest)?;
     Ok((
         rest,
-        make_quantity_ge(
-            QuantityRef::EnergyPaidOrLostThisTurn,
-            n,
-        ),
+        make_quantity_ge(QuantityRef::EnergyPaidOrLostThisTurn, n),
     ))
 }
 
