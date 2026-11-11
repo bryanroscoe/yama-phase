@@ -172,6 +172,7 @@ async function drainGameplayPreferenceSync(): Promise<void> {
           lastSent = { ...successfulSendFor(adapter, generation), mode };
         } else {
           syncRequested = true;
+          continue;
         }
       }
 

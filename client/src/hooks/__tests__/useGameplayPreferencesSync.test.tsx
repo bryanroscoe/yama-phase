@@ -92,6 +92,32 @@ describe("useGameplayPreferencesSync", () => {
     expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["writable", "read-only"])("drops a completed mode send before a %s reconnect can receive stale un-card preferences", async (attachment) => {
+    const initial: GameplayPreferences = {
+      phase_stops: [], priority_passing_mode: "Standard", full_control: false,
+      un_card_actions_enabled: true,
+    };
+    const server: { initialGameplayPreferences: GameplayPreferences | null } = { initialGameplayPreferences: initial };
+    const serverAdapter = server as unknown as EngineAdapter;
+    useGameStore.setState({ adapter: serverAdapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+    let finish!: () => void;
+    vi.mocked(dispatchActionForGameSession).mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    act(() => usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows"));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
+    act(() => {
+      usePreferencesStore.setState({ unCardActionsEnabled: false });
+      server.initialGameplayPreferences = attachment === "writable" ? { ...initial } : null;
+      useGameStore.setState({ engineCommitEpoch: 2 });
+    });
+    await act(async () => { finish(); });
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1);
+    if (attachment === "writable") {
+      expect(usePreferencesStore.getState().unCardActionsEnabled).toBe(true);
+      expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
+    }
+  });
+
   it("adopts server preferences without dispatching bootstrap actions, then sends explicit changes", async () => {
     const serverAdapter = {
       initialGameplayPreferences: {
