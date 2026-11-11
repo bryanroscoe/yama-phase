@@ -1,10 +1,10 @@
 # Working on Yama Phase
 
-This private repository is upstream [phase-rs/phase](https://github.com/phase-rs/phase) `main`
+This public fork is upstream [phase-rs/phase](https://github.com/phase-rs/phase) `main`
 plus a short stack of Yama commits on top. Yama builds the exact commit recorded in its
 `deploy/phase-repo` and `deploy/phase-rev`.
 
-- Private repository: <https://github.com/bryanroscoe/yama-phase>
+- Yama fork: <https://github.com/bryanroscoe/yama-phase>
 - Upstream: <https://github.com/phase-rs/phase>
 - History before the 2026-10-28 rebuild: tag `archive/pre-sync-20261028` (the old `main`,
   based on v0.113.0). Yama releases built before the rebuild pin commits under that tag.
