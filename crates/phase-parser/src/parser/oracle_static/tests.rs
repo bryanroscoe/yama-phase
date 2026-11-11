@@ -42622,14 +42622,23 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
 /// reduction either.
 #[test]
 fn self_cost_reduction_never_counts_every_object() {
-    for text in [
-        "This spell costs {1} less to cast for each counter among players and permanents.",
+    let text = "This spell costs {1} less to cast for each counter among players and permanents.";
+    let reduces = parse_static_line(text)
+        .is_some_and(|def| matches!(def.mode, StaticMode::ModifyCost { .. }));
+    assert!(!reduces, "{text}");
+    // Upstream now represents Blaster Hulk's energy count explicitly. It must
+    // neither become an object count nor be rejected as an unreadable count.
+    let energy = parse_static_line(
         "This spell costs {1} less to cast for each {E} you've paid or lost this turn.",
-    ] {
-        let reduces = parse_static_line(text)
-            .is_some_and(|def| matches!(def.mode, StaticMode::ModifyCost { .. }));
-        assert!(!reduces, "{text}");
-    }
+    )
+    .expect("energy paid or lost has a typed count");
+    assert!(matches!(
+        energy.mode,
+        StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+            ..
+        }
+    ));
     // A readable count still reduces per object.
     let def = parse_static_line("This spell costs {1} less to cast for each creature you control.")
         .expect("reads");
