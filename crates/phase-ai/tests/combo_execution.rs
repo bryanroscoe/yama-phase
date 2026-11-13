@@ -20,16 +20,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 use engine::ai_support::AiDecisionContract;
 use engine::analysis::loop_check::ShortcutResponse;
 use engine::analysis::{IterationCount, WinKind};
 use engine::database::CardDatabase;
+use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::game::deck_loading::DeckEntry;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
+use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
+use engine::types::game_state::{GameState, LoopDetectionMode, PlayerDeckPool, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -42,6 +46,9 @@ use rand::SeedableRng;
 
 /// Actions the two seats may take in the one turn before the bench gives up.
 const MAX_ACTIONS: usize = 400;
+
+/// The seed every row plays with.
+const SEED: u64 = 7;
 
 /// The opponent's life: Commander's starting total, so no case is won by ordinary damage.
 const OPPONENT_LIFE: i32 = 40;
@@ -297,7 +304,7 @@ struct Report {
     declared: usize,
     declined: usize,
     opponent_life: i32,
-    /// P0's non-pass actions in order, with runs of the same action counted.
+    /// Both seats' actions other than passes, in order, with runs of the same action counted.
     line: Vec<(String, usize)>,
 }
 
@@ -337,11 +344,33 @@ fn play_turn(mut state: GameState, difficulty: AiDifficulty) -> Report {
     state.loop_detection = LoopDetectionMode::Interactive;
     let turn = state.turn_number;
     let ai_players: HashSet<PlayerId> = [P0, P1].into_iter().collect();
-    let config = create_config_for_players(difficulty, Platform::Native, 2);
+    // Measurement mode: search is bounded by nodes and depth, never the clock, so a row is a
+    // function of the build and the seed.
+    let config = create_config_for_players(difficulty, Platform::Native, 2).into_measurement(SEED);
     let ai_configs: HashMap<PlayerId, _> =
         [(P0, config.clone()), (P1, config)].into_iter().collect();
+    if difficulty == AiDifficulty::CEDH {
+        // The combo policy reads the deck's declared bracket, not the difficulty. Declare
+        // P0's deck cEDH for this row so the row measures that policy too.
+        let entry = DeckEntry {
+            card: CardFace::default(),
+            count: 1,
+        };
+        state.deck_pools.clear();
+        for (player, bracket_tier) in [
+            (P0, CommanderBracketTier::Cedh),
+            (P1, CommanderBracketTier::Core),
+        ] {
+            state.deck_pools.push(PlayerDeckPool {
+                player,
+                current_main: Arc::new(vec![entry.clone()]),
+                bracket_tier,
+                ..PlayerDeckPool::default()
+            });
+        }
+    }
     let session = AiSession::arc_from_game(&state);
-    let mut rng = SmallRng::seed_from_u64(7);
+    let mut rng = SmallRng::seed_from_u64(SEED);
 
     let mut report = Report {
         outcome: String::new(),
@@ -483,8 +512,9 @@ fn assembled_combos_played_by_the_ai() {
                     }
                 })
                 .collect();
+            let more = if report.line.len() > 14 { ", …" } else { "" };
             println!(
-                "{difficulty:?}: {} | opponent {} | {} actions | offers {} declared {} declined {}\n    {}",
+                "{difficulty:?}: {} | opponent {} | {} actions | offers {} declared {} declined {}\n    {}{more}",
                 report.outcome,
                 report.opponent_life,
                 report.actions,
@@ -536,6 +566,8 @@ struct Search<'a> {
     resource_taken: bool,
     /// When this search gives up, whatever it has left to try.
     deadline: std::time::Instant,
+    /// Whether the apply or time budget ended the search before it ran out of lines.
+    cut: bool,
 }
 
 enum Settled {
@@ -570,6 +602,7 @@ impl Search<'_> {
     fn settle(&mut self, mut state: GameState, line: &mut Vec<String>) -> Settled {
         loop {
             if self.applies >= SEARCH_APPLIES || std::time::Instant::now() >= self.deadline {
+                self.cut = true;
                 return Settled::Dead;
             }
             let action = match &state.waiting_for {
@@ -595,24 +628,42 @@ impl Search<'_> {
                         schema.deliverable_capacity,
                         certificate.unbounded,
                     ));
-                    // A win is taken to the end, an unbounded resource for a fixed number of
-                    // repetitions, and anything else for the count the engine suggests.
-                    let count = if *predicted_winner == Some(P0) {
+                    // A win is taken to the end where the offer has no measured bound
+                    // (the engine refuses "until lethal" against one that has), an unbounded
+                    // resource for a fixed number of repetitions, and anything else for the
+                    // count the engine suggests, with the engine's own suggested declaration.
+                    let resource = certificate.win_kind == Some(WinKind::Advantage);
+                    let count = if *predicted_winner == Some(P0) && !schema.is_bounded() {
                         IterationCount::UntilLethal
-                    } else if certificate.win_kind == Some(WinKind::Advantage) {
-                        self.resource_taken = true;
+                    } else if resource {
                         IterationCount::Fixed(
                             ADVANTAGE_REPETITIONS.min(schema.deliverable_capacity),
                         )
                     } else {
                         schema.iteration_count.clone()
                     };
-                    let action = GameAction::DeclareShortcut {
+                    let declare = GameAction::DeclareShortcut {
                         count,
-                        template: declaration.clone(),
+                        template: schema.suggestion(declaration.as_ref()).cloned(),
                     };
-                    line.push(label(&state, &action).unwrap_or_default());
-                    action
+                    let text = label(&state, &declare).unwrap_or_default();
+                    // CR 732.2b: a declaration the engine takes opens the other players'
+                    // window or ends the game. One it refuses hands priority back and still
+                    // returns `Ok`, so the result is read, not assumed.
+                    let mut taken = state.clone();
+                    let accepted = self.apply(&mut taken, declare)
+                        && matches!(
+                            taken.waiting_for,
+                            WaitingFor::RespondToShortcut { .. } | WaitingFor::GameOver { .. }
+                        );
+                    if accepted {
+                        line.push(text);
+                        self.resource_taken |= resource;
+                        state = taken;
+                        continue;
+                    }
+                    line.push(format!("{text} refused, decline"));
+                    GameAction::DeclineShortcut
                 }
                 WaitingFor::Priority { player } if *player == P0 => {
                     if state.stack.is_empty() {
@@ -782,8 +833,9 @@ impl Search<'_> {
             }
             Settled::Choice(state) => *state,
         };
-        // The whole state, serialized: a prototype's key, exact and slow. Prompts are not
-        // keyed; each is reached from one keyed priority state.
+        // The serialized state: a prototype's key, slow, and blind to the loop detector's own
+        // history, which is not serialized. Two boards that differ only in that history are
+        // treated as one. Prompts are not keyed; each is reached from one keyed priority state.
         let hash = matches!(state.waiting_for, WaitingFor::Priority { .. }).then(|| {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -824,6 +876,7 @@ impl Search<'_> {
         }
         for action in options {
             if self.applies >= SEARCH_APPLIES || std::time::Instant::now() >= self.deadline {
+                self.cut = true;
                 break;
             }
             let step = line.len();
@@ -853,6 +906,7 @@ fn assembled_combos_found_by_a_plain_search() {
         state.loop_detection = LoopDetectionMode::Interactive;
         let mut outcome = None;
         let mut applies = 0;
+        let mut cut = false;
         let mut offers = Vec::new();
         for depth in [8, 14, 20] {
             let mut search = Search {
@@ -863,11 +917,13 @@ fn assembled_combos_found_by_a_plain_search() {
                 stage: depth,
                 resource_taken: false,
                 deadline: std::time::Instant::now() + SEARCH_TIME,
+                cut: false,
                 trace: std::env::var("COMBO_TRACE").is_ok_and(|want| case.name.contains(&want)),
             };
             let mut line = Vec::new();
             let won = search.dfs(state.clone(), depth, STAGES, &mut line);
             applies += search.applies;
+            cut |= search.cut;
             for offer in search.offers {
                 if !offers.contains(&offer) {
                     offers.push(offer);
@@ -888,7 +944,12 @@ fn assembled_combos_found_by_a_plain_search() {
                 );
             }
             None => {
-                println!("not found, {applies} applies");
+                let why = if cut {
+                    "the budget ran out"
+                } else {
+                    "every line to this depth was tried"
+                };
+                println!("not found, {applies} applies ({why})");
                 for candidate in AiDecisionContract::issue(&state, P0).candidates {
                     let text: String = format!("{:?}", candidate.action)
                         .chars()

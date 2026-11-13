@@ -20,7 +20,7 @@ Engine (upstream work, in `crates/engine/src/analysis` and `crates/engine/src/ga
   recognises it, replays it on copies to confirm it, and offers a shortcut
   (`WaitingFor::LoopShortcut`, CR 732.2a). The player answers with a count, "until
   lethal", or a decline.
-- It is off by default (`LoopDetectionMode::Off`). `On` only ends games on mandatory lethal
+- It is off by default (`LoopDetectionMode::Off`). `On` resolves only mandatory lethal
   loops. `Interactive` makes the offers.
 - A corpus of 62 named combos with hand-written drivers (`analysis/corpus.rs`,
   `cargo combo-verify`). 24 are driven, the rest are gated on a card or deferred by class.
@@ -33,8 +33,9 @@ AI (`crates/phase-ai`):
   for a deck declared cEDH, and only when every piece is already present and affordable.
 - `reach/` finds lethal burn: it proposes a set of sources, plays them on a copy of the
   game, and commits only a line the engine confirmed. This is the model for step 4.
-- `DeckFeatures` detects 24 structural axes of a deck. There is no plan that lasts beyond
-  one decision.
+- `DeckFeatures` detects 24 structural axes of a deck, and `PlanSnapshot` is a mana-curve
+  schedule built once per game. Nothing records how the deck wins or carries a goal from
+  one decision to the next.
 - Two caps stop runaway play: four activations of one ability per turn and three casts of
   one card per turn (`search.rs`). They also stop a seat from playing the first repetition
   of a real loop.
@@ -56,7 +57,8 @@ Baseline, 2026-11-12, fork main `273ad56c8`: see "Baseline" at the end of this f
 
 ### 1. Deck plan
 
-Built once per game and seat, beside `DeckFeatures` in `AiSession::from_game`.
+Built once per game and seat, beside `DeckFeatures` in `AiSession::from_game`. It is a new
+type; the existing `plan::PlanSnapshot` is the curve schedule and keeps its name.
 
 - **Combos in this deck.** A join of the deck's cards against a combo catalog. Each entry
   has its pieces, where each piece must be (battlefield, hand, graveyard, command zone), the
@@ -93,6 +95,11 @@ Loop detection goes on for AI seats (`Interactive`). The two caps stop counting 
 the engine is tracking as a candidate loop, so a seat can finish the first lap and receive
 the offer. A resource-only offer (unbounded mana, tokens, triggers) is accepted when the
 deck plan names a payoff the seat can then use, for a count that covers it.
+
+This needs an engine change as well. For an unbounded offer that names no winner, the
+engine gives the AI one candidate, the decline (`ai_support/candidates.rs`), so today an AI
+seat cannot accept an unbounded mana loop even when it wants to. Mana abilities on the
+battlefield and in the command zone are also left out of the AI's candidates at priority.
 
 ### 4. Playing the line
 
@@ -147,7 +154,8 @@ without Bryan's go-ahead.
 ## Baseline
 
 2026-11-12, fork main `273ad56c8`, loop detection `Interactive`, one turn, opponent at 40
-life with an empty board. Four difficulties per case (Easy, Medium, Hard, cEDH).
+life with an empty board, measurement mode, seed 7. Four rows per case: Easy, Medium, Hard,
+and cEDH with the deck declared cEDH so the combo policy is on.
 
 | Case | Shape | AI wins |
 |---|---|---|
@@ -161,14 +169,16 @@ life with an empty board. Four difficulties per case (Easy, Medium, Hard, cEDH).
 | Thassa's Oracle + Demonic Consultation | two-card win, no loop | 0 of 4 |
 | Exquisite Blood + Sanguine Bond (control) | mandatory once started | 4 of 4 |
 
-The AI wins none of the 32 games that need it to do anything. What the runs show:
+The AI wins none of the 32 games that need it to do anything. That includes the cEDH rows
+for the three combos the hand-written registry knows (Heliod, Kiki-Jiki, Thassa's Oracle).
+What the runs show:
 
 - **It never plays the first lap.** Each step of a loop looks bad alone (shoot your own
   creature, sacrifice a creature, untap something for no reason), so it is never chosen,
   and the engine has nothing to recognise. The only offers the engine made were to repeat
   an ordinary ability a few more times.
-- **It cannot start a mana loop at all.** Mana abilities are left out of the actions the AI
-  is given at priority; they are used only to pay for something. Basalt Monolith, Devoted
+- **It cannot start a mana loop at all.** Mana abilities of permanents are left out of the
+  actions the AI is given at priority; they are used only to pay for something. Basalt Monolith, Devoted
   Druid, Food Chain and Phyrexian Altar loops all begin with one.
 - **It spends the payoff early.** With Ballista in hand it casts it for X=1 or 2 first.
 - **Demonic Consultation stops the seat.** After casting it the AI returns no action
@@ -203,13 +213,16 @@ settles for the design:
   two-stage ones (make the mana, then spend it). The AI's missing part is the search.
 - The search has to be allowed to activate mana abilities at priority.
 - A resource loop and its payoff are two searches. The second starts from the board the
-  first one reached. Without that split the prototype did not finish either mana case.
+  first one reached. Without that split the prototype finished none of the three mana
+  cases.
 - After a token loop the right move is to hand back to ordinary play (attack), so taking an
   unbounded resource has to be a result the search can return, not only a win.
-- Mikaeus + Triskelion and the Altar loop need a look at why no lethal offer appears. Each
-  is either a search-order problem or an engine gap; both go on the bug list until known.
+- Mikaeus + Triskelion and the Altar loop ran out of budget without a lethal offer. Each is
+  either a search-order problem or an engine gap; both go on the bug list until known.
 
-The prototype is test code. It keys visited states by serializing the whole game, which is
-exact and slow, and its lines repeat steps they do not need. `planner::quick_state_hash`
+The prototype is test code. It keys visited states by serializing the game, which is slow
+and leaves out the loop detector's own history (those fields are not serialized), so two
+boards that differ only in that history count as one. Its lines repeat steps they do not
+need. `planner::quick_state_hash`
 was tried first and merged states that differ, so the production search needs its own key
 (the loop detector's normalized state is the candidate).
