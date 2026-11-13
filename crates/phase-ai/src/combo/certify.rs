@@ -57,8 +57,9 @@ use std::hash::{Hash, Hasher};
 use std::mem::{discriminant, Discriminant};
 
 use engine::ai_support::AiDecisionContract;
-use engine::analysis::loop_check::ShortcutResponse;
-use engine::analysis::{IterationCount, ResourceAxis, WinKind};
+use engine::analysis::decision_template::ShortcutDecisionSchema;
+use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse};
+use engine::analysis::{DecisionTemplate, IterationCount, ResourceAxis, WinKind};
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::game_object::GameObject;
 use engine::game::mana_sources::activatable_mana_actions_for_player;
@@ -497,6 +498,37 @@ pub(crate) enum SearchOutcome {
     OutOfBudget,
 }
 
+/// The parts of an open loop-shortcut offer the search reads.
+struct Offer<'a> {
+    predicted_winner: Option<PlayerId>,
+    certificate: &'a LoopCertificate,
+    schema: &'a ShortcutDecisionSchema,
+    declaration: Option<&'a DecisionTemplate>,
+}
+
+/// CR 732.2a: the shortcut offer the game is waiting on `player` to answer as
+/// its proposer, if that is what it is waiting on. The one place this module
+/// reads an offer: it mints none, and what it declares against one goes through
+/// the reducer like any other declaration.
+fn own_offer(state: &GameState, player: PlayerId) -> Option<Offer<'_>> {
+    match &state.waiting_for {
+        WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            certificate,
+            schema,
+            declaration,
+            ..
+        } if *proposer == player => Some(Offer {
+            predicted_winner: *predicted_winner,
+            certificate,
+            schema,
+            declaration: declaration.as_ref(),
+        }),
+        _ => None,
+    }
+}
+
 /// A shortcut declaration the seat can make at one of its offers.
 struct Declaration {
     action: GameAction,
@@ -609,19 +641,15 @@ impl Search<'_> {
     /// the offer is one to decline: a draw, somebody else's win, or more of a
     /// resource the line already holds.
     fn declaration(&self, state: &GameState, path: &Path) -> Option<Declaration> {
-        let WaitingFor::LoopShortcut {
+        let Offer {
             predicted_winner,
             certificate,
             schema,
             declaration,
-            ..
-        } = &state.waiting_for
-        else {
-            return None;
-        };
+        } = own_offer(state, self.player)?;
         // CR 732.2a: "until lethal" names no count, and the engine takes it only
         // against an offer that measured no bound and names the seat the winner.
-        if *predicted_winner == Some(self.player) && !schema.is_bounded() {
+        if predicted_winner == Some(self.player) && !schema.is_bounded() {
             return Some(Declaration {
                 action: GameAction::DeclareShortcut {
                     count: IterationCount::UntilLethal,
@@ -661,7 +689,7 @@ impl Search<'_> {
             action: GameAction::DeclareShortcut {
                 count: IterationCount::Fixed(count),
                 // The engine's own suggested declaration: no pin is built here.
-                template: schema.suggestion(declaration.as_ref()).cloned(),
+                template: schema.suggestion(declaration).cloned(),
             },
             kinds,
             // A count that ends the game, and a resource, are always worth
@@ -696,7 +724,7 @@ impl Search<'_> {
                 return Settled::Dead;
             }
             let action = match &state.waiting_for {
-                WaitingFor::LoopShortcut { proposer, .. } if *proposer == self.player => {
+                _ if own_offer(&state, self.player).is_some() => {
                     let offer = self.declaration(&state, path);
                     if offer.as_ref().is_some_and(|offer| !offer.by_rule) {
                         // To repeat or not is the seat's choice.
@@ -786,7 +814,7 @@ impl Search<'_> {
 
     /// The seat's options at `state`, most promising first.
     fn options(&self, state: &GameState, path: &Path) -> Vec<GameAction> {
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+        if own_offer(state, self.player).is_some() {
             // CR 732.2a: suggesting the shortcut is optional.
             return self
                 .declaration(state, path)
@@ -914,8 +942,8 @@ impl Search<'_> {
         // Taking the seat's own offer is not a step deeper: the offer is the
         // engine's, and what follows it is the next choice. Declining one is a
         // step, and so is a declaration past [`FREE_DECLARATIONS`] in a row.
-        let at_offer = matches!(state.waiting_for, WaitingFor::LoopShortcut { .. })
-            && free_declarations < FREE_DECLARATIONS;
+        let at_offer =
+            own_offer(&state, self.player).is_some() && free_declarations < FREE_DECLARATIONS;
         if depth == 0 && !at_offer {
             self.cut_short = true;
             path.rewind(mark);
