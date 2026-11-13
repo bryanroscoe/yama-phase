@@ -16,9 +16,9 @@
 //!    ([`super::catalog`]). A combo is *live* once every card it names is
 //!    somewhere the seat can use it (any zone but the library and the stack).
 //! 2. [`find_winning_line`] searches for a line on copies of the game. At
-//!    priority it tries only the named cards' casts and activations, mana
-//!    abilities included (CR 605.3a); at a prompt it tries the engine-issued
-//!    answers. Opponents are assumed to pass (CR 117.3d) and to accept a
+//!    priority it tries the named cards' casts and activations, mana abilities
+//!    included (CR 605.3a), and once it holds an unbounded resource, the
+//!    seat's other cards too; at a prompt it tries the engine-issued answers. Opponents are assumed to pass (CR 117.3d) and to accept a
 //!    proposed shortcut (CR 732.2c). When the engine offers a loop shortcut
 //!    (CR 732.2a) that wins or makes an unbounded resource, the search takes
 //!    it; an offer only to repeat what the seat just did is a choice like any
@@ -37,8 +37,10 @@
 //!
 //! - The search never passes priority on an empty stack, so a combo whose win is
 //!   an attack (a token loop) is not found here.
-//! - It tries only the cards the catalog names, so a loop that needs a payoff
-//!   the entry does not list finds none.
+//! - Until a line holds an unbounded resource it tries only the cards the
+//!   catalog names. After that it tries every cast and activation the seat
+//!   has, so a payoff the entry does not list is found if the budget reaches
+//!   it; nothing ranks one unnamed card above another.
 //! - It runs only on the seat's own main phase with an empty stack, and only
 //!   when the game's loop detection is interactive, because the shortcut is how
 //!   an unbounded loop ends.
@@ -854,22 +856,25 @@ impl Search<'_> {
             .filter_map(|action| {
                 let rank = match &action {
                     GameAction::PassPriority => return None,
+                    // Before the line holds a resource only the named cards are
+                    // tried: they are what makes the loop. Once it holds one, any
+                    // card may be what spends it, so every cast and activation
+                    // the seat has is tried, the named cards first.
                     GameAction::ActivateAbility { source_id, .. } if at_priority => {
-                        if !self.is_piece(state, *source_id) {
-                            return None;
+                        match (self.is_piece(state, *source_id), holds_resource) {
+                            (true, _) => 1,
+                            (false, true) => 4,
+                            (false, false) => return None,
                         }
-                        1
                     }
                     GameAction::CastSpell { object_id, .. } if at_priority => {
-                        if !self.is_piece(state, *object_id) {
-                            return None;
-                        }
                         // With a resource in hand the payoff comes first; before
                         // that, the loop does.
-                        if holds_resource {
-                            0
-                        } else {
-                            2
+                        match (self.is_piece(state, *object_id), holds_resource) {
+                            (true, true) => 0,
+                            (true, false) => 2,
+                            (false, true) => 3,
+                            (false, false) => return None,
                         }
                     }
                     _ if at_priority => return None,
