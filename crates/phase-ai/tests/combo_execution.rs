@@ -635,6 +635,30 @@ fn a_seat_wins_with_a_catalogued_mana_loop_and_its_payoff() {
     }
 }
 
+/// A catalog entry names the cards that make the loop, not what spends it. With the mana
+/// loop catalogued and the payoff not named, the seat still finds the payoff in its hand:
+/// a creature whose counters are its damage, or a sorcery with X in its cost.
+#[test]
+fn a_seat_finds_a_payoff_the_catalog_does_not_name() {
+    let db = integration_card_db();
+    for payoff in ["Walking Ballista", "Fireball"] {
+        let mut board = Board::new(&db);
+        let monolith = board.battlefield("Basalt Monolith");
+        let artifact = board.battlefield("Power Artifact");
+        board.attach(artifact, monolith);
+        board.hand(payoff);
+        board.hand("Grizzly Bears");
+        board.lands("Mountain", 2);
+        let report = play_turn(
+            board.build(),
+            AiDifficulty::Medium,
+            LoopDetectionMode::Interactive,
+            &["Basalt Monolith", "Power Artifact"],
+        );
+        assert_eq!(report.outcome, "WON", "{payoff}: {:?}", report.line);
+    }
+}
+
 /// CR 104.2a: with three opponents the game is won only when all three are out. The loop is
 /// offered against one opponent at a time, and the line carries on to the next.
 #[test]

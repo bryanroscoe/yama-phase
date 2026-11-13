@@ -62,9 +62,11 @@ Baseline, 2026-11-12, fork main `273ad56c8`: see "Baseline" at the end of this f
   seat its entries directly.
 - **Certified lines** (`combo/certify.rs`). When every card of one of a seat's entries is
   somewhere the seat can use it, and it is the seat's main phase with an empty stack, the
-  seat searches copies of the game for a line that wins. It tries only the named cards'
-  casts and activations, mana abilities included. Only a line the reducer plays to a won
-  game is kept. The seat then plays it one step per decision and drops it if the game
+  seat searches copies of the game for a line that wins. It tries the named cards' casts
+  and activations, mana abilities included. Once the line holds an unbounded resource it
+  tries the seat's other cards too, so the payoff need not be in the entry (a test finds
+  Walking Ballista and Fireball in hand behind an entry naming only Basalt Monolith and
+  Power Artifact). Only a line the reducer plays to a won game is kept. The seat then plays it one step per decision and drops it if the game
   stops matching what the line expected.
 - **Engine** (`ai_support/context.rs`). The AI's decision contract admits two things the
   candidate sample leaves out: a permanent's mana ability at priority (CR 605.3a), checked
@@ -100,9 +102,9 @@ The bench again, with each case's cards given to the seat as a catalog entry
 Times are one search on an M-series Mac, `tool` profile. A four-player game with Heliod and
 Ballista is also won: the line finishes one opponent and carries on to the next (222 ms).
 
-Seven tests in the same file are gates, not measurements: the damage loop at three
-difficulties, the three mana loops, the four-player game, two controls (no catalog; loop
-detection off), and the two decision-contract rules on their own.
+Eight tests in the same file are gates, not measurements: the damage loop at three
+difficulties, the three mana loops, an unnamed payoff, the four-player game, two controls
+(no catalog; loop detection off), and the two decision-contract rules on their own.
 
 What the four misses need:
 
@@ -213,6 +215,8 @@ without Bryan's go-ahead.
    export, typed outcomes, and payoffs. In the October 2026 Spellbook export about 20% of
    Commander-legal variants win by themselves; about 29% only make mana and about 51% only
    make triggers, tokens or cards, so most entries need a payoff from the deck beside them.
+   The search now looks for one among the seat's other cards once it holds a resource
+   (2026-11-13); nothing yet ranks a likely payoff above the rest of the hand.
 6. **Goal**: tutors, mulligans, keeping and protecting pieces, score term.
 7. **Roles and opponents.**
 8. **Per-deck report** in Yama: for each deck, which of its combos the AI can run, and the
