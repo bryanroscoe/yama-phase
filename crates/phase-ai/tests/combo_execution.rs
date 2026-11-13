@@ -33,12 +33,15 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{GameState, LoopDetectionMode, PlayerDeckPool, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, LoopDetectionMode, PlayerDeckPool, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use phase_ai::auto_play::run_ai_action;
+use phase_ai::combo::CatalogCombo;
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::rngs::SmallRng;
@@ -70,12 +73,21 @@ struct Board<'a> {
 
 impl<'a> Board<'a> {
     fn new(db: &'a CardDatabase) -> Self {
-        let mut scenario = GameScenario::new();
+        Self::for_players(db, 2)
+    }
+
+    /// A board for `players` seats, each at Commander's starting life.
+    fn for_players(db: &'a CardDatabase, players: u8) -> Self {
+        let mut scenario = if players == 2 {
+            GameScenario::new()
+        } else {
+            GameScenario::new_n_player(players, SEED)
+        };
         scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_life(P0, OPPONENT_LIFE);
-        scenario.with_life(P1, OPPONENT_LIFE);
-        scenario.with_library_top(P0, &["Wastes"; 30]);
-        scenario.with_library_top(P1, &["Wastes"; 30]);
+        for seat in (0..players).map(PlayerId) {
+            scenario.with_life(seat, OPPONENT_LIFE);
+            scenario.with_library_top(seat, &["Wastes"; 30]);
+        }
         Board {
             scenario,
             db,
@@ -340,15 +352,26 @@ fn label(state: &GameState, action: &GameAction) -> Option<String> {
     })
 }
 
-fn play_turn(mut state: GameState, difficulty: AiDifficulty) -> Report {
-    state.loop_detection = LoopDetectionMode::Interactive;
+/// Let the AI seats play P0's turn. `catalogued` is the combo P0's session is told its deck
+/// holds, by card name; empty leaves the session without a catalog.
+fn play_turn(
+    mut state: GameState,
+    difficulty: AiDifficulty,
+    loops: LoopDetectionMode,
+    catalogued: &[&str],
+) -> Report {
+    state.loop_detection = loops;
     let turn = state.turn_number;
-    let ai_players: HashSet<PlayerId> = [P0, P1].into_iter().collect();
+    let ai_players: HashSet<PlayerId> = state.players.iter().map(|seat| seat.id).collect();
     // Measurement mode: search is bounded by nodes and depth, never the clock, so a row is a
     // function of the build and the seed.
-    let config = create_config_for_players(difficulty, Platform::Native, 2).into_measurement(SEED);
-    let ai_configs: HashMap<PlayerId, _> =
-        [(P0, config.clone()), (P1, config)].into_iter().collect();
+    let seats = u8::try_from(ai_players.len()).expect("a table of a few seats");
+    let config =
+        create_config_for_players(difficulty, Platform::Native, seats).into_measurement(SEED);
+    let ai_configs: HashMap<PlayerId, _> = ai_players
+        .iter()
+        .map(|seat| (*seat, config.clone()))
+        .collect();
     if difficulty == AiDifficulty::CEDH {
         // The combo policy reads the deck's declared bracket, not the difficulty. Declare
         // P0's deck cEDH for this row so the row measures that policy too.
@@ -369,7 +392,17 @@ fn play_turn(mut state: GameState, difficulty: AiDifficulty) -> Report {
             });
         }
     }
-    let session = AiSession::arc_from_game(&state);
+    let mut session = AiSession::from_game(&state);
+    if !catalogued.is_empty() {
+        session = session.with_combos(
+            P0,
+            vec![CatalogCombo {
+                id: "bench".to_string(),
+                cards: catalogued.iter().map(|card| card.to_string()).collect(),
+            }],
+        );
+    }
+    let session = Arc::new(session);
     let mut rng = SmallRng::seed_from_u64(SEED);
 
     let mut report = Report {
@@ -485,17 +518,38 @@ fn candidate_cycle_summary(state: &GameState) -> Vec<String> {
 #[test]
 #[ignore = "measurement, not a gate: prints one row per case and difficulty"]
 fn assembled_combos_played_by_the_ai() {
+    print_bench(false);
+}
+
+/// The same bench with each case's cards given to P0's session as a catalogued combo.
+#[test]
+#[ignore = "measurement, not a gate: prints one row per case and difficulty"]
+fn assembled_combos_played_by_the_ai_with_a_catalog() {
+    print_bench(true);
+}
+
+fn print_bench(with_catalog: bool) {
     let db = integration_card_db();
     let mut won = 0usize;
     let mut total = 0usize;
+    let only = std::env::var("COMBO_ONLY").ok();
     for case in CASES {
+        if only.as_ref().is_some_and(|want| !case.name.contains(want)) {
+            continue;
+        }
         let (name, board) = (case.name, case.board);
         println!("\n== {name}");
         for cycle in candidate_cycle_summary(&board(&db)) {
             println!("  cycle: {cycle}");
         }
         for difficulty in DIFFICULTIES {
-            let report = play_turn(board(&db), *difficulty);
+            let catalogued: &[&str] = if with_catalog { case.pieces } else { &[] };
+            let report = play_turn(
+                board(&db),
+                *difficulty,
+                LoopDetectionMode::Interactive,
+                catalogued,
+            );
             total += 1;
             if report.outcome == "WON" {
                 won += 1;
@@ -529,6 +583,239 @@ fn assembled_combos_played_by_the_ai() {
         }
     }
     println!("\nwon {won} of {total}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gates: a seat told its deck holds a combo wins with it once the pieces are assembled.
+// ---------------------------------------------------------------------------------------------
+
+fn case(name: &str) -> &'static Case {
+    CASES
+        .iter()
+        .find(|case| case.name == name)
+        .expect("a bench case by that name")
+}
+
+/// A loop that deals the damage itself, at every searching and non-searching difficulty the
+/// lab runs.
+#[test]
+fn a_seat_wins_with_a_catalogued_damage_loop() {
+    let db = integration_card_db();
+    let heliod = case("heliod + ballista");
+    for difficulty in [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard] {
+        let report = play_turn(
+            (heliod.board)(&db),
+            difficulty,
+            LoopDetectionMode::Interactive,
+            heliod.pieces,
+        );
+        assert_eq!(report.outcome, "WON", "{difficulty:?}: {:?}", report.line);
+    }
+}
+
+/// A loop that only makes mana, beside a payoff in hand: the seat makes the mana, casts the
+/// payoff with it and wins. Three sources of the mana: an artifact that untaps itself, a
+/// creature that untaps itself, and a creature exiled and cast again.
+#[test]
+fn a_seat_wins_with_a_catalogued_mana_loop_and_its_payoff() {
+    let db = integration_card_db();
+    for name in [
+        "food chain + scourge, ballista in hand",
+        "basalt + power artifact, ballista in hand",
+        "druid + vizier, ballista in hand",
+    ] {
+        let case = case(name);
+        let report = play_turn(
+            (case.board)(&db),
+            AiDifficulty::Medium,
+            LoopDetectionMode::Interactive,
+            case.pieces,
+        );
+        assert_eq!(report.outcome, "WON", "{name}: {:?}", report.line);
+    }
+}
+
+/// CR 104.2a: with three opponents the game is won only when all three are out. The loop is
+/// offered against one opponent at a time, and the line carries on to the next.
+#[test]
+fn a_seat_wins_a_four_player_game_with_a_catalogued_damage_loop() {
+    let db = integration_card_db();
+    let mut board = Board::for_players(&db, 4);
+    board.battlefield("Heliod, Sun-Crowned");
+    let ballista = board.battlefield("Walking Ballista");
+    board
+        .scenario
+        .with_counter(ballista, CounterType::Plus1Plus1, 2);
+    board.lands("Plains", 4);
+    let report = play_turn(
+        board.build(),
+        AiDifficulty::Medium,
+        LoopDetectionMode::Interactive,
+        &["Heliod, Sun-Crowned", "Walking Ballista"],
+    );
+    assert_eq!(report.outcome, "WON", "{:?}", report.line);
+}
+
+/// The catalog is what changes the play: the same board with no catalog is not won.
+#[test]
+fn a_seat_without_a_catalog_does_not_find_the_loop() {
+    let db = integration_card_db();
+    let heliod = case("heliod + ballista");
+    let report = play_turn(
+        (heliod.board)(&db),
+        AiDifficulty::Medium,
+        LoopDetectionMode::Interactive,
+        &[],
+    );
+    assert_ne!(report.outcome, "WON", "{:?}", report.line);
+}
+
+/// CR 732.2a: the line ends in a shortcut only the interactive detector offers, so with the
+/// detector off the seat does not start one.
+#[test]
+fn a_seat_does_not_search_with_loop_detection_off() {
+    let db = integration_card_db();
+    let heliod = case("heliod + ballista");
+    let report = play_turn(
+        (heliod.board)(&db),
+        AiDifficulty::Medium,
+        LoopDetectionMode::Off,
+        heliod.pieces,
+    );
+    assert_ne!(report.outcome, "WON", "{:?}", report.line);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The decision contract: what a certified line may submit beyond the candidate sample.
+// ---------------------------------------------------------------------------------------------
+
+/// Basalt Monolith's two activations on the Basalt Monolith board: the mana ability and the
+/// untap.
+fn basalt_abilities(state: &GameState) -> (GameAction, GameAction) {
+    let monolith = state
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == "Basalt Monolith")
+        .map(|(id, _)| *id)
+        .expect("Basalt Monolith is on the board");
+    let activate = |ability_index| GameAction::ActivateAbility {
+        source_id: monolith,
+        ability_index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    let mana = engine::game::mana_sources::activatable_mana_actions_for_player(state, P0)
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == monolith)
+        })
+        .expect("the untapped Monolith's mana ability is activatable");
+    let untap = [0, 1]
+        .into_iter()
+        .map(activate)
+        .find(|action| *action != mana)
+        .expect("the other ability");
+    (mana, untap)
+}
+
+/// CR 605.3a: a permanent's mana ability is in the seat's priority domain though the
+/// candidate sample leaves it out, and only for the seat that holds priority.
+#[test]
+fn the_decision_contract_admits_a_permanents_mana_ability_at_priority() {
+    let db = integration_card_db();
+    let state = basalt_power_artifact_ballista(&db);
+    let (mana, _) = basalt_abilities(&state);
+    let contract = AiDecisionContract::issue(&state, P0);
+    assert!(
+        !contract
+            .candidates
+            .iter()
+            .any(|candidate| candidate.action == mana),
+        "the sample leaves the mana ability out"
+    );
+    assert!(contract.contains_action(&state, &mana));
+
+    // An activation the mana enumerator does not list is still refused.
+    let GameAction::ActivateAbility { source_id, .. } = mana else {
+        unreachable!("a mana ability activation");
+    };
+    let unlisted = GameAction::ActivateAbility {
+        source_id,
+        ability_index: 99,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(!contract.contains_action(&state, &unlisted));
+    // The seat without priority gets nothing from this.
+    assert!(!AiDecisionContract::issue(&state, P1).contains_action(&state, &mana));
+}
+
+/// CR 732.2a: at an offer for an unbounded loop the sample publishes no count for the seat to
+/// take, and the contract admits each count from one to the offer's capacity with the
+/// engine's own declaration, and none outside it.
+#[test]
+fn the_decision_contract_admits_a_count_within_an_unbounded_offers_capacity() {
+    let db = integration_card_db();
+    let mut state = basalt_power_artifact_ballista(&db);
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let (mana, untap) = basalt_abilities(&state);
+    let apply = |state: &mut GameState, action: GameAction| {
+        engine::game::engine::apply_as_current_for_simulation(state, action)
+            .expect("the reducer takes the action");
+    };
+    // Tap for mana and untap, lap after lap, declining any offer only to repeat a step,
+    // until the engine offers the loop itself.
+    let turn = state.turn_number;
+    let mut laps = [mana, untap].into_iter().cycle();
+    let (capacity, suggestion) = loop {
+        match &state.waiting_for {
+            WaitingFor::LoopShortcut {
+                certificate,
+                schema,
+                declaration,
+                ..
+            } if certificate.win_kind == Some(WinKind::Advantage) => {
+                break (
+                    schema.deliverable_capacity,
+                    schema.suggestion(declaration.as_ref()).cloned(),
+                );
+            }
+            WaitingFor::LoopShortcut { .. } => apply(&mut state, GameAction::DeclineShortcut),
+            WaitingFor::Priority { player } if *player == P0 && state.stack.is_empty() => {
+                let next = laps.next().expect("a cycle does not end");
+                apply(&mut state, next);
+            }
+            WaitingFor::Priority { .. } => apply(&mut state, GameAction::PassPriority),
+            other => panic!("an unexpected prompt on the way to the offer: {other:?}"),
+        }
+        assert_eq!(
+            state.turn_number, turn,
+            "the engine offered no loop for Basalt Monolith under Power Artifact"
+        );
+    };
+
+    let declare = |count| GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(count),
+        template: suggestion.clone(),
+    };
+    let contract = AiDecisionContract::issue(&state, P0);
+    assert!(
+        !contract
+            .candidates
+            .iter()
+            .any(|candidate| matches!(candidate.action, GameAction::DeclareShortcut { .. })),
+        "the sample offers this seat only the decline"
+    );
+    assert!(capacity > 5);
+    for count in [1, 5, capacity] {
+        assert!(contract.contains_action(&state, &declare(count)), "{count}");
+    }
+    for count in [0, capacity + 1] {
+        assert!(
+            !contract.contains_action(&state, &declare(count)),
+            "{count}"
+        );
+    }
+    // Only the proposer may declare.
+    assert!(!AiDecisionContract::issue(&state, P1).contains_action(&state, &declare(5)));
 }
 
 // ---------------------------------------------------------------------------------------------

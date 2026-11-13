@@ -1,7 +1,8 @@
 # Combos and deck plans in phase-ai
 
-Status: plan, started 2026-11-12. The bench and a search prototype exist (step 1); nothing
-else here is built.
+Status: started 2026-11-12. Built so far: the bench (step 1), the engine change and the
+certified line search (steps 3 and 4, first version), and a host-supplied catalog with its
+join against a deck (the first part of step 5). See "What is built" below.
 
 ## Goal
 
@@ -52,6 +53,66 @@ cargo +stable test --profile tool -p phase-ai --test combo_execution -- --ignore
 ```
 
 Baseline, 2026-11-12, fork main `273ad56c8`: see "Baseline" at the end of this file.
+
+## What is built
+
+- **Catalog** (`combo/catalog.rs`). `ComboCatalog` is a list of entries, each an id and
+  the names of the cards that combine. `AiSession::with_combo_catalog` keeps, per seat,
+  the entries whose cards are all in that seat's deck. `AiSession::with_combos` gives a
+  seat its entries directly.
+- **Certified lines** (`combo/certify.rs`). When every card of one of a seat's entries is
+  somewhere the seat can use it, and it is the seat's main phase with an empty stack, the
+  seat searches copies of the game for a line that wins. It tries only the named cards'
+  casts and activations, mana abilities included. Only a line the reducer plays to a won
+  game is kept. The seat then plays it one step per decision and drops it if the game
+  stops matching what the line expected.
+- **Engine** (`ai_support/context.rs`). The AI's decision contract admits two things the
+  candidate sample leaves out: a permanent's mana ability at priority (CR 605.3a), checked
+  against the engine's mana-source enumerator, and any repetition count from one to a
+  counted loop offer's capacity (CR 732.2a), under the checks the declare handler makes of
+  a count and with the engine's own suggested declaration. Neither is added to the
+  candidates the AI scores, so ordinary play is unchanged.
+
+A seat with no catalog, or a game without interactive loop detection, plays exactly as
+before. So does a seat at the lowest difficulty (no play lookahead), a preset that samples
+hidden zones, and a seat whose turn another player controls.
+
+A search is bounded by a work budget and, outside measurement mode, by the clock (two
+seconds, or the decision's own time budget if that is shorter). A seat starts at most three
+searches a turn, and one that ran out of budget waits three of the seat's turns.
+
+### With the combo catalogued
+
+The bench again, with each case's cards given to the seat as a catalog entry
+(`assembled_combos_played_by_the_ai_with_a_catalog`), four rows per case:
+
+| Case | No catalog | Catalogued | Search |
+|---|---|---|---|
+| Heliod + Walking Ballista | 0 of 4 | 4 of 4 | about 40 ms |
+| Basalt Monolith + Power Artifact, Ballista | 0 of 4 | 4 of 4 | about 340 ms |
+| Devoted Druid + Vizier of Remedies, Ballista | 0 of 4 | 4 of 4 | about 340 ms |
+| Food Chain + Eternal Scourge, Ballista | 0 of 4 | 4 of 4 | about 360 ms |
+| Kiki-Jiki + Felidar Guardian | 0 of 4 | 0 of 4 | about 5 s, then gives up |
+| Mikaeus + Triskelion | 0 of 4 | 0 of 4 | about 2 s, then gives up |
+| Phyrexian Altar + Gravecrawler + Blood Artist | 0 of 4 | 0 of 4 | about 2 s, then gives up |
+| Thassa's Oracle + Demonic Consultation | 0 of 4 | 0 of 4 | a few ms |
+
+Times are one search on an M-series Mac, `tool` profile. A four-player game with Heliod and
+Ballista is also won: the line finishes one opponent and carries on to the next (222 ms).
+
+Seven tests in the same file are gates, not measurements: the damage loop at three
+difficulties, the three mana loops, the four-player game, two controls (no catalog; loop
+detection off), and the two decision-contract rules on their own.
+
+What the four misses need:
+
+- **Kiki-Jiki + Felidar Guardian**: the search has to hand back to ordinary play after it
+  takes the tokens, so the seat attacks with them.
+- **Mikaeus + Triskelion, Altar + Gravecrawler + Blood Artist**: the lap is long and has
+  many answers (which creature, which color, which target), and the search runs out of
+  budget. Ranking a mana-color choice by what the named cards cost is the first thing to
+  try.
+- **Thassa's Oracle + Demonic Consultation**: the AI has no answer to the card-name prompt.
 
 ## Design
 
@@ -142,10 +203,16 @@ without Bryan's go-ahead.
 ## Steps
 
 1. **Bench and baseline.** Done 2026-11-12.
-2. **Loop detection on** for AI seats in Yama's lab and games (a Yama change).
-3. **Finish and accept loops**: the cap change, and resource offers with a payoff.
-4. **Certified line search** for an assembled route.
-5. **Deck plan**: catalog type, Spellbook join, typed outcomes, payoffs.
+2. **Loop detection on** for AI seats in Yama's lab, and the catalog passed in (a Yama
+   change). Live Yama games already run with loop detection on.
+3. **Finish and accept loops.** First version done 2026-11-13: a certified line is exempt
+   from the caps, and the decision contract admits its mana abilities and counts.
+4. **Certified line search** for an assembled route. First version done 2026-11-13; see
+   the misses above.
+5. **Deck plan**: catalog type and join done 2026-11-13. Still to do: the Spellbook
+   export, typed outcomes, and payoffs. In the October 2026 Spellbook export about 20% of
+   Commander-legal variants win by themselves; about 29% only make mana and about 51% only
+   make triggers, tokens or cards, so most entries need a payoff from the deck beside them.
 6. **Goal**: tutors, mulligans, keeping and protecting pieces, score term.
 7. **Roles and opponents.**
 8. **Per-deck report** in Yama: for each deck, which of its combos the AI can run, and the

@@ -423,6 +423,13 @@ fn choose_action_with_session_inner(
 
     if durable_pact_routes {
         retain_live_pact_route(state, ai_player, session);
+        // A certified combo line outranks every other answer: its last step is a
+        // won game. Only a session that outlives this decision can hold one.
+        if let Some(action) =
+            crate::combo::certify::next_line_action(state, ai_player, config, session, contract)
+        {
+            return direct(Some(action));
+        }
     }
 
     // A wholly unmodeled spell still has a real, engine-owned target prompt.
