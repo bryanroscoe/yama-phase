@@ -343,7 +343,16 @@ fn census(needle: &str) -> Vec<Hit> {
 /// seventh benign read, the restore validator's `visit_waiting_for_chains` in
 /// `types/game_state.rs`, names the variant only in its exhaustive no-op arm: a
 /// loop-shortcut offer holds no suspended ability chain to check, and the walk
-/// mints no offer and reads none of its fields.
+/// mints no offer and reads none of its fields. An eighth benign read,
+/// `AiDecisionContract::contains_action` in `ai_support/context.rs`, reads an
+/// already-open offer to say whether a `DeclareShortcut` count is in the AI's
+/// decision domain: it mints no offer, the declaration it admits is the offer's
+/// own suggestion, and it asks `declaration_conforms` rather than a predicate of
+/// its own (CONJUNCT 2 below names it as a call site). A ninth benign read,
+/// `own_offer` in `phase-ai/src/combo/certify.rs`, hands an already-open offer's
+/// certificate, schema and published declaration to a search that plays on
+/// cloned states; what that search declares goes through the declare handler
+/// like any other declaration, and it mints no offer.
 ///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
@@ -376,7 +385,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (29, 29),
+        (31, 29),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The four CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -405,6 +414,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         multiset,
         vec![
             ("engine/src/ai_support/candidates.rs".to_string(), 1),
+            ("engine/src/ai_support/context.rs".to_string(), 1),
             ("engine/src/analysis/corpus.rs".to_string(), 1),
             ("engine/src/game/derived_views.rs".to_string(), 1),
             ("engine/src/game/engine.rs".to_string(), 6),
@@ -413,6 +423,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
             ("engine/src/game/scenario.rs".to_string(), 1),
             ("engine/src/game/visibility.rs".to_string(), 3),
             ("engine/src/types/game_state.rs".to_string(), 6),
+            ("phase-ai/src/combo/certify.rs".to_string(), 1),
             ("phase-ai/src/decision_kind.rs".to_string(), 1),
             ("phase-ai/src/policies/loop_shortcut.rs".to_string(), 1),
             ("phase-ai/src/projection.rs".to_string(), 1),
@@ -508,11 +519,15 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
     assert_eq!(
         authority_per_file.into_iter().collect::<Vec<_>>(),
         vec![
+            ("engine/src/ai_support/context.rs", 1),
             ("engine/src/analysis/decision_template.rs", 1),
             ("engine/src/game/engine.rs", 3),
             ("engine/src/game/interaction.rs", 1),
         ],
-        "expected 1 definition + 4 call sites: \
+        "expected 1 definition + 5 call sites: \
+         `ai_support/context.rs::AiDecisionContract::contains_action` (the AI's decision \
+         domain: a count other than the suggestion is admitted only for a declaration this \
+         authority passes over the range that count drives), \
          `game/engine.rs::handle_declare_shortcut` (accept), \
          `game/engine.rs::build_bounded_declaration` (publish), \
          `game/engine.rs::bounded_offer_tail` (publish the suggestion), \

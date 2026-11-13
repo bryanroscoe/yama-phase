@@ -20,6 +20,8 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::util::Deadline;
 
+use crate::combo::certify::{PlannedLine, SearchMemo};
+use crate::combo::{CatalogCombo, ComboCatalog};
 use crate::deck_knowledge::{pool_holder, pool_seats};
 use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
@@ -49,6 +51,14 @@ pub struct AiSession {
     pub plan: HashMap<PlayerId, PlanSnapshot>,
     pub strategy: HashMap<PlayerId, StrategyProfile>,
     pub synergy: HashMap<PlayerId, SynergyGraph>,
+    /// The catalogued combos whose cards are all in each seat's deck. Empty
+    /// unless the host supplied a catalog ([`AiSession::with_combo_catalog`]).
+    pub combos: HashMap<PlayerId, Arc<Vec<CatalogCombo>>>,
+    /// A certified combo line each seat is playing out, one step per decision.
+    pub(crate) combo_lines: Arc<RwLock<HashMap<PlayerId, PlannedLine>>>,
+    /// The position each seat last searched for a combo line, so a position
+    /// that held none is not searched again.
+    pub(crate) combo_searched: Arc<RwLock<HashMap<PlayerId, SearchMemo>>>,
     pub memory: Arc<RwLock<PolicyMemory>>,
     /// Turn-scoped cache for opponent-turn projections. Key includes
     /// `turn_number` + `active_player`, so stale entries from prior turns
@@ -99,6 +109,8 @@ impl std::fmt::Debug for AiSession {
             .field("plan", &self.plan)
             .field("strategy", &self.strategy)
             .field("synergy", &self.synergy)
+            .field("combos", &self.combos)
+            .field("combo_lines", &self.combo_lines)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
             .field("projection_bail_cache", &self.projection_bail_cache)
@@ -156,6 +168,9 @@ impl AiSession {
             plan,
             strategy,
             synergy,
+            combos: HashMap::new(),
+            combo_lines: Arc::default(),
+            combo_searched: Arc::default(),
             memory: Arc::default(),
             projection_cache: Arc::default(),
             projection_bail_cache: Arc::default(),
@@ -169,6 +184,28 @@ impl AiSession {
             #[cfg(test)]
             projection_deadline_log: Arc::default(),
         }
+    }
+
+    /// Join a host-supplied combo catalog against each seat's deck. The seat
+    /// then looks for a winning line whenever every card of one of its combos
+    /// is somewhere it can use (see [`crate::combo`]). Every seat that shares a
+    /// pool's library shares its combos.
+    pub fn with_combo_catalog(mut self, state: &GameState, catalog: &ComboCatalog) -> Self {
+        for pool in &state.deck_pools {
+            let deck = analysis_deck(&pool.current_main, &pool.current_commander);
+            let combos = Arc::new(catalog.combos_in_deck(&deck));
+            for seat in std::iter::once(pool.player).chain(pool_seats(state, pool.player)) {
+                self.combos.insert(seat, Arc::clone(&combos));
+            }
+        }
+        self
+    }
+
+    /// Give one seat its combos directly, for a caller that has already joined
+    /// them or has no deck pool to join against.
+    pub fn with_combos(mut self, player: PlayerId, combos: Vec<CatalogCombo>) -> Self {
+        self.combos.insert(player, Arc::new(combos));
+        self
     }
 
     /// Build a session for a single player from an explicit deck list.

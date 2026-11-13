@@ -60,6 +60,8 @@ finished resolution had opened.
 | fix(ai): score free-for-all attacks as a whole against the defender's block | work | Reuse `BlockStats`/`block_exchange` for gang blocks (indestructible, first strike) |
 | fix(ai): no two-player race chumps with two or more opponents left | ready | |
 | fix(ai): time board wipes by the leading opponent's board in a free-for-all | work | Apply the sweeper's filters to the leader's count too |
+| feat(engine): the AI's decision contract admits priority mana abilities and every deliverable shortcut count | work | Engine tests for both arms; run through `/engine-implementer`. Touches the area of upstream #10041 |
+| feat(ai): find and play the certified line of a catalogued combo | work | Needs maintainer agreement on a host-supplied catalog first; unit tests for `PlannedLine` and `SearchMemo`; `cargo ai-gate` report. Plan and measurements in `AI-COMBOS.md` |
 
 ## Rules and parser
 

@@ -1,6 +1,7 @@
 use crate::types::action_rejection::ActionRejection;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
 
+use crate::analysis::decision_template::{declaration_conforms, AimContext, IterationCount};
 use crate::game::turn_control;
 use crate::types::actions::GameAction;
 use crate::types::player::PlayerId;
@@ -159,11 +160,84 @@ impl AiDecisionContract {
                 crate::game::combat::validate_blockers_for_player(state, *player, assignments)
                     .is_ok()
             }
-            _ => self
-                .candidates
-                .iter()
-                .any(|candidate| candidate_action_matches(&candidate.action, action)),
+            // CR 605.3a: a player may activate a mana ability whenever they have
+            // priority. The candidate sample leaves a permanent's mana abilities out
+            // of the priority domain, where each would be one more branch at every
+            // search node, so a seat that plays one for its own sake (a lap of a mana
+            // loop) is checked against the engine's mana-source enumerator, the
+            // authority the payment window and the human boundary already share.
+            (WaitingFor::Priority { player }, GameAction::ActivateAbility { .. })
+                if *player == self.semantic_owner =>
+            {
+                self.issued(action)
+                    || crate::game::mana_sources::activatable_mana_actions_for_player(
+                        state, *player,
+                    )
+                    .contains(action)
+            }
+            // CR 732.2a: the proposer of a counted loop may specify any number of
+            // repetitions the offer can deliver. The candidate sample publishes one
+            // count, the suggestion; this arm admits the others under the checks the
+            // declare handler and the human boundary make of a count: a counted
+            // offer, a count inside the offer's capacity and the engine's budget, the
+            // engine's own suggested declaration (no pin here was built outside the
+            // engine), that declaration conforming over the range this count drives,
+            // and a take the counting replay did not rule out.
+            (
+                WaitingFor::LoopShortcut {
+                    proposer,
+                    schema,
+                    certificate,
+                    declaration,
+                    period,
+                    counted_take,
+                    ..
+                },
+                GameAction::DeclareShortcut {
+                    count: count @ IterationCount::Fixed(repetitions),
+                    template,
+                },
+            ) if *proposer == self.semantic_owner => {
+                self.issued(action) || {
+                    let suggestion = schema.suggestion(declaration.as_ref());
+                    let capacity = schema
+                        .deliverable_capacity
+                        .min(crate::game::engine::MAX_SHORTCUT_CYCLES);
+                    matches!(schema.iteration_count, IterationCount::Fixed(_))
+                        && (1..=capacity).contains(repetitions)
+                        && counted_take.refusal(*repetitions).is_none()
+                        && template.as_ref() == suggestion
+                        && match suggestion {
+                            Some(suggested) => declaration_conforms(
+                                schema,
+                                suggested,
+                                crate::game::engine::shortcut_validated_range(
+                                    count,
+                                    Some(suggested),
+                                ),
+                                AimContext {
+                                    proposer: *proposer,
+                                    per_cycle: certificate.per_cycle.as_ref(),
+                                    published: declaration.as_ref(),
+                                },
+                                period.recorded_answers(),
+                                state,
+                            ),
+                            // A declaration with no pins is complete only where the
+                            // offer exposes none or carries the period its take replays.
+                            None => schema.points.is_empty() || !period.is_empty(),
+                        }
+                }
+            }
+            _ => self.issued(action),
         }
+    }
+
+    /// Whether the candidate sample itself holds `action`.
+    fn issued(&self, action: &GameAction) -> bool {
+        self.candidates
+            .iter()
+            .any(|candidate| candidate_action_matches(&candidate.action, action))
     }
 }
 
