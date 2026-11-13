@@ -779,12 +779,10 @@ impl Search<'_> {
                             3
                         }
                     }
-                    GameAction::SelectCards { cards } => {
-                        if cards.iter().any(|id| self.is_piece(state, *id)) {
-                            1
-                        } else {
-                            2
-                        }
+                    GameAction::SelectCards { cards }
+                        if cards.iter().any(|id| self.is_piece(state, *id)) =>
+                    {
+                        1
                     }
                     GameAction::DecideOptionalEffect { accept: true } => 0,
                     GameAction::ChooseX { value } => {
