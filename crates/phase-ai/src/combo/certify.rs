@@ -168,6 +168,16 @@ pub(crate) struct LineStep {
     at: Fingerprint,
 }
 
+impl LineStep {
+    /// The card this step casts, if it casts one.
+    pub(crate) fn cast(&self) -> Option<ObjectId> {
+        match &self.action {
+            GameAction::CastSpell { object_id, .. } => Some(*object_id),
+            _ => None,
+        }
+    }
+}
+
 /// A certified line being played out, one step per decision.
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedLine {
@@ -335,6 +345,9 @@ pub(crate) fn next_line_action(
     if !search_may_start(state, ai_player) {
         return None;
     }
+    // Once a turn, the seat rehearses a combo it has not tried yet, so it knows
+    // which of its combos are worth looking for.
+    super::plan::rehearse_due(state, ai_player, config, session, combos);
     let (pieces, signature) = live_pieces(state, ai_player, combos)?;
     let position = Position::of(state, ai_player, signature);
     let earlier = session.combo_searched.read().ok()?.get(&ai_player).copied();
@@ -381,12 +394,50 @@ pub(crate) fn next_line_action(
 /// CR 117.1a: the search opens on the seat's own main phase with an empty
 /// stack, where every card it might cast can be cast. CR 732.2a: it needs the
 /// engine to offer shortcuts, which only the interactive mode does.
-fn search_may_start(state: &GameState, ai_player: PlayerId) -> bool {
-    state.loop_detection == LoopDetectionMode::Interactive
-        && state.active_player == ai_player
+pub(crate) fn search_may_start(state: &GameState, ai_player: PlayerId) -> bool {
+    state.loop_detection == LoopDetectionMode::Interactive && at_open_main(state, ai_player)
+}
+
+/// CR 117.1a: the seat's own main phase, the stack empty, the seat to act.
+pub(crate) fn at_open_main(state: &GameState, ai_player: PlayerId) -> bool {
+    state.active_player == ai_player
         && state.stack.is_empty()
         && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && matches!(state.waiting_for, WaitingFor::Priority { player } if player == ai_player)
+}
+
+/// Whether `ai_player` has a card named `name` somewhere it can use it: on the
+/// battlefield while the seat controls it; anywhere else but the library and
+/// the stack, while the seat owns it.
+pub(crate) fn usable(state: &GameState, ai_player: PlayerId, name: &str) -> bool {
+    state.objects.values().any(|object| {
+        object.name.eq_ignore_ascii_case(name)
+            && match object.zone {
+                Zone::Library | Zone::Stack => false,
+                Zone::Battlefield => object.controller == ai_player,
+                _ => object.owner == ai_player,
+            }
+    })
+}
+
+/// Whether a search for a combo line would start at `state`: a combo is live,
+/// and the seat has not already searched this position.
+pub(crate) fn search_pending(
+    state: &GameState,
+    ai_player: PlayerId,
+    session: &AiSession,
+    combos: &[CatalogCombo],
+) -> bool {
+    let Some((_, signature)) = live_pieces(state, ai_player, combos) else {
+        return false;
+    };
+    let position = Position::of(state, ai_player, signature);
+    !session
+        .combo_searched
+        .read()
+        .ok()
+        .and_then(|searched| searched.get(&ai_player).copied())
+        .is_some_and(|memo| memo.covers(&position))
 }
 
 /// The card names of every live combo, and a signature of where those cards are.
@@ -403,12 +454,7 @@ fn live_pieces(
         Zone::Battlefield => object.controller == ai_player,
         _ => object.owner == ai_player,
     };
-    let usable = |name: &str| {
-        state
-            .objects
-            .values()
-            .any(|object| mine(object) && object.name.eq_ignore_ascii_case(name))
-    };
+    let usable = |name: &str| usable(state, ai_player, name);
     let mut pieces: Vec<String> = Vec::new();
     for combo in combos {
         if combo.cards.iter().all(|card| usable(card)) {
@@ -452,14 +498,29 @@ pub(crate) fn find_winning_line(
     pieces: &[String],
     deadline: Deadline,
 ) -> SearchOutcome {
+    search_line(state, ai_player, pieces, deadline, MAX_WORK).0
+}
+
+/// [`find_winning_line`] within `max_work`, and whether any line it tried took
+/// an unbounded resource: a search that found no win but did hold one is a
+/// combo with nothing to spend what it makes.
+pub(crate) fn search_line(
+    state: &GameState,
+    ai_player: PlayerId,
+    pieces: &[String],
+    deadline: Deadline,
+    max_work: usize,
+) -> (SearchOutcome, bool) {
     let mut search = Search {
         player: ai_player,
         pieces,
         work: 0,
+        max_work,
         deadline,
         seen: HashMap::new(),
         stage_depth: 0,
         cut_short: false,
+        held_resource: false,
     };
     for depth in DEPTHS {
         search.seen.clear();
@@ -476,18 +537,18 @@ pub(crate) fn find_winning_line(
             "combo line search pass"
         );
         if found {
-            return SearchOutcome::Found(path.steps);
+            return (SearchOutcome::Found(path.steps), search.held_resource);
         }
         if search.spent() {
-            return SearchOutcome::OutOfBudget;
+            return (SearchOutcome::OutOfBudget, search.held_resource);
         }
         // A pass that tried every line without stopping at its depth has shown
         // there is none; a deeper pass would walk the same tree.
         if !search.cut_short {
-            return SearchOutcome::NoLine;
+            return (SearchOutcome::NoLine, search.held_resource);
         }
     }
-    SearchOutcome::OutOfBudget
+    (SearchOutcome::OutOfBudget, search.held_resource)
 }
 
 /// How a search ended.
@@ -565,6 +626,8 @@ struct Search<'a> {
     player: PlayerId,
     pieces: &'a [String],
     work: usize,
+    /// The work this search may spend.
+    max_work: usize,
     deadline: Deadline,
     /// Priority positions already searched, with the most depth each was
     /// searched to.
@@ -573,6 +636,8 @@ struct Search<'a> {
     stage_depth: usize,
     /// Whether this pass stopped at its depth limit with choices still open.
     cut_short: bool,
+    /// Whether any line tried took an unbounded resource.
+    held_resource: bool,
 }
 
 /// Where a position stands once everything that is not the seat's own choice
@@ -590,7 +655,7 @@ enum Settled {
 
 impl Search<'_> {
     fn spent(&self) -> bool {
-        self.work >= MAX_WORK || self.deadline.expired()
+        self.work >= self.max_work || self.deadline.expired()
     }
 
     fn apply(&mut self, state: &mut GameState, action: GameAction) -> bool {
@@ -754,6 +819,7 @@ impl Search<'_> {
                                 // take changed.
                                 if let Some((earlier, _)) = awaited.take() {
                                     path.taken.extend(earlier);
+                                    self.held_resource = true;
                                     new_stage = true;
                                 }
                                 let mut declined = state.clone();
@@ -804,6 +870,7 @@ impl Search<'_> {
         if let Some((kinds, refused)) = awaited {
             if position_key(&state) != refused {
                 path.taken.extend(kinds);
+                self.held_resource = true;
                 new_stage = true;
             }
         }

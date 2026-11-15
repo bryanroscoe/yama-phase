@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use engine::game::game_object::GameObject;
 use engine::types::actions::GameAction;
@@ -45,8 +45,53 @@ impl TutorPolicy {
             .map(|entry| entry_score(entry, available_mana, ctx.strategic_intent(), ctx))
             .fold(0.0, f64::max);
 
-        0.34 + best_follow_up * 0.8
+        let most_wanted = most_wanted_findable(ctx, &facts);
+
+        0.34 + best_follow_up * 0.8 + most_wanted * WANTED_CARD_TUTOR_CAST_BONUS
     }
+}
+
+/// How much the seat wants the card it wants most among those this spell's
+/// library search could find ([`crate::combo::plan::wanted_cards`]); zero when
+/// it wants none of them. A search for a land finds no creature.
+fn most_wanted_findable(ctx: &PolicyContext<'_>, facts: &crate::cast_facts::CastFacts<'_>) -> f64 {
+    let wanted = crate::combo::plan::wanted_cards(ctx.state, &ctx.context.session, ctx.ai_player);
+    if wanted.is_empty() {
+        return 0.0;
+    }
+    let filters: Vec<&engine::types::ability::TargetFilter> = facts
+        .primary_effects
+        .iter()
+        .filter_map(|ability| match &*ability.effect {
+            engine::types::ability::Effect::SearchLibrary { filter, .. } => Some(filter),
+            _ => None,
+        })
+        .collect();
+    if filters.is_empty() {
+        return 0.0;
+    }
+    let filter_ctx = engine::game::filter::FilterContext::from_source(ctx.state, facts.object.id);
+    ctx.state
+        .objects
+        .values()
+        .filter(|object| {
+            object.owner == ctx.ai_player && object.zone == engine::types::zones::Zone::Library
+        })
+        .filter_map(|object| {
+            let weight = wanted.get(&object.name.to_lowercase())?;
+            filters
+                .iter()
+                .any(|filter| {
+                    engine::game::filter::matches_target_filter(
+                        ctx.state,
+                        object.id,
+                        filter,
+                        &filter_ctx,
+                    )
+                })
+                .then_some(*weight)
+        })
+        .fold(0.0, f64::max)
 }
 
 impl TacticalPolicy for TutorPolicy {
@@ -91,10 +136,15 @@ impl TacticalPolicy for TutorPolicy {
 /// would discount by object id, and two selections holding the same cards could
 /// score differently. Ranking makes the score a function of the *set*, which is
 /// what "the opponent takes the worst card" actually models.
+///
+/// `wanted` is what the seat is looking for
+/// ([`crate::combo::plan::wanted_cards`]): a card in it takes the combo-piece
+/// bonus scaled by how much the seat wants it.
 pub(crate) fn score_search_choice_selection(
     state: &GameState,
     ai_player: PlayerId,
     chosen: &[ObjectId],
+    wanted: &HashMap<String, f64>,
 ) -> f64 {
     let available_mana = crate::zone_eval::available_mana(state, ai_player);
     let intent = crate::eval::strategic_intent(state, ai_player);
@@ -108,6 +158,8 @@ pub(crate) fn score_search_choice_selection(
             let mut score = tutor_object_score(object, available_mana, intent, mana_constrained);
             if combo_targets.contains(&object.name.as_str()) {
                 score += COMBO_PIECE_TUTOR_BONUS;
+            } else if let Some(weight) = wanted.get(&object.name.to_lowercase()) {
+                score += COMBO_PIECE_TUTOR_BONUS * weight;
             }
             (object.name.as_str(), score)
         })
@@ -144,6 +196,12 @@ pub(crate) fn score_search_choice_selection(
 /// generic creature. Kept as a module-level constant so the rationale stays
 /// adjacent to the call site rather than buried in [`super::PolicyPenalties`].
 const COMBO_PIECE_TUTOR_BONUS: f64 = 1.5;
+
+/// What casting a spell that searches gains while the seat is one card short
+/// of a combo it has rehearsed and won with, scaled down for a combo further
+/// off. Sized above the follow-up term's ceiling (`0.8 * 0.8`), so finding the
+/// last piece is preferred to developing the board with the same mana.
+const WANTED_CARD_TUTOR_CAST_BONUS: f64 = 0.7;
 
 /// Returns the set of card names that, if tutored into the appropriate zone,
 /// would complete a registered cEDH combo line for `ai_player`. Empty for
@@ -546,8 +604,10 @@ mod tests {
 
         // Single-card selections are what the enumerator issues for a count-1
         // search, so score them the same way the AI ranks them.
-        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan]);
-        let land_score = score_search_choice_selection(&state, PlayerId(0), &[land]);
+        let titan_score =
+            score_search_choice_selection(&state, PlayerId(0), &[titan], &HashMap::new());
+        let land_score =
+            score_search_choice_selection(&state, PlayerId(0), &[land], &HashMap::new());
 
         assert!(titan_score > land_score);
 
@@ -557,8 +617,10 @@ mod tests {
         // position-indexed decay would rank two identical selections
         // differently purely on object id — and would discount the STRONG card
         // whenever it sorted second.
-        let strong_first = score_search_choice_selection(&state, PlayerId(0), &[titan, land]);
-        let weak_first = score_search_choice_selection(&state, PlayerId(0), &[land, titan]);
+        let strong_first =
+            score_search_choice_selection(&state, PlayerId(0), &[titan, land], &HashMap::new());
+        let weak_first =
+            score_search_choice_selection(&state, PlayerId(0), &[land, titan], &HashMap::new());
         assert_eq!(
             strong_first, weak_first,
             "selection score must not depend on the order the ids arrived in"
@@ -614,8 +676,10 @@ mod tests {
             ),
         );
 
-        let duplicate_score = score_search_choice_selection(&state, PlayerId(0), &[first, second]);
-        let mixed_score = score_search_choice_selection(&state, PlayerId(0), &[first, removal]);
+        let duplicate_score =
+            score_search_choice_selection(&state, PlayerId(0), &[first, second], &HashMap::new());
+        let mixed_score =
+            score_search_choice_selection(&state, PlayerId(0), &[first, removal], &HashMap::new());
 
         assert!(mixed_score > duplicate_score);
     }
@@ -675,12 +739,105 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan]);
-        let ballista_score = score_search_choice_selection(&state, PlayerId(0), &[ballista]);
+        let titan_score =
+            score_search_choice_selection(&state, PlayerId(0), &[titan], &HashMap::new());
+        let ballista_score =
+            score_search_choice_selection(&state, PlayerId(0), &[ballista], &HashMap::new());
 
         assert!(
             ballista_score > titan_score,
             "expected combo-piece bonus to outscore generic threat; ballista={ballista_score}, titan={titan_score}"
+        );
+    }
+
+    /// A seat that has rehearsed a combo and won with it looks for the card it
+    /// is missing: a search takes that card over a stronger one. A combo not
+    /// rehearsed, or rehearsed and not won, changes nothing.
+    #[test]
+    fn a_search_takes_the_card_a_rehearsed_combo_is_missing() {
+        use crate::combo::plan::wanted_cards;
+        use crate::combo::{CatalogCombo, Rehearsal};
+        use crate::session::AiSession;
+
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Engine Piece".to_string(),
+            Zone::Battlefield,
+        );
+        let titan = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Titan".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&titan).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(6);
+            obj.toughness = Some(6);
+            obj.keywords.push(Keyword::Flying);
+        }
+        let piece = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Last Piece".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Sink".to_string(),
+            Zone::Library,
+        );
+        let combo = CatalogCombo {
+            id: "c".to_string(),
+            cards: vec!["Engine Piece".to_string(), "Last Piece".to_string()],
+        };
+        let known = |outcome: Rehearsal| {
+            AiSession::from_game(&state)
+                .with_combos(PlayerId(0), vec![combo.clone()])
+                .with_rehearsals(PlayerId(0), [("c".to_string(), outcome)])
+        };
+
+        let unrehearsed =
+            AiSession::from_game(&state).with_combos(PlayerId(0), vec![combo.clone()]);
+        assert!(wanted_cards(&state, &unrehearsed, PlayerId(0)).is_empty());
+        assert!(wanted_cards(&state, &known(Rehearsal::NoWin), PlayerId(0)).is_empty());
+
+        let wanted = wanted_cards(
+            &state,
+            &known(Rehearsal::Wins { with: Vec::new() }),
+            PlayerId(0),
+        );
+        assert_eq!(wanted.get("last piece"), Some(&1.0));
+        assert_eq!(wanted.len(), 1);
+        // A payoff the rehearsal needed is looked for too, and two cards short
+        // each counts half.
+        let with_payoff = wanted_cards(
+            &state,
+            &known(Rehearsal::Wins {
+                with: vec!["Sink".to_string()],
+            }),
+            PlayerId(0),
+        );
+        assert_eq!(with_payoff.get("last piece"), Some(&0.5));
+        assert_eq!(with_payoff.get("sink"), Some(&0.5));
+
+        let nothing = HashMap::new();
+        let titan_plain = score_search_choice_selection(&state, PlayerId(0), &[titan], &nothing);
+        let piece_plain = score_search_choice_selection(&state, PlayerId(0), &[piece], &nothing);
+        assert!(titan_plain > piece_plain);
+        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan], &wanted);
+        let piece_score = score_search_choice_selection(&state, PlayerId(0), &[piece], &wanted);
+        assert!(
+            piece_score > titan_score,
+            "piece={piece_score}, titan={titan_score}"
         );
     }
 }
