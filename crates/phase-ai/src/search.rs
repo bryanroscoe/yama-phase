@@ -4937,11 +4937,16 @@ pub(crate) fn deterministic_choice(
     // selection constraint, so ranking its output covers both the single-card
     // and combinatorial cases without a second local beam.
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
+        // What the seat is looking for: the cards of a combo it has rehearsed
+        // and won with that it does not hold yet.
+        let wanted = context
+            .map(|context| crate::combo::plan::wanted_cards(state, &context.session, ai_player))
+            .unwrap_or_default();
         let mut scored: Vec<_> = issued_selections(actions)
             .map(|cards| {
                 (
                     cards,
-                    score_search_choice_selection(state, ai_player, cards),
+                    score_search_choice_selection(state, ai_player, cards, &wanted),
                 )
             })
             .collect();

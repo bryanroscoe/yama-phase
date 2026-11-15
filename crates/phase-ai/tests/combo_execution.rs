@@ -41,7 +41,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use phase_ai::auto_play::run_ai_action;
-use phase_ai::combo::CatalogCombo;
+use phase_ai::combo::{combo_work_due, rehearse, CatalogCombo, Rehearsal};
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::rngs::SmallRng;
@@ -102,6 +102,11 @@ impl<'a> Board<'a> {
 
     fn hand(&mut self, name: &str) -> ObjectId {
         self.scenario.add_real_card(P0, name, Zone::Hand, self.db)
+    }
+
+    fn library(&mut self, name: &str) -> ObjectId {
+        self.scenario
+            .add_real_card(P0, name, Zone::Library, self.db)
     }
 
     fn lands(&mut self, name: &str, count: usize) {
@@ -707,6 +712,160 @@ fn a_seat_does_not_search_with_loop_detection_off() {
         heliod.pieces,
     );
     assert_ne!(report.outcome, "WON", "{:?}", report.line);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The deck plan: a seat rehearses its combos to learn which it can win with.
+// ---------------------------------------------------------------------------------------------
+
+/// A game with nothing drawn yet: the named cards and four of each named land are in P0's
+/// library, P0 to act in its first main phase.
+fn undrawn(db: &CardDatabase, cards: &[&str], lands: &[&str]) -> GameState {
+    let mut board = Board::new(db);
+    for card in cards {
+        board.library(card);
+    }
+    for land in lands {
+        for _ in 0..4 {
+            board.library(land);
+        }
+    }
+    let mut state = board.build();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    state
+}
+
+fn combo(id: &str, cards: &[&str]) -> CatalogCombo {
+    CatalogCombo {
+        id: id.to_string(),
+        cards: cards.iter().map(|card| card.to_string()).collect(),
+    }
+}
+
+/// With every card still in the library, a rehearsal puts a combo out on a copy of the game
+/// and plays it. A loop that deals the damage itself is won as it stands. A mana loop is
+/// won once the deck's X spell is tried with it, and that spell is named. A combo this AI
+/// cannot play (it has no answer to Demonic Consultation's card-name prompt) is not won.
+/// The game itself is left as it was.
+#[test]
+fn a_rehearsal_shows_which_combos_a_seat_can_win_with() {
+    let db = integration_card_db();
+    let state = undrawn(
+        &db,
+        &[
+            "Heliod, Sun-Crowned",
+            "Walking Ballista",
+            "Basalt Monolith",
+            "Power Artifact",
+            "Thassa's Oracle",
+            "Demonic Consultation",
+        ],
+        &["Plains", "Island", "Swamp"],
+    );
+    let before = state.clone();
+
+    assert_eq!(
+        rehearse(
+            &state,
+            P0,
+            &combo("damage", &["Heliod, Sun-Crowned", "Walking Ballista"])
+        ),
+        Some(Rehearsal::Wins { with: Vec::new() })
+    );
+    assert_eq!(
+        rehearse(
+            &state,
+            P0,
+            &combo("mana", &["Basalt Monolith", "Power Artifact"])
+        ),
+        Some(Rehearsal::Wins {
+            with: vec!["Walking Ballista".to_string()]
+        })
+    );
+    assert_eq!(
+        rehearse(
+            &state,
+            P0,
+            &combo("oracle", &["Thassa's Oracle", "Demonic Consultation"])
+        ),
+        Some(Rehearsal::NoWin)
+    );
+    // A card the seat does not own, and a position that is not the seat's to act in.
+    assert_eq!(
+        rehearse(&state, P0, &combo("absent", &["Food Chain"])),
+        None
+    );
+    assert_eq!(
+        rehearse(
+            &state,
+            P1,
+            &combo("damage", &["Heliod, Sun-Crowned", "Walking Ballista"])
+        ),
+        None
+    );
+
+    assert_eq!(state.battlefield, before.battlefield);
+    assert_eq!(state.players[0].library, before.players[0].library);
+    assert_eq!(state.players[0].hand, before.players[0].hand);
+}
+
+/// A seat rehearses one combo a turn at its first decision in its main phase, and keeps
+/// what it showed. Until then the host is told there is combo work to do here; after it,
+/// not again this turn.
+#[test]
+fn a_seat_rehearses_a_combo_at_its_first_main_phase_decision() {
+    let db = integration_card_db();
+    let mut state = undrawn(
+        &db,
+        &["Heliod, Sun-Crowned", "Walking Ballista"],
+        &["Plains", "Plains"],
+    );
+    let session = Arc::new(AiSession::from_game(&state).with_combos(
+        P0,
+        vec![combo(
+            "damage",
+            &["Heliod, Sun-Crowned", "Walking Ballista"],
+        )],
+    ));
+    assert!(session.rehearsals(P0).is_empty());
+    assert!(combo_work_due(&state, &session, P0));
+    assert!(!combo_work_due(&state, &session, P1));
+
+    let config =
+        create_config_for_players(AiDifficulty::Medium, Platform::Native, 2).into_measurement(SEED);
+    let ai_players: HashSet<PlayerId> = [P0].into_iter().collect();
+    let ai_configs: HashMap<PlayerId, _> = [(P0, config)].into_iter().collect();
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    assert!(matches!(
+        run_ai_action(&mut state, &ai_players, &ai_configs, &mut rng, &session),
+        ControlFlow::Continue(_)
+    ));
+
+    assert_eq!(
+        session.rehearsals(P0),
+        vec![("damage".to_string(), Rehearsal::Wins { with: Vec::new() })]
+    );
+    assert!(!combo_work_due(&state, &session, P0));
+
+    // A host that kept the result hands it to the next game, and nothing is rehearsed.
+    let fresh = undrawn(
+        &db,
+        &["Heliod, Sun-Crowned", "Walking Ballista"],
+        &["Plains", "Plains"],
+    );
+    let told = AiSession::from_game(&fresh)
+        .with_combos(
+            P0,
+            vec![combo(
+                "damage",
+                &["Heliod, Sun-Crowned", "Walking Ballista"],
+            )],
+        )
+        .with_rehearsals(
+            P0,
+            [("damage".to_string(), Rehearsal::Wins { with: Vec::new() })],
+        );
+    assert!(!combo_work_due(&fresh, &told, P0));
 }
 
 // ---------------------------------------------------------------------------------------------

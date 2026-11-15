@@ -106,6 +106,46 @@ Eight tests in the same file are gates, not measurements: the damage loop at thr
 difficulties, the three mana loops, an unnamed payoff, the four-player game, two controls
 (no catalog; loop detection off), and the two decision-contract rules on their own.
 
+### The deck plan: rehearse, then look for the pieces
+
+Added 2026-11-15 (`combo/plan.rs`). Until now a seat played a combo only once it held
+every card. It did nothing to get there, and nothing told it which of its combos it could
+play at all.
+
+- **Learning.** Once a turn, at its first decision in its own main phase, a seat rehearses
+  one combo it has not tried: on a copy of the game it puts the combo's cards out as though
+  earlier turns had played them, with up to fourteen of its own lands, and runs the same
+  search it runs in a real game. Permanents go onto the battlefield; instants, sorceries,
+  Auras and anything cast for X go into hand. The copy is built by a new engine function,
+  `ai_support::practice_position`, through the zone-change pipeline. Up to four combos a
+  game are rehearsed, in the order the host listed them.
+- **Payoffs.** A combo that makes an unbounded resource and wins nothing is rehearsed once
+  more with the deck's X spells in hand (up to six). If that wins, the spell that did it is
+  kept as part of the goal.
+- **Looking.** For each combo a rehearsal won with, the cards the seat does not have yet
+  are what it looks for, as long as they are all still in its library. A search of the
+  library takes one of them over any other card (the last card missing counts in full, one
+  of two counts half), and a spell that searches is worth more to cast while there is one
+  to find.
+- **Hosts.** `combo::rehearse` is public, and `AiSession::with_rehearsals` takes results a
+  host kept, so a deck need not be rehearsed in every game. `AiSession::rehearsals` reads
+  them back. `combo::combo_work_due` tells a host that shows the AI a copy of the game
+  with loop detection off when to hand over the game itself.
+
+A combo not rehearsed, or rehearsed and not won, is still played if the seat happens to
+hold all of it. It is only not looked for. So the seat no longer spends a tutor on a combo
+it cannot play (Thassa's Oracle with Demonic Consultation, today).
+
+Gates: `a_rehearsal_shows_which_combos_a_seat_can_win_with` (the damage loop wins as it
+stands, the Basalt Monolith loop wins once Walking Ballista is tried and names it, the
+Oracle combo does not win, and the game is untouched),
+`a_seat_rehearses_a_combo_at_its_first_main_phase_decision`, and in `policies/tutor.rs`
+`a_search_takes_the_card_a_rehearsed_combo_is_missing`.
+
+Not done yet: mulligans, holding a piece back from a discard or a block, protecting the
+turn the combo goes off, and counting progress in the position score. A rehearsal costs a
+search or two; in a lab game that is paid in every game until the host keeps the results.
+
 What the four misses need:
 
 - **Kiki-Jiki + Felidar Guardian**: the search has to hand back to ordinary play after it
@@ -211,13 +251,14 @@ without Bryan's go-ahead.
    from the caps, and the decision contract admits its mana abilities and counts.
 4. **Certified line search** for an assembled route. First version done 2026-11-13; see
    the misses above.
-5. **Deck plan**: catalog type and join done 2026-11-13. Still to do: the Spellbook
-   export, typed outcomes, and payoffs. In the October 2026 Spellbook export about 20% of
+5. **Deck plan**: catalog type and join done 2026-11-13; rehearsal and X-spell payoffs
+   done 2026-11-15. Still to do: typed outcomes, and payoffs that are not X spells. In the October 2026 Spellbook export about 20% of
    Commander-legal variants win by themselves; about 29% only make mana and about 51% only
    make triggers, tokens or cards, so most entries need a payoff from the deck beside them.
    The search now looks for one among the seat's other cards once it holds a resource
    (2026-11-13); nothing yet ranks a likely payoff above the rest of the hand.
-6. **Goal**: tutors, mulligans, keeping and protecting pieces, score term.
+6. **Goal**: tutors done 2026-11-15. Still to do: mulligans, keeping and protecting
+   pieces, score term.
 7. **Roles and opponents.**
 8. **Per-deck report** in Yama: for each deck, which of its combos the AI can run, and the
    engine gaps behind the ones it cannot.

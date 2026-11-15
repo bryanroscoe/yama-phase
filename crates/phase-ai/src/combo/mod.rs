@@ -13,11 +13,14 @@
 //! - `catalog.rs` — a host-supplied `ComboCatalog` and its join against a deck
 //! - `certify.rs` — the search that finds a winning line for a catalogued combo
 //!   on copies of the game, and the playing-out of a line the engine confirmed
+//! - `plan.rs` — rehearsing each combo once a game to learn which the seat can
+//!   win with, and the cards it then looks for
 
 pub mod catalog;
 pub(crate) mod certify;
 pub mod detection;
 pub mod line;
+pub mod plan;
 pub mod registry;
 
 pub use catalog::{CatalogCombo, ComboCatalog};
@@ -25,4 +28,5 @@ pub use detection::{ComboDetector, StructuralComboDetector};
 pub use line::{
     CardPredicate, ComboLine, ComboLineId, ComboPiece, ComboReachability, ComboStep, WinKind,
 };
+pub use plan::{combo_work_due, rehearse, Rehearsal};
 pub use registry::ComboRegistry;

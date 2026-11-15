@@ -21,7 +21,8 @@ use engine::types::player::PlayerId;
 use engine::util::Deadline;
 
 use crate::combo::certify::{PlannedLine, SearchMemo};
-use crate::combo::{CatalogCombo, ComboCatalog};
+use crate::combo::plan::DeckPlan;
+use crate::combo::{CatalogCombo, ComboCatalog, Rehearsal};
 use crate::deck_knowledge::{pool_holder, pool_seats};
 use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
@@ -59,6 +60,9 @@ pub struct AiSession {
     /// The position each seat last searched for a combo line, so a position
     /// that held none is not searched again.
     pub(crate) combo_searched: Arc<RwLock<HashMap<PlayerId, SearchMemo>>>,
+    /// What each seat has learned by rehearsing its combos
+    /// ([`crate::combo::plan`]).
+    pub(crate) combo_plans: Arc<RwLock<HashMap<PlayerId, DeckPlan>>>,
     pub memory: Arc<RwLock<PolicyMemory>>,
     /// Turn-scoped cache for opponent-turn projections. Key includes
     /// `turn_number` + `active_player`, so stale entries from prior turns
@@ -171,6 +175,7 @@ impl AiSession {
             combos: HashMap::new(),
             combo_lines: Arc::default(),
             combo_searched: Arc::default(),
+            combo_plans: Arc::default(),
             memory: Arc::default(),
             projection_cache: Arc::default(),
             projection_bail_cache: Arc::default(),
@@ -206,6 +211,34 @@ impl AiSession {
     pub fn with_combos(mut self, player: PlayerId, combos: Vec<CatalogCombo>) -> Self {
         self.combos.insert(player, Arc::new(combos));
         self
+    }
+
+    /// Give one seat what earlier rehearsals of its combos showed, by catalog
+    /// id, so the seat does not rehearse those again in this game. For a host
+    /// that keeps the results of [`crate::combo::rehearse`] for a deck.
+    pub fn with_rehearsals(
+        self,
+        player: PlayerId,
+        known: impl IntoIterator<Item = (String, Rehearsal)>,
+    ) -> Self {
+        if let Ok(mut plans) = self.combo_plans.write() {
+            plans.entry(player).or_default().known.extend(known);
+        }
+        self
+    }
+
+    /// What `player` knows about its combos so far, by catalog id, in id order.
+    pub fn rehearsals(&self, player: PlayerId) -> Vec<(String, Rehearsal)> {
+        let mut known: Vec<(String, Rehearsal)> = self
+            .combo_plans
+            .read()
+            .ok()
+            .and_then(|plans| plans.get(&player).map(|plan| plan.known.clone()))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        known.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        known
     }
 
     /// Build a session for a single player from an explicit deck list.

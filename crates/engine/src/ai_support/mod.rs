@@ -7,6 +7,7 @@ pub mod filter;
 mod payment_continuation;
 mod prospective_mana;
 mod shortcut_efficacy;
+mod staging;
 mod swarm;
 mod targeted_exchange;
 
@@ -88,6 +89,7 @@ pub use prospective_mana::{
     is_pact_payment_cast, CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan,
     PactPlanState,
 };
+pub use staging::{practice_position, PracticeSetup};
 pub use swarm::{
     adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
     SWARM_WITNESS_MAX_DECLARATIONS,
