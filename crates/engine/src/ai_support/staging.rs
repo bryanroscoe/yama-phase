@@ -22,7 +22,7 @@ pub struct PracticeSetup<'a> {
     pub hand: &'a [ObjectId],
     /// How many lands from the player's library are put onto the battlefield
     /// untapped beside them, one of each name before a second of any, basic
-    /// lands first.
+    /// lands first. A land that cannot enter without a choice is passed over.
     pub lands: usize,
 }
 
@@ -54,29 +54,27 @@ pub fn practice_position(
         return None;
     }
 
-    let mut to_battlefield: Vec<ObjectId> = setup.battlefield.to_vec();
-    to_battlefield.extend(practice_lands(&copy, player, setup));
-
-    let mut events = Vec::new();
-    for id in to_battlefield {
-        let request = ZoneMoveRequest::effect(id, Zone::Battlefield, id);
-        if !matches!(
-            move_object(&mut copy, request, &mut events),
-            ZoneMoveResult::Done
-        ) {
+    for id in setup.battlefield {
+        if !enter_ahead(&mut copy, *id) {
             return None;
         }
-        let entered = copy.turn_number.saturating_sub(1);
-        let object = copy.objects.get_mut(&id)?;
-        if object.zone != Zone::Battlefield {
-            // A replacement sent it somewhere else.
-            return None;
-        }
-        object.entered_battlefield_turn = Some(entered);
-        object.summoning_sick = false;
-        object.tapped = false;
-        crate::game::trigger_index::reindex_object_triggers(&mut copy, id);
     }
+    // A land that asks something as it enters (a land that may be paid for, one
+    // that names a type) is passed over for the next: the position needs mana,
+    // not that land. Each is tried on a copy, since a move that stops for a
+    // choice leaves that choice pending.
+    let mut placed = 0;
+    for id in practice_lands(&copy, player, setup) {
+        if placed == setup.lands {
+            break;
+        }
+        let mut trial = copy.clone();
+        if enter_ahead(&mut trial, id) {
+            copy = trial;
+            placed += 1;
+        }
+    }
+    let mut events = Vec::new();
     for id in setup.hand {
         if copy.objects.get(id)?.zone == Zone::Hand {
             continue;
@@ -85,16 +83,44 @@ pub fn practice_position(
         if !matches!(
             move_object(&mut copy, request, &mut events),
             ZoneMoveResult::Done
-        ) {
+        ) || copy.objects.get(id)?.zone != Zone::Hand
+        {
             return None;
         }
     }
     Some(copy)
 }
 
-/// The lands a practice position takes from `player`'s library: one of each
-/// name before a second of any, basic lands first, so a deck of several colors
-/// gets each of them. Cards the setup already places are left alone.
+/// Put `id` onto the battlefield of `copy` untapped, as though it had entered
+/// on an earlier turn. `false` when the move stopped for a choice or a
+/// replacement sent the card somewhere else; `copy` is then not to be used.
+fn enter_ahead(copy: &mut GameState, id: ObjectId) -> bool {
+    let mut events = Vec::new();
+    let request = ZoneMoveRequest::effect(id, Zone::Battlefield, id);
+    if !matches!(
+        move_object(copy, request, &mut events),
+        ZoneMoveResult::Done
+    ) {
+        return false;
+    }
+    let entered = copy.turn_number.saturating_sub(1);
+    let Some(object) = copy.objects.get_mut(&id) else {
+        return false;
+    };
+    if object.zone != Zone::Battlefield {
+        return false;
+    }
+    object.entered_battlefield_turn = Some(entered);
+    object.summoning_sick = false;
+    object.tapped = false;
+    crate::game::trigger_index::reindex_object_triggers(copy, id);
+    true
+}
+
+/// The lands a practice position may take from `player`'s library, in the
+/// order it takes them: one of each name before a second of any, basic lands
+/// first, so a deck of several colors gets each of them. Cards the setup
+/// already places are left alone.
 fn practice_lands(state: &GameState, player: PlayerId, setup: &PracticeSetup<'_>) -> Vec<ObjectId> {
     let Some(seat) = state.players.iter().find(|seat| seat.id == player) else {
         return Vec::new();
@@ -126,9 +152,5 @@ fn practice_lands(state: &GameState, player: PlayerId, setup: &PracticeSetup<'_>
         lands.push(((copies, !basic, position), *id));
     }
     lands.sort_unstable_by_key(|(key, _)| *key);
-    lands
-        .into_iter()
-        .take(setup.lands)
-        .map(|(_, id)| id)
-        .collect()
+    lands.into_iter().map(|(_, id)| id).collect()
 }

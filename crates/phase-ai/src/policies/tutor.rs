@@ -45,14 +45,53 @@ impl TutorPolicy {
             .map(|entry| entry_score(entry, available_mana, ctx.strategic_intent(), ctx))
             .fold(0.0, f64::max);
 
-        // A spell that searches is worth more while a card the seat is looking
-        // for is in the library to be found.
-        let wanted =
-            crate::combo::plan::wanted_cards(ctx.state, &ctx.context.session, ctx.ai_player);
-        let most_wanted = wanted.values().copied().fold(0.0, f64::max);
+        let most_wanted = most_wanted_findable(ctx, &facts);
 
         0.34 + best_follow_up * 0.8 + most_wanted * WANTED_CARD_TUTOR_CAST_BONUS
     }
+}
+
+/// How much the seat wants the card it wants most among those this spell's
+/// library search could find ([`crate::combo::plan::wanted_cards`]); zero when
+/// it wants none of them. A search for a land finds no creature.
+fn most_wanted_findable(ctx: &PolicyContext<'_>, facts: &crate::cast_facts::CastFacts<'_>) -> f64 {
+    let wanted = crate::combo::plan::wanted_cards(ctx.state, &ctx.context.session, ctx.ai_player);
+    if wanted.is_empty() {
+        return 0.0;
+    }
+    let filters: Vec<&engine::types::ability::TargetFilter> = facts
+        .primary_effects
+        .iter()
+        .filter_map(|ability| match &*ability.effect {
+            engine::types::ability::Effect::SearchLibrary { filter, .. } => Some(filter),
+            _ => None,
+        })
+        .collect();
+    if filters.is_empty() {
+        return 0.0;
+    }
+    let filter_ctx = engine::game::filter::FilterContext::from_source(ctx.state, facts.object.id);
+    ctx.state
+        .objects
+        .values()
+        .filter(|object| {
+            object.owner == ctx.ai_player && object.zone == engine::types::zones::Zone::Library
+        })
+        .filter_map(|object| {
+            let weight = wanted.get(&object.name.to_lowercase())?;
+            filters
+                .iter()
+                .any(|filter| {
+                    engine::game::filter::matches_target_filter(
+                        ctx.state,
+                        object.id,
+                        filter,
+                        &filter_ctx,
+                    )
+                })
+                .then_some(*weight)
+        })
+        .fold(0.0, f64::max)
 }
 
 impl TacticalPolicy for TutorPolicy {

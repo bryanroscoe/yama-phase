@@ -116,7 +116,8 @@ play at all.
   one combo it has not tried: on a copy of the game it puts the combo's cards out as though
   earlier turns had played them, with up to fourteen of its own lands, and runs the same
   search it runs in a real game. Permanents go onto the battlefield; instants, sorceries,
-  Auras and anything cast for X go into hand. The copy is built by a new engine function,
+  Auras and anything cast for X go into hand. If that makes nothing, the combo is tried
+  once more with every card in hand, for a combo that wins as a card is cast or enters. The copy is built by a new engine function,
   `ai_support::practice_position`, through the zone-change pipeline. Up to four combos a
   game are rehearsed, in the order the host listed them.
 - **Payoffs.** A combo that makes an unbounded resource and wins nothing is rehearsed once
@@ -124,9 +125,9 @@ play at all.
   kept as part of the goal.
 - **Looking.** For each combo a rehearsal won with, the cards the seat does not have yet
   are what it looks for, as long as they are all still in its library. A search of the
-  library takes one of them over any other card (the last card missing counts in full, one
-  of two counts half), and a spell that searches is worth more to cast while there is one
-  to find.
+  library takes the last card a combo is missing over any other card; one of two missing
+  counts half, about level with the best card otherwise. A spell whose search could find
+  one is worth more to cast.
 - **Hosts.** `combo::rehearse` is public, and `AiSession::with_rehearsals` takes results a
   host kept, so a deck need not be rehearsed in every game. `AiSession::rehearsals` reads
   them back. `combo::combo_work_due` tells a host that shows the AI a copy of the game
@@ -143,8 +144,10 @@ Oracle combo does not win, and the game is untouched),
 `a_search_takes_the_card_a_rehearsed_combo_is_missing`.
 
 Not done yet: mulligans, holding a piece back from a discard or a block, protecting the
-turn the combo goes off, and counting progress in the position score. A rehearsal costs a
-search or two; in a lab game that is paid in every game until the host keeps the results.
+turn the combo goes off, and counting progress in the position score. A rehearsal costs up
+to two searches; in a lab game that is paid in every game until the host keeps the
+results. A rehearsal is one position: a card an opponent has in play when it runs can
+decide the answer for the whole game. One the clock cuts short is not kept.
 
 What the four misses need:
 

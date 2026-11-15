@@ -9,6 +9,8 @@
 //! ([`engine::ai_support::practice_position`]), with a few of its own lands,
 //! and runs the same search it would run in the real game
 //! ([`super::certify`]). A combo is kept as a goal only if that search wins.
+//! If it does not, the combo is tried once more with every card in hand, for a
+//! combo that wins as a card is cast or enters.
 //!
 //! A combo that makes an unbounded resource and stops (a mana loop with nothing
 //! to spend it on) is rehearsed once more with the deck's X spells in hand. If
@@ -33,6 +35,8 @@
 //! - A card that is only in the graveyard or in exile counts as held, as it
 //!   does for the live search, whether or not the combo can use it from there.
 //! - The only payoff it looks for is an X spell.
+//! - A rehearsal is one position: what an opponent has in play when it runs
+//!   (a card that stops the combo) decides the answer for the game.
 
 use std::collections::HashMap;
 
@@ -115,63 +119,111 @@ fn rehearse_within(
     if !certify::search_may_start(state, player) || combo.cards.is_empty() {
         return None;
     }
-    let mut battlefield: Vec<ObjectId> = Vec::new();
-    let mut hand: Vec<ObjectId> = Vec::new();
-    let mut hand_cost: usize = 0;
+    // The cards to set out. One already in play, or somewhere the live search
+    // would use it from, stays where it is.
+    let mut staged: Vec<&GameObject> = Vec::new();
     for card in &combo.cards {
         let object = held_copy(state, player, card)?;
-        if !matches!(object.zone, Zone::Library | Zone::Hand) {
-            // Already out, or somewhere the live search would use it from.
-            continue;
-        }
-        if enters_ahead(object) {
-            battlefield.push(object.id);
-        } else {
-            hand_cost += object.mana_cost.mana_value() as usize;
-            if object.mana_cost.has_x() {
-                hand_cost += X_SPELL_LANDS;
-            }
-            hand.push(object.id);
+        if matches!(object.zone, Zone::Library | Zone::Hand) {
+            staged.push(object);
         }
     }
+    // First with what stays in play already in play. If that makes nothing,
+    // with every card in hand: a combo that wins as a card is cast or enters
+    // (CR 603.6a) has to cast it.
+    let ahead: Vec<ObjectId> = staged
+        .iter()
+        .filter(|object| enters_ahead(object))
+        .map(|object| object.id)
+        .collect();
+    let all_in_hand = (!ahead.is_empty()).then(Vec::new);
+    for battlefield in std::iter::once(ahead).chain(all_in_hand) {
+        let hand: Vec<&GameObject> = staged
+            .iter()
+            .copied()
+            .filter(|object| !battlefield.contains(&object.id))
+            .collect();
+        match rehearse_set_out(state, player, combo, &battlefield, &hand, deadline) {
+            SetOut::Won(with) => return Some(Rehearsal::Wins { with }),
+            // A combo that makes its resource and has nothing to spend it on
+            // would make it again from hand.
+            SetOut::HeldResource => break,
+            SetOut::Nothing => {}
+        }
+    }
+    Some(Rehearsal::NoWin)
+}
+
+/// How one way of setting a combo out went.
+enum SetOut {
+    /// The seat won, with these cards from outside the combo.
+    Won(Vec<String>),
+    /// The seat held an unbounded resource and found no win, with or without
+    /// the deck's X spells.
+    HeldResource,
+    /// The seat made nothing, or the cards could not be set out this way.
+    Nothing,
+}
+
+fn rehearse_set_out(
+    state: &GameState,
+    player: PlayerId,
+    combo: &CatalogCombo,
+    battlefield: &[ObjectId],
+    in_hand: &[&GameObject],
+    deadline: Deadline,
+) -> SetOut {
+    let hand_cost: usize = in_hand
+        .iter()
+        .map(|object| {
+            object.mana_cost.mana_value() as usize
+                + if object.mana_cost.has_x() {
+                    X_SPELL_LANDS
+                } else {
+                    0
+                }
+        })
+        .sum();
+    let mut hand: Vec<ObjectId> = in_hand.iter().map(|object| object.id).collect();
     let lands = (hand_cost + SPARE_LANDS).min(MAX_LANDS);
     let setup = PracticeSetup {
-        battlefield: &battlefield,
+        battlefield,
         hand: &hand,
         lands,
     };
     // A combo that cannot be set out is one this rehearsal cannot vouch for.
     let Some(practice) = practice_position(state, player, &setup) else {
-        return Some(Rehearsal::NoWin);
+        return SetOut::Nothing;
     };
     let (outcome, held_resource) =
         certify::search_line(&practice, player, &combo.cards, deadline, REHEARSAL_WORK);
     if matches!(outcome, SearchOutcome::Found(_)) {
-        return Some(Rehearsal::Wins { with: Vec::new() });
+        return SetOut::Won(Vec::new());
     }
     if !held_resource {
-        return Some(Rehearsal::NoWin);
+        return SetOut::Nothing;
     }
 
     // The combo makes something and has nothing to spend it on. Try again with
     // the deck's X spells in hand.
     let payoffs = x_spells(state, player, &combo.cards);
     if payoffs.is_empty() {
-        return Some(Rehearsal::NoWin);
+        return SetOut::HeldResource;
     }
     hand.extend(payoffs.iter().map(|object| object.id));
     let setup = PracticeSetup {
-        battlefield: &battlefield,
+        battlefield,
         hand: &hand,
-        lands,
+        // The resource may not be mana.
+        lands: (lands + X_SPELL_LANDS).min(MAX_LANDS),
     };
     let Some(practice) = practice_position(state, player, &setup) else {
-        return Some(Rehearsal::NoWin);
+        return SetOut::HeldResource;
     };
     let (outcome, _) =
         certify::search_line(&practice, player, &combo.cards, deadline, REHEARSAL_WORK);
     let SearchOutcome::Found(steps) = outcome else {
-        return Some(Rehearsal::NoWin);
+        return SetOut::HeldResource;
     };
     let mut with: Vec<String> = Vec::new();
     for id in steps.iter().filter_map(certify::LineStep::cast) {
@@ -181,7 +233,7 @@ fn rehearse_within(
             }
         }
     }
-    Some(Rehearsal::Wins { with })
+    SetOut::Won(with)
 }
 
 /// `player`'s copy of the card named `name`: one already on the battlefield if
@@ -291,23 +343,43 @@ pub(crate) fn rehearse_due(
         }
     };
     let outcome = rehearse_within(state, player, combo, deadline).unwrap_or(Rehearsal::NoWin);
-    tracing::debug!(?player, combo = %combo.id, ?outcome, "combo rehearsed");
+    // A rehearsal the clock cut short showed nothing either way. It is not kept
+    // as an answer, so a later turn may try the combo again and a host is not
+    // handed a result that depends on how fast this machine is.
+    let cut_short = outcome == Rehearsal::NoWin && deadline.expired();
+    tracing::debug!(?player, combo = %combo.id, ?outcome, cut_short, "combo rehearsed");
     if let Ok(mut plans) = session.combo_plans.write() {
         let plan = plans.entry(player).or_default();
-        plan.known.insert(combo.id.clone(), outcome);
+        if !cut_short {
+            plan.known.insert(combo.id.clone(), outcome);
+        }
         plan.last_turn = Some(state.turn_number);
         plan.run += 1;
     }
 }
 
-/// Whether `player`'s next decision at `state` would rehearse a combo or search
-/// for a combo line. Both need the game's loop detection to be interactive, so
-/// a host that shows the AI a copy of the game with detection off (it is
-/// slower) asks this first and hands over the game itself when it is true.
-pub fn combo_work_due(state: &GameState, session: &AiSession, player: PlayerId) -> bool {
+/// Whether `player`'s next decision at `state`, made with `config`, would
+/// rehearse a combo or search for a combo line. Both need the game's loop
+/// detection to be interactive, so a host that shows the AI a copy of the game
+/// with detection off (it is slower) asks this first and hands over the game
+/// itself when it is true. The later steps of a line already found need no
+/// such care: they are read from the session.
+pub fn combo_work_due(
+    state: &GameState,
+    session: &AiSession,
+    player: PlayerId,
+    config: &AiConfig,
+) -> bool {
     let Some(combos) = session.combos.get(&player) else {
         return false;
     };
+    // The configurations that never search for a line (`certify`).
+    if !config.play_lookahead
+        || config.search.determinization_samples != 0
+        || config.search.time_budget_ms == Some(0)
+    {
+        return false;
+    }
     !combos.is_empty()
         && certify::at_open_main(state, player)
         && (next_to_rehearse(state, player, session, combos).is_some()
