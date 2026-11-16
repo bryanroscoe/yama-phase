@@ -9,6 +9,7 @@ mod board_wipe_telegraph;
 mod card_advantage;
 mod chalice_avoidance;
 mod combat_withdrawal;
+mod combo_hold;
 pub(crate) mod combo_line;
 mod commander_zone_return;
 mod condition_gated_activation;

@@ -184,6 +184,8 @@ pub enum PolicyId {
     /// CR 106.4: a ritual's mana empties at end of step/phase — don't cast one
     /// when nothing in reach can spend it in this window.
     RitualSink,
+    /// Hold a rehearsed combo's payoff until the rest of the combo is in place.
+    ComboHold,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -451,6 +453,7 @@ impl Default for PolicyRegistry {
             Box::new(GraveyardAuthorityPolicy),
             Box::new(super::pile_partition::PilePartitionPolicy),
             Box::new(super::ritual_sink::RitualSinkPolicy),
+            Box::new(super::combo_hold::ComboHoldPolicy),
         ];
         Self::from_policies(policies)
     }

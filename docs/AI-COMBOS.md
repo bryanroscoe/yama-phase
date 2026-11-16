@@ -143,11 +143,44 @@ Oracle combo does not win, and the game is untouched),
 `a_seat_rehearses_a_combo_at_its_first_main_phase_decision`, and in `policies/tutor.rs`
 `a_search_takes_the_card_a_rehearsed_combo_is_missing`.
 
+### Holding the payoff, and whole games (2026-11-16)
+
+A first whole-game measurement showed the seat fetching its pieces twice as often and
+winning no more. Traced games showed why: it fetched Walking Ballista, cast it for X=1 as a
+small creature and lost it, then assembled the mana loop with nothing to spend it on. Three
+changes followed:
+
+- **Hold the payoff** (`policies/combo_hold.rs`, `combo::plan::cards_to_hold`). While a seat
+  is putting together a combo it rehearsed and won with, and the missing cards can still be
+  found, it does not cast the spell that finishes it, nor a combo card used up as it is cast.
+  A rejection, not a score: at an ordinary root decision the search weighs a policy score at
+  a tenth of the position it leads to, so a strong-band penalty did not stop the cast (gate:
+  `a_seat_holds_its_payoff_until_the_combo_is_in_place`).
+- **A card in the graveyard or exile is gone.** It no longer counts as held when the seat
+  decides what it is missing, and a combo with such a card is not pursued.
+- **Rehearse with a clean hand.** `practice_position` now leaves the seat holding exactly the
+  staged cards, so a rehearsal no longer answers differently with the hand the seat happens
+  to hold. A payoff the winning line casts is named whichever pass found it.
+
+`deck_knowledge_in_whole_games` (ignored; a measurement) plays whole two-player games at
+20 life, Medium AI on both seats, loop detection on: a blue-black list with Basalt Monolith,
+Power Artifact and Walking Ballista (one each), six open tutors and two Fabricate, against
+a red-green creature deck. The same 40 seeds for each kind of knowledge:
+
+| The seat was told | Wins | Combo assembled | Loop declared | Pieces tutored | AI s/game |
+|---|---|---|---|---|---|
+| Nothing | 1 | 3 | 2 | 18 | 1.0 |
+| The combo, rehearsal showed no win | 2 | 3 | 3 | 18 | 1.8 |
+| The combo, rehearsed in the game | 8 | 16 | 9 | 53 | 4.5 |
+
+Seed for seed against the second row, six games turned into wins and none the other way.
+The list is weak against that opponent either way: most games are still lost. The rehearsal
+costs time in every game until a host keeps its results (Yama does, per list).
+
 Not done yet: mulligans, holding a piece back from a discard or a block, protecting the
 turn the combo goes off, and counting progress in the position score. A rehearsal costs up
-to two searches; in a lab game that is paid in every game until the host keeps the
-results. A rehearsal is one position: a card an opponent has in play when it runs can
-decide the answer for the whole game. One the clock cuts short is not kept.
+to three searches. A rehearsal is one position: a card an opponent has in play when it runs
+can decide the answer for the whole game. One the clock cuts short is not kept.
 
 What the four misses need:
 

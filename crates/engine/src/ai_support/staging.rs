@@ -18,7 +18,9 @@ pub struct PracticeSetup<'a> {
     /// Cards put onto the battlefield untapped, as though they had entered on an
     /// earlier turn: nothing triggers on their entering.
     pub battlefield: &'a [ObjectId],
-    /// Cards put into the player's hand.
+    /// The player's hand: exactly these cards. Anything else in it is put into
+    /// the library, so what the player happens to hold doesn't change what the
+    /// position shows.
     pub hand: &'a [ObjectId],
     /// How many lands from the player's library are put onto the battlefield
     /// untapped beside them, one of each name before a second of any, basic
@@ -75,6 +77,24 @@ pub fn practice_position(
         }
     }
     let mut events = Vec::new();
+    let held: Vec<ObjectId> = copy
+        .players
+        .iter()
+        .find(|seat| seat.id == player)
+        .map(|seat| seat.hand.iter().copied().collect())
+        .unwrap_or_default();
+    for id in held {
+        if setup.hand.contains(&id) {
+            continue;
+        }
+        let request = ZoneMoveRequest::effect(id, Zone::Library, id);
+        if !matches!(
+            move_object(&mut copy, request, &mut events),
+            ZoneMoveResult::Done
+        ) {
+            return None;
+        }
+    }
     for id in setup.hand {
         if copy.objects.get(id)?.zone == Zone::Hand {
             continue;
