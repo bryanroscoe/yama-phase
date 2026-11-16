@@ -28,10 +28,11 @@
 //! them ahead of any other card, and a spell that searches is worth more while
 //! there is one to find (`policies/tutor.rs`).
 //!
-//! While it puts a combo together, [`cards_to_hold`] names the spells it should
-//! not cast yet: the payoff, and the combo's cards that are used up as they are
-//! cast. Cast early for what they do alone, they would be gone when the rest
-//! arrives (`policies/combo_hold.rs`).
+//! While it puts a combo together, and once it holds it, [`cards_to_hold`]
+//! names the cards it should not cast for what they do alone: the ones the
+//! rehearsal's winning line cast (the payoff, an Aura, the spell or creature
+//! whose arrival is the combo). Cast early, they would be gone when the line
+//! could be played (`policies/combo_hold.rs`).
 //!
 //! A combo with a card in the graveyard or in exile is not pursued: the seat
 //! cannot cast it from there.
@@ -91,8 +92,15 @@ const MAX_PAYOFFS: usize = 6;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rehearsal {
     /// The seat won the practice game. `with` names cards outside the combo
-    /// that the win needed: the spell that spent what the combo made.
-    Wins { with: Vec<String> },
+    /// that the win needed: the spell that spent what the combo made. `cast`
+    /// names the combo's own cards the winning line cast from hand (an Aura, a
+    /// spell, a creature whose entering is the combo). Those and `with` are
+    /// held in hand until the line can be played.
+    Wins {
+        with: Vec<String>,
+        #[serde(default)]
+        cast: Vec<String>,
+    },
     /// The seat did not find a win.
     NoWin,
 }
@@ -150,7 +158,7 @@ fn rehearse_within(
             .filter(|object| !battlefield.contains(&object.id))
             .collect();
         match rehearse_set_out(state, player, combo, &battlefield, &hand, deadline) {
-            SetOut::Won(with) => return Some(Rehearsal::Wins { with }),
+            SetOut::Won { with, cast } => return Some(Rehearsal::Wins { with, cast }),
             // A combo that makes its resource and has nothing to spend it on
             // would make it again from hand.
             SetOut::HeldResource => break,
@@ -162,8 +170,11 @@ fn rehearse_within(
 
 /// How one way of setting a combo out went.
 enum SetOut {
-    /// The seat won, with these cards from outside the combo.
-    Won(Vec<String>),
+    /// The seat won: [`line_cards`].
+    Won {
+        with: Vec<String>,
+        cast: Vec<String>,
+    },
     /// The seat held an unbounded resource and found no win, with or without
     /// the deck's X spells.
     HeldResource,
@@ -204,9 +215,7 @@ fn rehearse_set_out(
     let (outcome, held_resource) =
         certify::search_line(&practice, player, &combo.cards, deadline, REHEARSAL_WORK);
     if let SearchOutcome::Found(steps) = &outcome {
-        // The seat's own hand is in the copy too, so a payoff may already be
-        // there; it is as much a part of the win as one added below.
-        return SetOut::Won(payoffs_cast(state, steps, &combo.cards));
+        return line_cards(state, steps, &combo.cards);
     }
     if !held_resource {
         return SetOut::Nothing;
@@ -233,39 +242,47 @@ fn rehearse_set_out(
     let SearchOutcome::Found(steps) = outcome else {
         return SetOut::HeldResource;
     };
-    SetOut::Won(payoffs_cast(state, &steps, &combo.cards))
+    line_cards(state, &steps, &combo.cards)
 }
 
-/// The cards outside the combo that a winning line cast and that are cast for
-/// X: the spells that spent what the combo made. Named as `state` names them;
-/// a practice copy keeps the ids of the game it was made from.
-fn payoffs_cast(state: &GameState, steps: &[certify::LineStep], named: &[String]) -> Vec<String> {
+/// What a winning line cast: the combo's own cards (`cast`), and the cards
+/// outside it that are cast for X (`with`: the spells that spent what the combo
+/// made). Named as `state` names them; a practice copy keeps the ids of the
+/// game it was made from.
+fn line_cards(state: &GameState, steps: &[certify::LineStep], named: &[String]) -> SetOut {
     let mut with: Vec<String> = Vec::new();
+    let mut cast: Vec<String> = Vec::new();
     for id in steps.iter().filter_map(certify::LineStep::cast) {
         let Some(object) = state.objects.get(&id) else {
             continue;
         };
-        if object.mana_cost.has_x()
-            && !named
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(&object.name))
-            && !with.contains(&object.name)
-        {
-            with.push(object.name.clone());
+        let piece = named
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&object.name));
+        let list = if piece {
+            &mut cast
+        } else if object.mana_cost.has_x() {
+            &mut with
+        } else {
+            continue;
+        };
+        if !list.contains(&object.name) {
+            list.push(object.name.clone());
         }
     }
-    with
+    SetOut::Won { with, cast }
 }
 
 /// `player`'s copy of the card named `name`: one already on the battlefield if
-/// there is one, then one in hand, then anywhere else. The lowest id of equals,
-/// so the answer does not depend on map order.
+/// there is one, then one in hand, then one in the library (which a rehearsal
+/// can set out), then anywhere else. The lowest id of equals, so the answer
+/// does not depend on map order.
 fn held_copy<'a>(state: &'a GameState, player: PlayerId, name: &str) -> Option<&'a GameObject> {
     let rank = |object: &GameObject| match object.zone {
         Zone::Battlefield => 0,
         Zone::Hand => 1,
-        Zone::Library => 3,
-        _ => 2,
+        Zone::Library => 2,
+        _ => 3,
     };
     state
         .objects
@@ -418,6 +435,9 @@ pub(crate) fn wanted_cards(
 ) -> HashMap<String, f64> {
     let mut wanted: HashMap<String, f64> = HashMap::new();
     for pursuit in pursuits(state, session, player) {
+        if pursuit.missing.is_empty() {
+            continue;
+        }
         let weight = 1.0 / pursuit.missing.len() as f64;
         for card in pursuit.missing {
             let entry = wanted.entry(card.to_lowercase()).or_insert(0.0);
@@ -427,12 +447,12 @@ pub(crate) fn wanted_cards(
     wanted
 }
 
-/// The cards in `player`'s hand it should not cast yet, by lowercased name: for
-/// each combo it is still putting together ([`wanted_cards`]), the spells the
-/// win spends what the combo makes on, and the combo's own cards that are used
-/// up as they are cast (instants, sorceries, anything cast for X). Cast early
-/// for what they do alone, they are gone when the rest arrives. Empty once
-/// every card is in place: the line is then played as a whole, or not at all.
+/// The cards `player` should not cast yet, by lowercased name: for each combo
+/// it is putting together or holds together ([`pursuits`]), the cards the
+/// rehearsal's winning line cast (the combo's own, and the spell that spent
+/// what it made). Cast early for what they do alone, they are gone when the
+/// line could be played. The line itself casts them: its steps are taken
+/// before any policy is asked.
 pub(crate) fn cards_to_hold(
     state: &GameState,
     session: &AiSession,
@@ -440,37 +460,27 @@ pub(crate) fn cards_to_hold(
 ) -> HashSet<String> {
     let mut hold: HashSet<String> = HashSet::new();
     for pursuit in pursuits(state, session, player) {
-        for card in &pursuit.with {
+        for card in pursuit.with.iter().chain(&pursuit.cast) {
             hold.insert(card.to_lowercase());
-        }
-        for card in &pursuit.cards {
-            let used_up = held_copy(state, player, card).is_some_and(|object| {
-                object.zone == Zone::Hand
-                    && (object.mana_cost.has_x()
-                        || object.card_types.core_types.contains(&CoreType::Instant)
-                        || object.card_types.core_types.contains(&CoreType::Sorcery))
-            });
-            if used_up {
-                hold.insert(card.to_lowercase());
-            }
         }
     }
     hold
 }
 
-/// A combo `player` rehearsed and won with and is still putting together.
+/// A combo `player` rehearsed and won with and is putting together, or holds
+/// together.
 struct Pursuit {
-    cards: Vec<String>,
     with: Vec<String>,
-    /// The cards of `cards` and `with` not yet in reach, all of them still in
-    /// the library to be found. Never empty.
+    cast: Vec<String>,
+    /// The cards of the combo and `with` not yet in reach, all of them still in
+    /// the library to be found. Empty once every card is in reach.
     missing: Vec<String>,
 }
 
-/// Every combo `player` is putting together: one a rehearsal won with, at least
-/// one card not yet in reach, and every card that is not in reach still in the
-/// library. A combo with a card gone to the graveyard or exile is not pursued:
-/// the seat cannot cast it from there.
+/// Every combo `player` is putting together or holds together: one a
+/// rehearsal won with, every card of which is in reach or still in the library.
+/// A combo with a card gone to the graveyard or exile is not pursued: the seat
+/// cannot cast it from there.
 fn pursuits(state: &GameState, session: &AiSession, player: PlayerId) -> Vec<Pursuit> {
     let Some(combos) = session.combos.get(&player) else {
         return Vec::new();
@@ -490,7 +500,7 @@ fn pursuits(state: &GameState, session: &AiSession, player: PlayerId) -> Vec<Pur
     };
     let mut found = Vec::new();
     for combo in combos.iter() {
-        let Some(Rehearsal::Wins { with }) = plan.known.get(&combo.id) else {
+        let Some(Rehearsal::Wins { with, cast }) = plan.known.get(&combo.id) else {
             continue;
         };
         let missing: Vec<String> = combo
@@ -500,12 +510,12 @@ fn pursuits(state: &GameState, session: &AiSession, player: PlayerId) -> Vec<Pur
             .filter(|card| !in_reach(state, player, card))
             .cloned()
             .collect();
-        if missing.is_empty() || !missing.iter().all(|card| in_library(card)) {
+        if !missing.iter().all(|card| in_library(card)) {
             continue;
         }
         found.push(Pursuit {
-            cards: combo.cards.clone(),
             with: with.clone(),
+            cast: cast.clone(),
             missing,
         });
     }

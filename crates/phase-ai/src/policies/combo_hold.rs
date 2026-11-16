@@ -2,19 +2,18 @@
 //!
 //! A seat that rehearsed a combo and won with it ([`crate::combo::plan`]) is
 //! putting it together. Its payoff (Walking Ballista behind a mana loop) and
-//! the combo's own cards that are used up as they are cast score well alone:
-//! Ballista for X=1 is a fine creature. Cast that way it is gone when the rest
-//! arrives, and the loop has nothing to spend its mana on. This policy rejects
-//! such a cast while the combo is still missing a card the seat can find.
-//! Once every card is in place it says nothing: the certified line plays them.
-//! Once a missing card can no longer be found (it was exiled, or the library
-//! ran out of it), the combo is not pursued and the card is free again.
+//! the combo's own cards its winning line casts score well alone: Ballista for
+//! X=1 is a fine creature. Cast that way it is gone when the line could be
+//! played, and the loop has nothing to spend its mana on. This policy rejects
+//! such a cast while the seat is putting the combo together, and once it holds
+//! it: the certified line casts them itself, before any policy is asked. Once
+//! a missing card can no longer be found (it was exiled, or the library ran out
+//! of it), the combo is not pursued and the cards are free again.
 //!
 //! A rejection, not a score: at an ordinary root decision the search weighs a
 //! policy score at a tenth of the position it leads to, and a small creature
 //! on the board outweighs any score in the strong band there.
 
-use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -46,10 +45,12 @@ impl TacticalPolicy for ComboHoldPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let GameAction::CastSpell { object_id, .. } = &ctx.candidate.action else {
-            return PolicyVerdict::neutral(PolicyReason::new("combo_hold_not_a_cast"));
-        };
-        let Some(object) = ctx.state.objects.get(object_id) else {
+        // Every way of casting a card, not only from hand.
+        let Some(object) = crate::cast_facts::cast_object_for_action(
+            ctx.state,
+            &ctx.candidate.action,
+            ctx.ai_player,
+        ) else {
             return PolicyVerdict::neutral(PolicyReason::new("combo_hold_not_a_cast"));
         };
         let hold =

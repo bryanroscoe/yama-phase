@@ -769,7 +769,10 @@ fn a_rehearsal_shows_which_combos_a_seat_can_win_with() {
             P0,
             &combo("damage", &["Heliod, Sun-Crowned", "Walking Ballista"])
         ),
-        Some(Rehearsal::Wins { with: Vec::new() })
+        Some(Rehearsal::Wins {
+            with: Vec::new(),
+            cast: vec!["Walking Ballista".to_string()]
+        })
     );
     assert_eq!(
         rehearse(
@@ -778,7 +781,8 @@ fn a_rehearsal_shows_which_combos_a_seat_can_win_with() {
             &combo("mana", &["Basalt Monolith", "Power Artifact"])
         ),
         Some(Rehearsal::Wins {
-            with: vec!["Walking Ballista".to_string()]
+            with: vec!["Walking Ballista".to_string()],
+            cast: vec!["Power Artifact".to_string()]
         })
     );
     assert_eq!(
@@ -842,7 +846,13 @@ fn a_seat_rehearses_a_combo_at_its_first_main_phase_decision() {
 
     assert_eq!(
         session.rehearsals(P0),
-        vec![("damage".to_string(), Rehearsal::Wins { with: Vec::new() })]
+        vec![(
+            "damage".to_string(),
+            Rehearsal::Wins {
+                with: Vec::new(),
+                cast: vec!["Walking Ballista".to_string()]
+            }
+        )]
     );
     assert!(!combo_work_due(&state, &session, P0, &config));
 
@@ -862,7 +872,13 @@ fn a_seat_rehearses_a_combo_at_its_first_main_phase_decision() {
         )
         .with_rehearsals(
             P0,
-            [("damage".to_string(), Rehearsal::Wins { with: Vec::new() })],
+            [(
+                "damage".to_string(),
+                Rehearsal::Wins {
+                    with: Vec::new(),
+                    cast: vec!["Walking Ballista".to_string()],
+                },
+            )],
         );
     assert!(!combo_work_due(&fresh, &told, P0, &config));
 }
@@ -870,11 +886,20 @@ fn a_seat_rehearses_a_combo_at_its_first_main_phase_decision() {
 /// What P0 casts in its main phase with Walking Ballista in hand, four lands and nothing else
 /// to do, the combo's other two cards still in its library. Plays P0's decisions until it
 /// passes with an empty stack.
-fn cast_with_ballista_in_hand(db: &CardDatabase, knows: Option<Rehearsal>) -> Vec<String> {
+fn cast_with_ballista_in_hand(
+    db: &CardDatabase,
+    knows: Option<Rehearsal>,
+    pieces_in_hand: bool,
+) -> Vec<String> {
     let mut board = Board::new(db);
     board.hand("Walking Ballista");
-    board.library("Basalt Monolith");
-    board.library("Power Artifact");
+    for piece in ["Basalt Monolith", "Power Artifact"] {
+        if pieces_in_hand {
+            board.hand(piece);
+        } else {
+            board.library(piece);
+        }
+    }
     board.lands("Wastes", 4);
     let mut state = board.build();
     state.loop_detection = LoopDetectionMode::Interactive;
@@ -913,25 +938,36 @@ fn cast_with_ballista_in_hand(db: &CardDatabase, knows: Option<Rehearsal>) -> Ve
 
 /// A seat putting a combo together keeps the spell that will spend what the combo makes: with
 /// Basalt Monolith and Power Artifact still to find, it holds Walking Ballista instead of
-/// casting it as a small creature. A seat that knows nothing of the combo, or whose rehearsal
-/// showed no win, casts it.
+/// casting it as a small creature, and it still holds it once every card is in hand but the
+/// line can't be played yet. A seat that knows nothing of the combo, or whose rehearsal showed
+/// no win, casts it.
 #[test]
 fn a_seat_holds_its_payoff_until_the_combo_is_in_place() {
     let db = integration_card_db();
     let wins = Rehearsal::Wins {
         with: vec!["Walking Ballista".to_string()],
+        cast: vec!["Power Artifact".to_string()],
     };
     assert_eq!(
-        cast_with_ballista_in_hand(&db, Some(wins)),
+        cast_with_ballista_in_hand(&db, Some(wins.clone()), false),
         Vec::<String>::new()
     );
     assert_eq!(
-        cast_with_ballista_in_hand(&db, None),
+        cast_with_ballista_in_hand(&db, None, false),
         vec!["Walking Ballista".to_string()]
     );
     assert_eq!(
-        cast_with_ballista_in_hand(&db, Some(Rehearsal::NoWin)),
+        cast_with_ballista_in_hand(&db, Some(Rehearsal::NoWin), false),
         vec!["Walking Ballista".to_string()]
+    );
+    // Every card in hand, and no blue mana for Power Artifact: no line yet, and the payoff is
+    // still held. Basalt Monolith, which the line does not cast, may be played.
+    let held = cast_with_ballista_in_hand(&db, Some(wins), true);
+    assert!(
+        !held
+            .iter()
+            .any(|card| card == "Walking Ballista" || card == "Power Artifact"),
+        "{held:?}"
     );
 }
 

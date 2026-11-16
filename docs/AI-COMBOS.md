@@ -151,16 +151,18 @@ small creature and lost it, then assembled the mana loop with nothing to spend i
 changes followed:
 
 - **Hold the payoff** (`policies/combo_hold.rs`, `combo::plan::cards_to_hold`). While a seat
-  is putting together a combo it rehearsed and won with, and the missing cards can still be
-  found, it does not cast the spell that finishes it, nor a combo card used up as it is cast.
+  is putting together a combo it rehearsed and won with, or holds every card of it, it does
+  not cast the cards the rehearsal's winning line cast (`Rehearsal::Wins::cast`: an Aura, a
+  spell, a creature whose arrival is the combo) nor the payoff (`with`): the line casts them.
   A rejection, not a score: at an ordinary root decision the search weighs a policy score at
   a tenth of the position it leads to, so a strong-band penalty did not stop the cast (gate:
   `a_seat_holds_its_payoff_until_the_combo_is_in_place`).
 - **A card in the graveyard or exile is gone.** It no longer counts as held when the seat
   decides what it is missing, and a combo with such a card is not pursued.
-- **Rehearse with a clean hand.** `practice_position` now leaves the seat holding exactly the
-  staged cards, so a rehearsal no longer answers differently with the hand the seat happens
-  to hold. A payoff the winning line casts is named whichever pass found it.
+- **Rehearse with a clean hand.** `practice_position` now leaves the seat holding the staged
+  cards and nothing else it can put back (a commander stays), so a rehearsal no longer
+  answers differently with the hand the seat happens to hold. A library copy of a piece is
+  staged before one in the graveyard.
 
 `deck_knowledge_in_whole_games` (ignored; a measurement) plays whole two-player games at
 20 life, Medium AI on both seats, loop detection on: a blue-black list with Basalt Monolith,
@@ -171,9 +173,9 @@ a red-green creature deck. The same 40 seeds for each kind of knowledge:
 |---|---|---|---|---|---|
 | Nothing | 1 | 3 | 2 | 18 | 1.0 |
 | The combo, rehearsal showed no win | 2 | 3 | 3 | 18 | 1.8 |
-| The combo, rehearsed in the game | 8 | 16 | 9 | 53 | 4.5 |
+| The combo, rehearsed in the game | 11 | 16 | 11 | 53 | 3.5 |
 
-Seed for seed against the second row, six games turned into wins and none the other way.
+Seed for seed against the second row, nine games turned into wins and none the other way.
 The list is weak against that opponent either way: most games are still lost. The rehearsal
 costs time in every game until a host keeps its results (Yama does, per list).
 

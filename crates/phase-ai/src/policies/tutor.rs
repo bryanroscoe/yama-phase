@@ -812,7 +812,10 @@ mod tests {
 
         let wanted = wanted_cards(
             &state,
-            &known(Rehearsal::Wins { with: Vec::new() }),
+            &known(Rehearsal::Wins {
+                with: Vec::new(),
+                cast: Vec::new(),
+            }),
             PlayerId(0),
         );
         assert_eq!(wanted.get("last piece"), Some(&1.0));
@@ -822,6 +825,7 @@ mod tests {
         let with_payoff = wanted_cards(
             &state,
             &known(Rehearsal::Wins {
+                cast: Vec::new(),
                 with: vec!["Sink".to_string()],
             }),
             PlayerId(0),
