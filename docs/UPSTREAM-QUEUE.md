@@ -62,6 +62,8 @@ finished resolution had opened.
 | fix(ai): time board wipes by the leading opponent's board in a free-for-all | work | Apply the sweeper's filters to the leader's count too |
 | feat(engine): the AI's decision contract admits priority mana abilities and every deliverable shortcut count | work | Engine tests for both arms; run through `/engine-implementer`. Touches the area of upstream #10041 |
 | feat(ai): find and play the certified line of a catalogued combo | work | Needs maintainer agreement on a host-supplied catalog first; unit tests for `PlannedLine` and `SearchMemo`; `cargo ai-gate` report. Plan and measurements in `AI-COMBOS.md` |
+| feat(engine): `ai_support::practice_position`, a copy of a game with a player's cards set out | work | Engine test of its own; run through `/engine-implementer`. Goes with the rehearsal below |
+| feat(ai): a seat rehearses its combos, tutors for the missing cards and holds the payoff | work | After the two above. Whole-game measurement in `AI-COMBOS.md`; `cargo ai-gate` report |
 
 ## Rules and parser
 

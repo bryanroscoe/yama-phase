@@ -18,7 +18,10 @@ pub struct PracticeSetup<'a> {
     /// Cards put onto the battlefield untapped, as though they had entered on an
     /// earlier turn: nothing triggers on their entering.
     pub battlefield: &'a [ObjectId],
-    /// Cards put into the player's hand.
+    /// The player's hand: these cards. Anything else in it is put into the
+    /// library, so what the player happens to hold doesn't change what the
+    /// position shows; a card that can't go there without a choice being made
+    /// for it (a commander, CR 903.9b) stays in hand.
     pub hand: &'a [ObjectId],
     /// How many lands from the player's library are put onto the battlefield
     /// untapped beside them, one of each name before a second of any, basic
@@ -29,7 +32,8 @@ pub struct PracticeSetup<'a> {
 /// A copy of `state` with `setup` applied for `player`, or `None` when it cannot
 /// be built: a card is not `player`'s, is somewhere other than their library or
 /// hand, or cannot enter without a choice being made for it (an "as this enters"
-/// choice, an Aura with nothing chosen to enchant).
+/// choice, an Aura with nothing chosen to enchant), or a card for the hand
+/// cannot be put there.
 ///
 /// Every move goes through the zone-change pipeline, so replacement effects on
 /// entering apply. The events of the moves are dropped, which is what makes the
@@ -75,6 +79,26 @@ pub fn practice_position(
         }
     }
     let mut events = Vec::new();
+    let held: Vec<ObjectId> = copy
+        .players
+        .iter()
+        .find(|seat| seat.id == player)
+        .map(|seat| seat.hand.iter().copied().collect())
+        .unwrap_or_default();
+    for id in held {
+        if setup.hand.contains(&id) {
+            continue;
+        }
+        // Tried on a copy: a move that stops for a choice leaves it pending.
+        let mut trial = copy.clone();
+        let request = ZoneMoveRequest::effect(id, Zone::Library, id);
+        if matches!(
+            move_object(&mut trial, request, &mut events),
+            ZoneMoveResult::Done
+        ) {
+            copy = trial;
+        }
+    }
     for id in setup.hand {
         if copy.objects.get(id)?.zone == Zone::Hand {
             continue;

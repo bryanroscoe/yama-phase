@@ -769,7 +769,10 @@ fn a_rehearsal_shows_which_combos_a_seat_can_win_with() {
             P0,
             &combo("damage", &["Heliod, Sun-Crowned", "Walking Ballista"])
         ),
-        Some(Rehearsal::Wins { with: Vec::new() })
+        Some(Rehearsal::Wins {
+            with: Vec::new(),
+            cast: vec!["Walking Ballista".to_string()]
+        })
     );
     assert_eq!(
         rehearse(
@@ -778,7 +781,8 @@ fn a_rehearsal_shows_which_combos_a_seat_can_win_with() {
             &combo("mana", &["Basalt Monolith", "Power Artifact"])
         ),
         Some(Rehearsal::Wins {
-            with: vec!["Walking Ballista".to_string()]
+            with: vec!["Walking Ballista".to_string()],
+            cast: vec!["Power Artifact".to_string()]
         })
     );
     assert_eq!(
@@ -842,7 +846,13 @@ fn a_seat_rehearses_a_combo_at_its_first_main_phase_decision() {
 
     assert_eq!(
         session.rehearsals(P0),
-        vec![("damage".to_string(), Rehearsal::Wins { with: Vec::new() })]
+        vec![(
+            "damage".to_string(),
+            Rehearsal::Wins {
+                with: Vec::new(),
+                cast: vec!["Walking Ballista".to_string()]
+            }
+        )]
     );
     assert!(!combo_work_due(&state, &session, P0, &config));
 
@@ -862,9 +872,103 @@ fn a_seat_rehearses_a_combo_at_its_first_main_phase_decision() {
         )
         .with_rehearsals(
             P0,
-            [("damage".to_string(), Rehearsal::Wins { with: Vec::new() })],
+            [(
+                "damage".to_string(),
+                Rehearsal::Wins {
+                    with: Vec::new(),
+                    cast: vec!["Walking Ballista".to_string()],
+                },
+            )],
         );
     assert!(!combo_work_due(&fresh, &told, P0, &config));
+}
+
+/// What P0 casts in its main phase with Walking Ballista in hand, four lands and nothing else
+/// to do, the combo's other two cards still in its library. Plays P0's decisions until it
+/// passes with an empty stack.
+fn cast_with_ballista_in_hand(
+    db: &CardDatabase,
+    knows: Option<Rehearsal>,
+    pieces_in_hand: bool,
+) -> Vec<String> {
+    let mut board = Board::new(db);
+    board.hand("Walking Ballista");
+    for piece in ["Basalt Monolith", "Power Artifact"] {
+        if pieces_in_hand {
+            board.hand(piece);
+        } else {
+            board.library(piece);
+        }
+    }
+    board.lands("Wastes", 4);
+    let mut state = board.build();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let entry = combo("mana", &["Basalt Monolith", "Power Artifact"]);
+    let mut session = AiSession::from_game(&state);
+    if let Some(known) = knows {
+        session = session
+            .with_combos(P0, vec![entry.clone()])
+            .with_rehearsals(P0, [(entry.id.clone(), known)]);
+    }
+    let session = Arc::new(session);
+    let config =
+        create_config_for_players(AiDifficulty::Medium, Platform::Native, 2).into_measurement(SEED);
+    let ai_players: HashSet<PlayerId> = [P0].into_iter().collect();
+    let ai_configs: HashMap<PlayerId, _> = [(P0, config)].into_iter().collect();
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    let mut cast = Vec::new();
+    for _ in 0..20 {
+        let passing_on_empty = state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0);
+        let before = state.clone();
+        let ControlFlow::Continue(result) =
+            run_ai_action(&mut state, &ai_players, &ai_configs, &mut rng, &session)
+        else {
+            break;
+        };
+        if let GameAction::CastSpell { object_id, .. } = &result.action {
+            cast.push(object_name(&before, *object_id));
+        }
+        if passing_on_empty && matches!(result.action, GameAction::PassPriority) {
+            break;
+        }
+    }
+    cast
+}
+
+/// A seat putting a combo together keeps the spell that will spend what the combo makes: with
+/// Basalt Monolith and Power Artifact still to find, it holds Walking Ballista instead of
+/// casting it as a small creature, and it still holds it once every card is in hand but the
+/// line can't be played yet. A seat that knows nothing of the combo, or whose rehearsal showed
+/// no win, casts it.
+#[test]
+fn a_seat_holds_its_payoff_until_the_combo_is_in_place() {
+    let db = integration_card_db();
+    let wins = Rehearsal::Wins {
+        with: vec!["Walking Ballista".to_string()],
+        cast: vec!["Power Artifact".to_string()],
+    };
+    assert_eq!(
+        cast_with_ballista_in_hand(&db, Some(wins.clone()), false),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        cast_with_ballista_in_hand(&db, None, false),
+        vec!["Walking Ballista".to_string()]
+    );
+    assert_eq!(
+        cast_with_ballista_in_hand(&db, Some(Rehearsal::NoWin), false),
+        vec!["Walking Ballista".to_string()]
+    );
+    // Every card in hand, and no blue mana for Power Artifact: no line yet, and the payoff is
+    // still held. Basalt Monolith, which the line does not cast, may be played.
+    let held = cast_with_ballista_in_hand(&db, Some(wins), true);
+    assert!(
+        !held
+            .iter()
+            .any(|card| card == "Walking Ballista" || card == "Power Artifact"),
+        "{held:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1434,4 +1538,339 @@ fn assembled_combos_found_by_a_plain_search() {
         }
     }
     println!("\nfound {found} of {}", CASES.len());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Whole games: does knowing the deck's combo change how the seat does?
+// ---------------------------------------------------------------------------------------------
+
+/// The combo seat's list, blue-black: Basalt Monolith and Power Artifact (the catalogued combo,
+/// one copy each), Walking Ballista (the payoff the catalog does not name, one copy), eight
+/// tutors (six that find any card), seven card-draw spells, eighteen fair creatures and 24 lands.
+fn knowledge_combo_deck() -> Vec<String> {
+    let mut deck: Vec<String> = Vec::new();
+    let mut add = |name: &str, copies: usize| {
+        deck.extend(std::iter::repeat_n(name.to_string(), copies));
+    };
+    add("Basalt Monolith", 1);
+    add("Power Artifact", 1);
+    add("Walking Ballista", 1);
+    add("Demonic Tutor", 4);
+    add("Beseech the Mirror", 2);
+    add("Fabricate", 2);
+    add("Sign in Blood", 3);
+    add("Divination", 2);
+    add("Preordain", 2);
+    add("Walking Corpse", 4);
+    add("Gifted Aetherborn", 4);
+    add("Barony Vampire", 4);
+    add("Dross Crocodile", 3);
+    add("Bane Alley Blackguard", 3);
+    add("Island", 12);
+    add("Swamp", 12);
+    deck
+}
+
+/// The other seat: a fair red-green creature deck.
+fn knowledge_fair_deck() -> Vec<String> {
+    let mut deck: Vec<String> = Vec::new();
+    let mut add = |name: &str, copies: usize| {
+        deck.extend(std::iter::repeat_n(name.to_string(), copies));
+    };
+    add("Llanowar Elves", 4);
+    add("Grizzly Bears", 4);
+    add("Balduvian Bears", 4);
+    add("Centaur Courser", 4);
+    add("Alpine Grizzly", 4);
+    add("Hill Giant", 4);
+    add("Elvish Warrior", 4);
+    add("Lightning Bolt", 4);
+    add("Shivan Dragon", 2);
+    add("Fire Elemental", 2);
+    add("Mountain", 12);
+    add("Forest", 12);
+    deck
+}
+
+const KNOWLEDGE_PIECES: [&str; 3] = ["Basalt Monolith", "Power Artifact", "Walking Ballista"];
+
+/// What the combo seat was told before the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Knowledge {
+    /// Nothing: the AI as it was before catalogued combos.
+    None,
+    /// The catalogued combo, and that rehearsing it showed no win: it plays the combo when it
+    /// happens to hold it, and does not look for it. This is the AI before rehearsals.
+    ComboNotLookedFor,
+    /// The catalogued combo, rehearsed in the game's first turns.
+    Rehearsed,
+}
+
+#[derive(Debug, Default)]
+struct WholeGame {
+    winner: Option<PlayerId>,
+    turn: u32,
+    /// The combo seat declared a loop shortcut.
+    looped: bool,
+    /// The combo seat took one of the pieces with a library search.
+    tutored_pieces: usize,
+    /// The combo seat held all three pieces at once, somewhere it could use them.
+    assembled: bool,
+    rehearsals: Vec<(String, Rehearsal)>,
+}
+
+/// One whole two-player game at 20 life between the combo seat (P0) and the fair seat (P1),
+/// Medium AI on both, loop detection on. Odd seeds let the fair seat go first.
+fn whole_game(db: &CardDatabase, seed: u64, knowledge: Knowledge) -> WholeGame {
+    use engine::game::deck_loading::{
+        load_and_hydrate_decks, resolve_deck_list, DeckList, PlayerDeckList,
+    };
+
+    const TURN_CAP: u32 = 30;
+    const ACTION_CAP: usize = 6000;
+
+    let payload = resolve_deck_list(
+        db,
+        &DeckList {
+            player: PlayerDeckList {
+                main_deck: knowledge_combo_deck(),
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: knowledge_fair_deck(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let mut state = GameState::new_two_player(seed);
+    load_and_hydrate_decks(&mut state, &payload, Some(db));
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let first = if seed.is_multiple_of(2) { P0 } else { P1 };
+    engine::game::engine::start_game_with_starting_player(&mut state, first);
+
+    let combo = combo(
+        "basalt-power-artifact",
+        &["Basalt Monolith", "Power Artifact"],
+    );
+    let session = AiSession::from_game(&state);
+    let session = match knowledge {
+        Knowledge::None => session,
+        Knowledge::ComboNotLookedFor => session
+            .with_combos(P0, vec![combo.clone()])
+            .with_rehearsals(P0, [(combo.id.clone(), Rehearsal::NoWin)]),
+        Knowledge::Rehearsed => session.with_combos(P0, vec![combo.clone()]),
+    };
+    let session = Arc::new(session);
+    let config =
+        create_config_for_players(AiDifficulty::Medium, Platform::Native, 2).into_measurement(seed);
+    let ai_players: HashSet<PlayerId> = [P0, P1].into_iter().collect();
+    let ai_configs: HashMap<PlayerId, _> =
+        [(P0, config.clone()), (P1, config)].into_iter().collect();
+    let mut rng = SmallRng::seed_from_u64(seed);
+
+    let piece = |state: &GameState, id: &ObjectId| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|object| KNOWLEDGE_PIECES.iter().any(|name| object.name == *name))
+    };
+    let held = |state: &GameState| {
+        KNOWLEDGE_PIECES.iter().all(|name| {
+            state.objects.values().any(|object| {
+                object.name == *name
+                    && object.owner == P0
+                    && matches!(object.zone, Zone::Hand | Zone::Battlefield)
+            })
+        })
+    };
+
+    let trace = std::env::var("KNOWLEDGE_TRACE").is_ok_and(|value| value == seed.to_string());
+    let mut game = WholeGame::default();
+    let mut actions = 0;
+    loop {
+        if let WaitingFor::GameOver { winner } = &state.waiting_for {
+            game.winner = *winner;
+            break;
+        }
+        if state.turn_number > TURN_CAP || actions >= ACTION_CAP {
+            break;
+        }
+        game.assembled |= held(&state);
+        let Some((owner, _)) = phase_ai::auto_play::eligible_ai_decision(&state, &ai_players)
+        else {
+            break;
+        };
+        let searching = matches!(state.waiting_for, WaitingFor::SearchChoice { .. });
+        let before = state.clone();
+        match run_ai_action(&mut state, &ai_players, &ai_configs, &mut rng, &session) {
+            ControlFlow::Continue(result) => {
+                actions += 1;
+                if trace && owner == P0 {
+                    let touches_piece = match &result.action {
+                        GameAction::CastSpell { object_id, .. } => piece(&before, object_id),
+                        GameAction::ActivateAbility { source_id, .. } => piece(&before, source_id),
+                        GameAction::SelectCards { cards } => {
+                            cards.iter().any(|id| piece(&before, id))
+                        }
+                        GameAction::ChooseX { .. } | GameAction::DeclareShortcut { .. } => true,
+                        _ => false,
+                    };
+                    let tutor = matches!(&result.action, GameAction::CastSpell { object_id, .. }
+                        if before.objects.get(object_id).is_some_and(|o| ["Demonic Tutor", "Beseech the Mirror", "Fabricate"].contains(&o.name.as_str())));
+                    if touches_piece || tutor || searching {
+                        let zones: Vec<String> = KNOWLEDGE_PIECES
+                            .iter()
+                            .map(|name| {
+                                let zone = before
+                                    .objects
+                                    .values()
+                                    .find(|o| o.name == *name && o.owner == P0)
+                                    .map_or("-".to_string(), |o| format!("{:?}", o.zone));
+                                format!("{}={zone}", &name[..4])
+                            })
+                            .collect();
+                        eprintln!(
+                            "  t{} {:?} [{}] {}",
+                            before.turn_number,
+                            knowledge,
+                            zones.join(" "),
+                            label(&before, &result.action).unwrap_or_else(|| format!(
+                                "{:?}",
+                                result.action
+                            )
+                            .chars()
+                            .take(120)
+                            .collect())
+                        );
+                    }
+                }
+                if owner == P0 {
+                    match &result.action {
+                        GameAction::DeclareShortcut { .. } => game.looped = true,
+                        GameAction::SelectCards { cards } if searching => {
+                            game.tutored_pieces +=
+                                cards.iter().filter(|id| piece(&before, id)).count();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ControlFlow::Break(_) => break,
+        }
+    }
+    game.turn = state.turn_number;
+    game.rehearsals = session.rehearsals(P0);
+    game
+}
+
+/// Whole games, the same seeds for each kind of knowledge. Prints the combo seat's wins, how
+/// fast, how often it assembled the combo, how often it went off, and how many pieces its
+/// tutors fetched. Set `KNOWLEDGE_GAMES` for more games (default 20) and `KNOWLEDGE_THREADS`
+/// for more threads (default 4).
+#[test]
+#[ignore = "measurement, not a gate: plays whole games and prints a table"]
+fn deck_knowledge_in_whole_games() {
+    let games: u64 = std::env::var("KNOWLEDGE_GAMES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20);
+    let threads: usize = std::env::var("KNOWLEDGE_THREADS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+    let db = integration_card_db();
+    let arms = [
+        Knowledge::None,
+        Knowledge::ComboNotLookedFor,
+        Knowledge::Rehearsed,
+    ];
+    let jobs: Vec<(Knowledge, u64)> = arms
+        .iter()
+        .flat_map(|arm| (0..games).map(move |seed| (*arm, 1000 + seed)))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::<(Knowledge, u64, WholeGame, f64)>::new());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((arm, seed)) = jobs.get(index).copied() else {
+                    break;
+                };
+                let started = std::time::Instant::now();
+                let game = whole_game(&db, seed, arm);
+                let seconds = started.elapsed().as_secs_f64();
+                eprintln!(
+                    "{arm:?} seed {seed}: winner {:?} turn {} looped {} assembled {} tutored {} ({seconds:.1}s)",
+                    game.winner, game.turn, game.looped, game.assembled, game.tutored_pieces
+                );
+                results.lock().unwrap().push((arm, seed, game, seconds));
+            });
+        }
+    });
+    let results = results.into_inner().unwrap();
+    println!(
+        "\n{:<20} {:>6} {:>6} {:>10} {:>10} {:>8} {:>9} {:>9} {:>8}",
+        "knowledge",
+        "games",
+        "wins",
+        "win turn",
+        "assembled",
+        "looped",
+        "tutored",
+        "undecided",
+        "sec/game"
+    );
+    for arm in arms {
+        let rows: Vec<&(Knowledge, u64, WholeGame, f64)> =
+            results.iter().filter(|row| row.0 == arm).collect();
+        let wins: Vec<u32> = rows
+            .iter()
+            .filter(|row| row.2.winner == Some(P0))
+            .map(|row| row.2.turn)
+            .collect();
+        let mean_turn = if wins.is_empty() {
+            f64::NAN
+        } else {
+            f64::from(wins.iter().sum::<u32>()) / wins.len() as f64
+        };
+        println!(
+            "{:<20} {:>6} {:>6} {:>10.1} {:>10} {:>8} {:>9} {:>9} {:>8.1}",
+            format!("{arm:?}"),
+            rows.len(),
+            wins.len(),
+            mean_turn,
+            rows.iter().filter(|row| row.2.assembled).count(),
+            rows.iter().filter(|row| row.2.looped).count(),
+            rows.iter().map(|row| row.2.tutored_pieces).sum::<usize>(),
+            rows.iter().filter(|row| row.2.winner.is_none()).count(),
+            rows.iter().map(|row| row.3).sum::<f64>() / rows.len().max(1) as f64,
+        );
+    }
+    // The paired view: the same seed with and without the rehearsal.
+    let by_seed = |arm: Knowledge| -> HashMap<u64, bool> {
+        results
+            .iter()
+            .filter(|row| row.0 == arm)
+            .map(|row| (row.1, row.2.winner == Some(P0)))
+            .collect()
+    };
+    let before = by_seed(Knowledge::ComboNotLookedFor);
+    let after = by_seed(Knowledge::Rehearsed);
+    let gained = after
+        .iter()
+        .filter(|(seed, won)| **won && !before[*seed])
+        .count();
+    let lost = after
+        .iter()
+        .filter(|(seed, won)| !**won && before[*seed])
+        .count();
+    println!("\nsame seeds, rehearsed against not looked for: {gained} games turned into wins, {lost} wins turned into losses");
+    if let Some(row) = results.iter().find(|row| row.0 == Knowledge::Rehearsed) {
+        println!(
+            "what a rehearsal showed (seed {}): {:?}",
+            row.1, row.2.rehearsals
+        );
+    }
 }
