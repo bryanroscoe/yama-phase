@@ -41,6 +41,7 @@ impl TacticalPolicy for ComboHoldPolicy {
     ) -> Option<f32> {
         // Whether there is a combo to hold for is the session's to say, in
         // `verdict`; a seat with none gets a neutral verdict there.
+        // activation-constant: a rejection carries no weight to scale.
         Some(1.0)
     }
 

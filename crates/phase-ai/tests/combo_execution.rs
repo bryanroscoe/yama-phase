@@ -1550,7 +1550,7 @@ fn assembled_combos_found_by_a_plain_search() {
 fn knowledge_combo_deck() -> Vec<String> {
     let mut deck: Vec<String> = Vec::new();
     let mut add = |name: &str, copies: usize| {
-        deck.extend(std::iter::repeat(name.to_string()).take(copies));
+        deck.extend(std::iter::repeat_n(name.to_string(), copies));
     };
     add("Basalt Monolith", 1);
     add("Power Artifact", 1);
@@ -1575,7 +1575,7 @@ fn knowledge_combo_deck() -> Vec<String> {
 fn knowledge_fair_deck() -> Vec<String> {
     let mut deck: Vec<String> = Vec::new();
     let mut add = |name: &str, copies: usize| {
-        deck.extend(std::iter::repeat(name.to_string()).take(copies));
+        deck.extend(std::iter::repeat_n(name.to_string(), copies));
     };
     add("Llanowar Elves", 4);
     add("Grizzly Bears", 4);
@@ -1646,7 +1646,7 @@ fn whole_game(db: &CardDatabase, seed: u64, knowledge: Knowledge) -> WholeGame {
     let mut state = GameState::new_two_player(seed);
     load_and_hydrate_decks(&mut state, &payload, Some(db));
     state.loop_detection = LoopDetectionMode::Interactive;
-    let first = if seed % 2 == 0 { P0 } else { P1 };
+    let first = if seed.is_multiple_of(2) { P0 } else { P1 };
     engine::game::engine::start_game_with_starting_player(&mut state, first);
 
     let combo = combo(
